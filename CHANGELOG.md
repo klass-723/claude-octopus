@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Antigravity adapter (`agy-exec.sh`) hardened** with sandbox toggle (`OCTOPUS_AGY_SANDBOX=off`), include-dirs (`OCTOPUS_AGY_INCLUDE_DIRS`), and a single replay-from-stdin retry on silent-empty success. Opt out of retry with `OCTOPUS_AGY_NO_RETRY=1`.
+
+### Fixed
+
+- **Council now includes `agy` in provider allow-list and auto expansion.** All 6 provider-list sites updated so `--providers auto` seats agy and explicit `--providers=agy` passes validation.
+- **Council `cli_to_provider` maps `agy*` variants** to the canonical `agy` provider name.
+- **Council resets `RESPONDING_PROVIDERS` / `DISTINCT_PROVIDERS`** in `council_reset_defaults()` to prevent stale values across calls.
+- **Pre-create session results/logs/plans dirs before provider seat dispatch.** Council/codex/agy seats write into `$RESULTS_DIR` during dispatch and crash if the directory is missing.
+
 ## [9.45.0] - 2026-06-14
 
 ### Added

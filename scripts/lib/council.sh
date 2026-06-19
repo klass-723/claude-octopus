@@ -74,7 +74,7 @@ Options:
   --implement never|after-approval|plan-only
   --worktree auto|on|off
   --benchmark auto|on|off
-  --providers auto|claude,codex,gemini,qwen,opencode,openrouter
+  --providers auto|claude,codex,gemini,agy,qwen,opencode,openrouter
   --max-cost <usd>
   --simulate
   --single-model
@@ -141,6 +141,8 @@ council_reset_defaults() {
     COUNCIL_VETO_CONFIDENCE=""
     COUNCIL_VETO_REASON=""
     COUNCIL_VETO_SOURCE=""
+    COUNCIL_RESPONDING_PROVIDERS=""
+    COUNCIL_DISTINCT_PROVIDERS="0"
 }
 
 council_plugin_root() {
@@ -175,7 +177,7 @@ council_validate_choice() {
 
 council_validate_provider_list() {
     local providers="$1"
-    local allowed="claude,codex,gemini,qwen,opencode,openrouter"
+    local allowed="claude,codex,gemini,agy,qwen,opencode,openrouter"
 
     if [[ "$providers" == "auto" ]]; then
         return 0
@@ -565,6 +567,7 @@ council_cli_to_provider() {
         opencode*) echo "opencode" ;;
         openrouter*) echo "openrouter" ;;
         codex*|gpt*) echo "codex" ;;
+        agy*) echo "agy" ;;
         *) echo "$1" ;;
     esac
 }
@@ -882,7 +885,7 @@ council_pick_provider() {
     fi
 
     local provider providers="$COUNCIL_PROVIDERS"
-    [[ "$providers" == "auto" ]] && providers="claude,codex,gemini,qwen,opencode,openrouter"
+    [[ "$providers" == "auto" ]] && providers="claude,codex,gemini,agy,qwen,opencode,openrouter"
     IFS=',' read -r -a provider_list <<< "$providers"
     for provider in "${provider_list[@]}"; do
         provider="${provider// /}"
@@ -982,7 +985,7 @@ council_candidate_personas() {
 
 council_available_provider_orgs_json() {
     local providers="$COUNCIL_PROVIDERS"
-    [[ "$providers" == "auto" ]] && providers="claude,codex,gemini,qwen,opencode,openrouter"
+    [[ "$providers" == "auto" ]] && providers="claude,codex,gemini,agy,qwen,opencode,openrouter"
 
     local json='[]' provider org
     IFS=',' read -r -a provider_list <<< "$providers"
@@ -998,7 +1001,7 @@ council_available_provider_orgs_json() {
 council_provider_for_org() {
     local wanted_org="$1"
     local providers="$COUNCIL_PROVIDERS"
-    [[ "$providers" == "auto" ]] && providers="claude,codex,gemini,qwen,opencode,openrouter"
+    [[ "$providers" == "auto" ]] && providers="claude,codex,gemini,agy,qwen,opencode,openrouter"
 
     local provider
     IFS=',' read -r -a provider_list <<< "$providers"
@@ -1963,7 +1966,7 @@ council_start_implementation_handoff() {
 council_detect_providers() {
     local providers="$COUNCIL_PROVIDERS"
     if [[ "$providers" == "auto" ]]; then
-        providers="claude,codex,gemini,qwen,opencode,openrouter"
+        providers="claude,codex,gemini,agy,qwen,opencode,openrouter"
     fi
 
     local json='{}'
