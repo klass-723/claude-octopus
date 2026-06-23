@@ -1574,20 +1574,48 @@ council_write_config_json() {
         }' > "$config_path"
 }
 
+council_response_nonempty() {
+    # True only if the file has at least one non-whitespace character. An empty
+    # or whitespace-only response (e.g. an agy seat that hit an exhausted quota
+    # group) is NOT a real response and must not count toward the quorum.
+    local f="$1"
+    [[ -s "$f" ]] || return 1
+    [[ -n "$(tr -d '[:space:]' < "$f")" ]]
+}
+
+council_distinct_responding_count() {
+    # Number of DISTINCT non-chair providers that returned a non-empty response.
+    # COUNCIL_RESPONDING_PROVIDERS is space-separated and deduped on insertion.
+    local p count=0
+    for p in $COUNCIL_RESPONDING_PROVIDERS; do
+        count=$((count + 1))
+    done
+    printf '%s' "$count"
+}
+
 council_run_advice_phase() {
     COUNCIL_RESPONSES_RECEIVED="0"
     COUNCIL_CHAIR_RESPONSE_RECEIVED="false"
+    COUNCIL_RESPONDING_PROVIDERS=""
 
-    local index=0 member persona slug output_path seat
+    local index=0 member persona slug output_path seat provider
     while IFS= read -r member; do
         persona="$(jq -r '.persona' <<< "$member")"
         seat="$(jq -r '.seat' <<< "$member")"
+        provider="$(jq -r '.provider // "unknown"' <<< "$member")"
         slug="$(council_slug "$persona")"
         output_path="${COUNCIL_RUN_DIR}/responses/$(printf '%02d' "$index")-${slug}.md"
         if council_dispatch_member "$member" "independent-advice" > "$output_path"; then
             COUNCIL_RESPONSES_RECEIVED=$((COUNCIL_RESPONSES_RECEIVED + 1))
             if [[ "$seat" == "chair" ]]; then
                 COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
+            elif council_response_nonempty "$output_path"; then
+                # Track DISTINCT non-chair providers with a non-empty response.
+                # Two codex personas are ONE provider; an empty seat is none.
+                case " $COUNCIL_RESPONDING_PROVIDERS " in
+                    *" $provider "*) ;;
+                    *) COUNCIL_RESPONDING_PROVIDERS="${COUNCIL_RESPONDING_PROVIDERS:+$COUNCIL_RESPONDING_PROVIDERS }$provider" ;;
+                esac
             fi
         else
             rm -f "$output_path"
@@ -1599,10 +1627,16 @@ council_run_advice_phase() {
         council_run_chair_fallback
     fi
 
-    local required received_non_chair
+    local required distinct_count
     required="$(council_required_non_chair)"
-    received_non_chair="$(( COUNCIL_RESPONSES_RECEIVED > 0 ? COUNCIL_RESPONSES_RECEIVED - 1 : 0 ))"
-    if [[ "$COUNCIL_CHAIR_RESPONSE_RECEIVED" == "true" ]] && (( received_non_chair >= required )); then
+    distinct_count="$(council_distinct_responding_count)"
+    # Quorum = chair + >= required DISTINCT non-chair providers with non-empty
+    # responses. The old raw response-count let 2 codex personas, or an empty agy
+    # seat, pass as a 2-of-3 quorum (#1682/#1824/#1838). NOTE: this verifies
+    # distinct providers RESPONDED — NOT that they AGREED. The lead must still
+    # confirm >= required distinct APPROVE verdicts from the per-seat responses
+    # (CLAUDE-OCTO.md §4); the runner does not parse APPROVE/BLOCK content.
+    if [[ "$COUNCIL_CHAIR_RESPONSE_RECEIVED" == "true" ]] && (( distinct_count >= required )); then
         COUNCIL_QUORUM_MET="true"
     else
         COUNCIL_QUORUM_MET="false"
@@ -2194,6 +2228,8 @@ council_write_summary_json() {
         --argjson council_roster "$COUNCIL_ROSTER_JSON" \
         --arg responses_received "$COUNCIL_RESPONSES_RECEIVED" \
         --arg quorum_met "$COUNCIL_QUORUM_MET" \
+        --arg distinct_providers "$(council_distinct_responding_count)" \
+        --arg responding_providers "$COUNCIL_RESPONDING_PROVIDERS" \
         --arg chair_received "$COUNCIL_CHAIR_RESPONSE_RECEIVED" \
         --arg chair_fallback_used "$COUNCIL_CHAIR_FALLBACK_USED" \
         --arg chair_fallback_persona "$COUNCIL_CHAIR_FALLBACK_PERSONA" \
@@ -2232,6 +2268,8 @@ council_write_summary_json() {
           quorum: {
             required_non_chair: (if $depth == "quick" then 1 else 2 end),
             received_non_chair: (if ($responses_received | tonumber) > 0 then (($responses_received | tonumber) - 1) else 0 end),
+            distinct_providers: ($distinct_providers | tonumber),
+            responding_providers: ($responding_providers | split(" ") | map(select(length > 0))),
             chair_received: ($chair_received == "true"),
             met: ($quorum_met == "true")
           },
