@@ -246,10 +246,15 @@ run_agy_pty() {
         # BSD script: trailing command args preserve argv (safe for a large --print value).
         script -q /dev/null "${cmd[@]}" > "$stdout_file" 2> "$stderr_file" < /dev/null
     else
-        # util-linux script: the command must be one -c string; shell-quote every arg so a
-        # multiline/oversized --print survives intact.
-        local _q="" _a
-        for _a in "${cmd[@]}"; do _q+="$(printf '%q ' "$_a")"; done
+        # util-linux script: the command must be one -c string and may be
+        # interpreted by /bin/sh rather than Bash. Quote every argument with
+        # POSIX single-quote syntax; Bash printf %q can emit $'...' for
+        # multiline values, which is not portable to /bin/sh.
+        local _q="" _a _escaped
+        for _a in "${cmd[@]}"; do
+            _escaped="${_a//\'/\'\\\'\'}"
+            _q+="'${_escaped}' "
+        done
         script -qec "$_q" /dev/null > "$stdout_file" 2> "$stderr_file" < /dev/null
     fi
     local _rc=$?

@@ -279,9 +279,15 @@ test_agy_pty_fallback_salvages_tty_error() {
     mkdir -p "$tmp_bin"
     # Mimic agy's bubbletea failure: die 'could not open TTY' with NO controlling
     # terminal, but produce a real answer once a PTY is present.
-    cat > "$tmp_bin/agy" <<'MOCK_AGY'
+cat > "$tmp_bin/agy" <<'MOCK_AGY'
 #!/usr/bin/env bash
 if [ -t 1 ] || [ -t 0 ]; then
+    expected=$'review this diff\npreserve a '\''quoted'\'' token'
+    actual="${!#}"
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'prompt corrupted: <%s>\n' "$actual" >&2
+        exit 3
+    fi
     printf 'reviewed\nVERDICT: APPROVE\n'
     exit 0
 fi
@@ -291,7 +297,7 @@ MOCK_AGY
     chmod +x "$tmp_bin/agy"
 
     local out rc=0 err="$TEST_TMP_DIR/agy-pty.err"
-    out="$(printf 'review this diff' | OCTOPUS_AGY_FORCE_INLINE=0 \
+    out="$(printf '%s' $'review this diff\npreserve a '\''quoted'\'' token' | OCTOPUS_AGY_FORCE_INLINE=0 \
         PATH="$tmp_bin:$PATH" bash "$PROJECT_ROOT/scripts/helpers/agy-exec.sh" 2>"$err")" || rc=$?
 
     # Salvaged: real verdict returned, exit 0, PTY path announced, and the answer is
