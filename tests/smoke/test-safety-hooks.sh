@@ -201,6 +201,7 @@ test_careful_statement_shape_not_substring() {
     [[ "$(_cc_decides 'git checkout ./.gitignore')" == quiet ]] || fails+=" checkout-slash-dotfile"
     [[ "$(_cc_decides 'git restore ./.env')"       == quiet ]] || fails+=" restore-slash-dotfile"
     [[ "$(_cc_decides 'git checkout ./src')"       == quiet ]] || fails+=" checkout-subpath"
+    [[ "$(_cc_decides 'git checkout "./src"')"     == quiet ]] || fails+=" checkout-quoted-subpath"
     # Real destructive ops that must still FIRE (no false negative introduced).
     [[ "$(_cc_decides 'psql -c "TRUNCATE users"')" == fire ]] || fails+=" truncate-sql"
     [[ "$(_cc_decides 'PGPASSWORD=x psql -c "TRUNCATE users"')" == fire ]] || fails+=" assigned-psql"
@@ -214,6 +215,10 @@ test_careful_statement_shape_not_substring() {
     [[ "$(_cc_decides 'git checkout ./')"          == fire ]] || fails+=" checkout-dotslash"
     [[ "$(_cc_decides 'git restore .')"            == fire ]] || fails+=" restore-dot"
     [[ "$(_cc_decides 'git restore ./')"           == fire ]] || fails+=" restore-dotslash"
+    [[ "$(_cc_decides 'git checkout "."')"         == fire ]] || fails+=" checkout-quoted-dot"
+    [[ "$(_cc_decides 'git restore "./"')"         == fire ]] || fails+=" restore-quoted-dotslash"
+    [[ "$(_cc_decides 'git checkout -- .')"        == fire ]] || fails+=" checkout-separator-dot"
+    [[ "$(_cc_decides 'git restore -- "./"')"      == fire ]] || fails+=" restore-separator-dotslash"
     [[ "$(_cc_decides 'git checkout .; printf done')" == fire ]] || fails+=" checkout-dot-chained"
     [[ "$(_cc_decides 'git restore ./&&printf done')" == fire ]] || fails+=" restore-dotslash-chained"
 
