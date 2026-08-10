@@ -169,7 +169,7 @@ test_careful_returns_ask_decision() {
 }
 
 test_careful_statement_shape_not_substring() {
-    test_case "careful-check.sh gates on statement shape, not bare substrings (truncate/rm/checkout)"
+    test_case "careful-check.sh gates on executable context and command boundaries"
     # Activate careful mode for a pinned session so the hook and this test resolve the
     # same state-file path (CLAUDE_CODE_SESSION_ID pins octo_session_state_file).
     local sid="octo-careful-fp-$$"
