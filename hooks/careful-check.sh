@@ -90,10 +90,34 @@ fi
 # `TRUNCATE users`. Gate only when the statement is either a direct shell command or
 # appears alongside a known SQL client. This keeps read-only grep/rg/printf commands
 # quiet while retaining coverage for client flags, stdin pipes, and heredocs.
-_octo_sql_pat='DROP\s+TABLE|DROP\s+DATABASE|TRUNCATE\s+(TABLE\s+)?["'\''`]?\w'
+_octo_drop_pat='DROP\s+TABLE|DROP\s+DATABASE'
+_octo_truncate_pat='TRUNCATE\s+["'\''`]?[[:alnum:]_]+(\s+["'\''`]?[[:alnum:]_]+)?'
+_octo_sql_pat="${_octo_drop_pat}|${_octo_truncate_pat}"
 _octo_sql_client_pat='(^|[;&|][[:space:]]*)((sudo|command|env)[[:space:]]+)?([[:alpha:]_][[:alnum:]_]*=[^[:space:]]+[[:space:]]+)*(psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\s+sql)([[:space:]]|$)'
 _octo_direct_sql_pat="^[[:space:]]*(${_octo_sql_pat})"
-if echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_pat" \
+
+# ERE alternation alone cannot distinguish `TRUNCATE TABLE foo` from the
+# incomplete `TRUNCATE TABLE`: the optional TABLE branch can backtrack and
+# consume TABLE as the identifier. Inspect candidate tokens so TABLE requires a
+# third token, while `TRUNCATE users` and quoted identifiers remain protected.
+_octo_has_destructive_sql() {
+    echo "$CHECK_TEXT" | grep -qiE "$_octo_drop_pat" && return 0
+    local truncate_matches
+    truncate_matches=$(echo "$CHECK_TEXT" | grep -oiE "$_octo_truncate_pat" || true)
+    [[ -n "$truncate_matches" ]] || return 1
+    printf '%s\n' "$truncate_matches" | awk '
+        {
+            raw = $2
+            token = tolower(raw)
+            gsub(/^["`]/, "", token)
+            gsub(/["`;]$/, "", token)
+            if (token != "table" || raw ~ /^["`]/ || NF >= 3) { found = 1; exit }
+        }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
+if _octo_has_destructive_sql \
     && { echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_client_pat" \
         || echo "$CHECK_TEXT" | grep -qiE "$_octo_direct_sql_pat"; }; then
     matched=$(echo "$CHECK_TEXT" | grep -oiE "$_octo_sql_pat" | head -1)

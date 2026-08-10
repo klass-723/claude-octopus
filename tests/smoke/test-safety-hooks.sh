@@ -194,6 +194,8 @@ test_careful_statement_shape_not_substring() {
     [[ "$(_cc_decides 'rg "DROP TABLE" src')"          == quiet ]] || fails+=" rg-drop-table"
     [[ "$(_cc_decides 'rg '\''psql -c "DROP TABLE users"'\'' docs')" == quiet ]] || fails+=" rg-sql-client-example"
     [[ "$(_cc_decides 'printf "TRUNCATE users"')"      == quiet ]] || fails+=" printf-truncate"
+    [[ "$(_cc_decides 'TRUNCATE TABLE')"               == quiet ]] || fails+=" truncate-no-target"
+    [[ "$(_cc_decides 'psql -c "TRUNCATE TABLE;"')"    == quiet ]] || fails+=" truncate-table-no-target"
     [[ "$(_cc_decides 'charm -rf out')"            == quiet ]] || fails+=" charm-rf"
     [[ "$(_cc_decides 'git checkout .gitignore')"  == quiet ]] || fails+=" checkout-dotfile"
     [[ "$(_cc_decides 'git checkout ./.gitignore')" == quiet ]] || fails+=" checkout-slash-dotfile"
