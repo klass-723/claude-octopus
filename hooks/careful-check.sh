@@ -70,7 +70,7 @@ fi
 # ── Destructive pattern checks ────────────────────────────────────────
 
 # 1. rm -rf — but allow safe exceptions (node_modules, dist, .next, __pycache__, build, coverage, .turbo)
-if echo "$CHECK_TEXT" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-r\s+-f|rm\s+-f\s+-r|rm\s+--recursive\s+--force'; then
+if echo "$CHECK_TEXT" | grep -qE '(^|[^[:alnum:]_])rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-r\s+-f|-f\s+-r|--recursive\s+--force)'; then
     # Check if the target is a safe exception
     safe=false
     for safe_dir in node_modules dist .next __pycache__ build coverage .turbo; do
@@ -85,9 +85,15 @@ if echo "$CHECK_TEXT" | grep -qE 'rm\s+-[a-zA-Z]*r[a-zA-Z]*f|rm\s+-r\s+-f|rm\s+-
     fi
 fi
 
-# 2. SQL destructive operations
-if echo "$CHECK_TEXT" | grep -qiE 'DROP\s+TABLE|DROP\s+DATABASE|TRUNCATE'; then
-    matched=$(echo "$CHECK_TEXT" | grep -oiE 'DROP\s+TABLE|DROP\s+DATABASE|TRUNCATE' | head -1)
+# 2. SQL destructive operations. `DROP TABLE`/`DROP DATABASE` already carry a SQL-specific
+# keyword, but bare `TRUNCATE` (case-insensitive, no boundary) fired on any substring —
+# the Tailwind `truncate` CSS class, str.truncate(), a plain `grep truncate|line-clamp` —
+# a live false positive. TRUNCATE now requires statement shape: whitespace + an
+# identifier (optionally `TABLE`), so `TRUNCATE users` / `TRUNCATE TABLE foo` still match
+# but `truncate|line-clamp` does not.
+_octo_sql_pat='DROP\s+TABLE|DROP\s+DATABASE|TRUNCATE\s+(TABLE\s+)?["'\''`]?\w'
+if echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_pat"; then
+    matched=$(echo "$CHECK_TEXT" | grep -oiE "$_octo_sql_pat" | head -1)
     echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"⚠️ Destructive SQL detected: ${matched}. This permanently destroys data. Confirm you want to proceed.\"}}"
     exit 0
 fi
@@ -107,8 +113,10 @@ if echo "$CHECK_TEXT" | grep -qE 'git\s+reset\s+--hard'; then
     exit 0
 fi
 
-# 5. git checkout . / git restore .
-if echo "$CHECK_TEXT" | grep -qE 'git\s+checkout\s+\.|git\s+restore\s+\.'; then
+# 5. git checkout . / git restore . — the `.` must be a standalone path arg (`.`, `./`,
+# `./src`), not the leading dot of a single dotfile: bare `\.` also matched
+# `git checkout .gitignore` (discards one file, not "all unstaged changes").
+if echo "$CHECK_TEXT" | grep -qE 'git\s+(checkout|restore)\s+\.(\s|/|$)'; then
     echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"⚠️ Destructive command detected: git checkout/restore. This discards all unstaged changes. Confirm you want to proceed."}}'
     exit 0
 fi

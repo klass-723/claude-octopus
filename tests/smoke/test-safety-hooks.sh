@@ -168,6 +168,41 @@ test_careful_returns_ask_decision() {
     fi
 }
 
+test_careful_statement_shape_not_substring() {
+    test_case "careful-check.sh gates on statement shape, not bare substrings (truncate/rm/checkout)"
+    # Activate careful mode for a pinned session so the hook and this test resolve the
+    # same state-file path (CLAUDE_CODE_SESSION_ID pins octo_session_state_file).
+    local sid="octo-careful-fp-$$"
+    local sf="/tmp/octopus-careful-${sid}.txt"
+    : > "$sf"
+
+    _cc_decides() {
+        local out
+        out=$(jq -cn --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}' \
+            | CLAUDE_CODE_SESSION_ID="$sid" bash "$CAREFUL_HOOK" 2>/dev/null || true)
+        [[ "$out" == *'"permissionDecision":"ask"'* ]] && echo fire || echo quiet
+    }
+
+    local fails=""
+    # False positives that must stay QUIET (the reported bug + same-class cases).
+    [[ "$(_cc_decides 'grep -n "SelectValue\|truncate\|line-clamp\|overflow" src/ui/select.tsx')" == quiet ]] || fails+=" css-truncate"
+    [[ "$(_cc_decides 'charm -rf out')"          == quiet ]] || fails+=" charm-rf"
+    [[ "$(_cc_decides 'git checkout .gitignore')" == quiet ]] || fails+=" checkout-dotfile"
+    # Real destructive ops that must still FIRE (no false negative introduced).
+    [[ "$(_cc_decides 'psql -c "TRUNCATE users"')" == fire ]] || fails+=" truncate-sql"
+    [[ "$(_cc_decides 'TRUNCATE TABLE foo')"       == fire ]] || fails+=" truncate-table"
+    [[ "$(_cc_decides 'rm -rf /tmp/somewhere')"    == fire ]] || fails+=" rm-rf"
+    [[ "$(_cc_decides 'foo; rm -rf /etc')"         == fire ]] || fails+=" rm-rf-chained"
+    [[ "$(_cc_decides 'git checkout .')"           == fire ]] || fails+=" checkout-dot"
+
+    rm -f "$sf"
+    if [[ -z "$fails" ]]; then
+        test_pass
+    else
+        test_fail "wrong careful decision for:$fails"
+    fi
+}
+
 test_sysadmin_rm_flag_order() {
     test_case "sysadmin safety gate blocks destructive rm flags in either order"
     local command output
@@ -348,6 +383,7 @@ test_careful_kubectl_delete
 test_careful_docker_destructive
 test_careful_reads_state_file
 test_careful_returns_ask_decision
+test_careful_statement_shape_not_substring
 test_sysadmin_rm_flag_order
 
 test_freeze_reads_state_file
