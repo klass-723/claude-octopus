@@ -91,7 +91,7 @@ fi
 # appears alongside a known SQL client. This keeps read-only grep/rg/printf commands
 # quiet while retaining coverage for client flags, stdin pipes, and heredocs.
 _octo_sql_pat='DROP\s+TABLE|DROP\s+DATABASE|TRUNCATE\s+(TABLE\s+)?["'\''`]?\w'
-_octo_sql_client_pat='(^|[^[:alnum:]_])(psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\s+sql)([^[:alnum:]_]|$)'
+_octo_sql_client_pat='(^|[;&|][[:space:]]*)((sudo|command|env)[[:space:]]+)?([[:alpha:]_][[:alnum:]_]*=[^[:space:]]+[[:space:]]+)*(psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\s+sql)([[:space:]]|$)'
 _octo_direct_sql_pat="^[[:space:]]*(${_octo_sql_pat})"
 if echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_pat" \
     && { echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_client_pat" \

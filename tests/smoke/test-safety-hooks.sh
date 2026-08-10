@@ -192,6 +192,7 @@ test_careful_statement_shape_not_substring() {
     [[ "$(_cc_decides 'grep -n "SelectValue\|truncate\|line-clamp\|overflow" src/ui/select.tsx')" == quiet ]] || fails+=" css-truncate"
     [[ "$(_cc_decides 'grep truncate somefile')"        == quiet ]] || fails+=" grep-truncate"
     [[ "$(_cc_decides 'rg "DROP TABLE" src')"          == quiet ]] || fails+=" rg-drop-table"
+    [[ "$(_cc_decides 'rg '\''psql -c "DROP TABLE users"'\'' docs')" == quiet ]] || fails+=" rg-sql-client-example"
     [[ "$(_cc_decides 'printf "TRUNCATE users"')"      == quiet ]] || fails+=" printf-truncate"
     [[ "$(_cc_decides 'charm -rf out')"            == quiet ]] || fails+=" charm-rf"
     [[ "$(_cc_decides 'git checkout .gitignore')"  == quiet ]] || fails+=" checkout-dotfile"
@@ -200,6 +201,8 @@ test_careful_statement_shape_not_substring() {
     [[ "$(_cc_decides 'git checkout ./src')"       == quiet ]] || fails+=" checkout-subpath"
     # Real destructive ops that must still FIRE (no false negative introduced).
     [[ "$(_cc_decides 'psql -c "TRUNCATE users"')" == fire ]] || fails+=" truncate-sql"
+    [[ "$(_cc_decides 'PGPASSWORD=x psql -c "TRUNCATE users"')" == fire ]] || fails+=" assigned-psql"
+    [[ "$(_cc_decides 'env PGPASSWORD=x psql -c "TRUNCATE users"')" == fire ]] || fails+=" env-psql"
     [[ "$(_cc_decides 'mysql -e "DROP TABLE users"')" == fire ]] || fails+=" drop-mysql"
     [[ "$(_cc_decides 'printf "DROP TABLE users" | sqlite3 app.db')" == fire ]] || fails+=" piped-sqlite"
     [[ "$(_cc_decides 'TRUNCATE TABLE foo')"       == fire ]] || fails+=" truncate-table"
