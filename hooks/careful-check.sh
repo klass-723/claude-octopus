@@ -113,10 +113,12 @@ if echo "$CHECK_TEXT" | grep -qE 'git\s+reset\s+--hard'; then
     exit 0
 fi
 
-# 5. git checkout . / git restore . — the `.` must be a standalone path arg (`.`, `./`,
-# `./src`), not the leading dot of a single dotfile: bare `\.` also matched
-# `git checkout .gitignore` (discards one file, not "all unstaged changes").
-if echo "$CHECK_TEXT" | grep -qE 'git\s+(checkout|restore)\s+\.(\s|/|$)'; then
+# 5. git checkout . / git restore . — only the WHOLE-TREE discard (`.` or bare `./`)
+# should warn "discards all unstaged changes". Bare `\.` also matched a single dotfile
+# (`git checkout .gitignore`), and `\.(/)` also matched a `./`-prefixed single path
+# (`git checkout ./.gitignore`, `git restore ./.env`) — both discard one file, not all.
+# So the dot must be followed by an optional slash and then end/space, nothing else.
+if echo "$CHECK_TEXT" | grep -qE 'git\s+(checkout|restore)\s+\.(/)?(\s|$)'; then
     echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"⚠️ Destructive command detected: git checkout/restore. This discards all unstaged changes. Confirm you want to proceed."}}'
     exit 0
 fi

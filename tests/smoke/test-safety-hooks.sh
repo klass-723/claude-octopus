@@ -176,24 +176,32 @@ test_careful_statement_shape_not_substring() {
     local sf="/tmp/octopus-careful-${sid}.txt"
     : > "$sf"
 
+    # Returns `fire` (explicit ask decision), `quiet` (exit 0, no decision — the hook's
+    # pass-through), or `error:<rc>` when the hook itself exits non-zero. A crashed hook
+    # must NOT read as `quiet`, or the negative cases would pass spuriously.
     _cc_decides() {
-        local out
+        local out rc=0
         out=$(jq -cn --arg c "$1" '{tool_name:"Bash",tool_input:{command:$c}}' \
-            | CLAUDE_CODE_SESSION_ID="$sid" bash "$CAREFUL_HOOK" 2>/dev/null || true)
+            | env "CLAUDE_CODE_SESSION_ID=${sid}" bash "$CAREFUL_HOOK" 2>/dev/null) || rc=$?
+        if (( rc != 0 )); then echo "error:$rc"; return 0; fi
         [[ "$out" == *'"permissionDecision":"ask"'* ]] && echo fire || echo quiet
     }
 
     local fails=""
     # False positives that must stay QUIET (the reported bug + same-class cases).
     [[ "$(_cc_decides 'grep -n "SelectValue\|truncate\|line-clamp\|overflow" src/ui/select.tsx')" == quiet ]] || fails+=" css-truncate"
-    [[ "$(_cc_decides 'charm -rf out')"          == quiet ]] || fails+=" charm-rf"
-    [[ "$(_cc_decides 'git checkout .gitignore')" == quiet ]] || fails+=" checkout-dotfile"
+    [[ "$(_cc_decides 'charm -rf out')"            == quiet ]] || fails+=" charm-rf"
+    [[ "$(_cc_decides 'git checkout .gitignore')"  == quiet ]] || fails+=" checkout-dotfile"
+    [[ "$(_cc_decides 'git checkout ./.gitignore')" == quiet ]] || fails+=" checkout-slash-dotfile"
+    [[ "$(_cc_decides 'git restore ./.env')"       == quiet ]] || fails+=" restore-slash-dotfile"
+    [[ "$(_cc_decides 'git checkout ./src')"       == quiet ]] || fails+=" checkout-subpath"
     # Real destructive ops that must still FIRE (no false negative introduced).
     [[ "$(_cc_decides 'psql -c "TRUNCATE users"')" == fire ]] || fails+=" truncate-sql"
     [[ "$(_cc_decides 'TRUNCATE TABLE foo')"       == fire ]] || fails+=" truncate-table"
     [[ "$(_cc_decides 'rm -rf /tmp/somewhere')"    == fire ]] || fails+=" rm-rf"
     [[ "$(_cc_decides 'foo; rm -rf /etc')"         == fire ]] || fails+=" rm-rf-chained"
     [[ "$(_cc_decides 'git checkout .')"           == fire ]] || fails+=" checkout-dot"
+    [[ "$(_cc_decides 'git checkout ./')"          == fire ]] || fails+=" checkout-dotslash"
 
     rm -f "$sf"
     if [[ -z "$fails" ]]; then
