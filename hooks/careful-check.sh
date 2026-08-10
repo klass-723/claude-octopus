@@ -121,7 +121,7 @@ fi
 # (`git checkout .gitignore`), and `\.(/)` also matched a `./`-prefixed single path
 # (`git checkout ./.gitignore`, `git restore ./.env`) — both discard one file, not all.
 # So the dot must be followed by an optional slash and then end/space, nothing else.
-if echo "$CHECK_TEXT" | grep -qE 'git\s+(checkout|restore)\s+\.(/)?(\s|$)'; then
+if echo "$CHECK_TEXT" | grep -qE 'git\s+(checkout|restore)\s+\.(/)?([[:space:];|&]|$)'; then
     echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"⚠️ Destructive command detected: git checkout/restore. This discards all unstaged changes. Confirm you want to proceed."}}'
     exit 0
 fi

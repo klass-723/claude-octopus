@@ -207,6 +207,10 @@ test_careful_statement_shape_not_substring() {
     [[ "$(_cc_decides 'foo; rm -rf /etc')"         == fire ]] || fails+=" rm-rf-chained"
     [[ "$(_cc_decides 'git checkout .')"           == fire ]] || fails+=" checkout-dot"
     [[ "$(_cc_decides 'git checkout ./')"          == fire ]] || fails+=" checkout-dotslash"
+    [[ "$(_cc_decides 'git restore .')"            == fire ]] || fails+=" restore-dot"
+    [[ "$(_cc_decides 'git restore ./')"           == fire ]] || fails+=" restore-dotslash"
+    [[ "$(_cc_decides 'git checkout .; printf done')" == fire ]] || fails+=" checkout-dot-chained"
+    [[ "$(_cc_decides 'git restore ./&&printf done')" == fire ]] || fails+=" restore-dotslash-chained"
 
     rm -f "$sf"
     if [[ -z "$fails" ]]; then
