@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- **Careful-mode destructive guards gate on statement shape, not bare substrings** (`hooks/careful-check.sh`). The SQL check's `TRUNCATE` branch had no boundary and ran case-insensitive, so it fired on the substring `truncate` anywhere — a plain `grep -n "…\|truncate\|line-clamp\|…" src/…` (the Tailwind text-truncation CSS class) tripped "⚠️ Destructive SQL detected: truncate" and blocked mid-run. `TRUNCATE` now requires statement shape (whitespace + an identifier, optionally `TABLE`), so `TRUNCATE users` / `TRUNCATE TABLE foo` still match but `truncate|line-clamp` does not. Audited the sibling guards for the same class: `rm` now needs a word boundary (so `charm -rf`/`farm -rf` no longer match while `;rm -rf`/`sudo rm -rf` still do), and `git checkout/restore .` requires the `.` to be a standalone path arg (`.`, `./src`) rather than the leading dot of a single dotfile like `.gitignore`. `DROP TABLE`/`DROP DATABASE` already carried a SQL keyword and are unchanged.
+- **Careful-mode destructive guards gate on executable context and command boundaries** (`hooks/careful-check.sh`). SQL-looking text in read-only source searches and output commands (`grep truncate`, `rg "DROP TABLE"`, `printf "TRUNCATE users"`) stays quiet; direct destructive statements and statements executed by known SQL clients still ask for confirmation. The `rm` guard now needs a word boundary (so `charm -rf`/`farm -rf` no longer match while `;rm -rf`/`sudo rm -rf` still do), and `git checkout/restore .` requires the `.` to be the whole-tree path rather than a dotfile or `./src` subpath. Fixes #835.
 
 - **Existing Codex marketplace installs can update again.** The Codex adapter
   preserves its original `claude-octopus` marketplace identity instead of

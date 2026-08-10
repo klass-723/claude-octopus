@@ -85,14 +85,17 @@ if echo "$CHECK_TEXT" | grep -qE '(^|[^[:alnum:]_])rm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-
     fi
 fi
 
-# 2. SQL destructive operations. `DROP TABLE`/`DROP DATABASE` already carry a SQL-specific
-# keyword, but bare `TRUNCATE` (case-insensitive, no boundary) fired on any substring —
-# the Tailwind `truncate` CSS class, str.truncate(), a plain `grep truncate|line-clamp` —
-# a live false positive. TRUNCATE now requires statement shape: whitespace + an
-# identifier (optionally `TABLE`), so `TRUNCATE users` / `TRUNCATE TABLE foo` still match
-# but `truncate|line-clamp` does not.
+# 2. SQL destructive operations. A SQL-looking string alone is not execution: source
+# searches and output commands routinely contain examples such as `DROP TABLE` and
+# `TRUNCATE users`. Gate only when the statement is either a direct shell command or
+# appears alongside a known SQL client. This keeps read-only grep/rg/printf commands
+# quiet while retaining coverage for client flags, stdin pipes, and heredocs.
 _octo_sql_pat='DROP\s+TABLE|DROP\s+DATABASE|TRUNCATE\s+(TABLE\s+)?["'\''`]?\w'
-if echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_pat"; then
+_octo_sql_client_pat='(^|[^[:alnum:]_])(psql|mysql|mariadb|sqlite3|sqlcmd|cockroach\s+sql)([^[:alnum:]_]|$)'
+_octo_direct_sql_pat="^[[:space:]]*(${_octo_sql_pat})"
+if echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_pat" \
+    && { echo "$CHECK_TEXT" | grep -qiE "$_octo_sql_client_pat" \
+        || echo "$CHECK_TEXT" | grep -qiE "$_octo_direct_sql_pat"; }; then
     matched=$(echo "$CHECK_TEXT" | grep -oiE "$_octo_sql_pat" | head -1)
     echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"⚠️ Destructive SQL detected: ${matched}. This permanently destroys data. Confirm you want to proceed.\"}}"
     exit 0
