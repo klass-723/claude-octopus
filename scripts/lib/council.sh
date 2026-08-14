@@ -1505,8 +1505,15 @@ EOF
     fi
 
     if declare -f run_agent_sync_consultative >/dev/null 2>&1; then
-        local agent_type="$provider"
-        run_agent_sync_consultative "$agent_type" "$prompt" "$(council_seat_timeout "$agent_type")" "$persona" "council"
+        local agent_type="$provider" _seat_timeout
+        # Synthesis gets its own (usually larger) bound; advice/critique/revision
+        # keep the normal per-seat cap.
+        if [[ "$dispatch_phase" == "chair-synthesis" ]]; then
+            _seat_timeout="$(council_synthesis_timeout "$agent_type")"
+        else
+            _seat_timeout="$(council_seat_timeout "$agent_type")"
+        fi
+        run_agent_sync_consultative "$agent_type" "$prompt" "$_seat_timeout" "$persona" "council"
         return $?
     fi
 
@@ -1829,6 +1836,20 @@ council_seat_timeout() {
     candidate="${OCTOPUS_COUNCIL_AGENT_TIMEOUT:-}"
     if [[ "$candidate" =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$candidate"; return 0; fi
     printf '120'
+}
+
+council_synthesis_timeout() {
+    # Chair-synthesis dispatch timeout (seconds). Synthesis reads every member
+    # artifact and writes the final structured document, so it routinely needs
+    # more room than a single advice seat — and on a slow chair path (e.g. codex
+    # via the chatgpt.com MCP transport) the plain seat cap can expire mid-write.
+    # OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT overrides just this phase; otherwise fall
+    # back to the chair provider's normal per-seat resolution so existing tuning
+    # (OCTOPUS_COUNCIL_TIMEOUT_<PROVIDER>, --seat-timeout, ...) still applies.
+    local provider="$1" candidate
+    candidate="${OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT:-}"
+    if [[ "$candidate" =~ ^[1-9][0-9]*$ ]]; then printf '%s' "$candidate"; return 0; fi
+    council_seat_timeout "$provider"
 }
 
 council_compute_approving_providers() {

@@ -1611,6 +1611,54 @@ test_council_seat_timeout_precedence() {
     fi
 }
 
+test_council_synthesis_timeout_overrides_seat_cap() {
+    test_case "council_synthesis_timeout: env override wins, else falls back to per-seat resolution"
+    load_council_lib || return 1
+    local override fallback per_provider invalid
+    # Explicit synthesis override wins over the seat cap for the chair phase.
+    override="$(OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT=900 COUNCIL_SEAT_TIMEOUT=300 council_synthesis_timeout codex)"
+    # No override -> chair provider's normal per-seat resolution (default 120).
+    fallback="$(OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT='' OCTOPUS_COUNCIL_TIMEOUT_CODEX='' COUNCIL_SEAT_TIMEOUT='' OCTOPUS_COUNCIL_AGENT_TIMEOUT='' council_synthesis_timeout codex)"
+    # No override -> existing per-provider tuning still applies through the fallback.
+    per_provider="$(OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT='' OCTOPUS_COUNCIL_TIMEOUT_CODEX=600 council_synthesis_timeout codex)"
+    # Invalid override falls through to seat resolution rather than disabling the cap.
+    invalid="$(OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT=0 OCTOPUS_COUNCIL_TIMEOUT_CODEX='' COUNCIL_SEAT_TIMEOUT=300 council_synthesis_timeout codex)"
+    if [[ "$override" == "900" ]] && [[ "$fallback" == "120" ]] &&
+       [[ "$per_provider" == "600" ]] && [[ "$invalid" == "300" ]]; then
+        test_pass
+    else
+        test_fail "synthesis timeout wrong: override=$override fallback=$fallback per_provider=$per_provider invalid=$invalid"
+        return 1
+    fi
+}
+
+test_council_live_response_uses_synthesis_timeout_for_chair() {
+    test_case "council_live_response applies the synthesis timeout only to chair-synthesis"
+    load_council_lib || return 1
+    local captured_advice captured_synth
+    # run_agent_sync_consultative receives the resolved timeout as arg 3; capture it.
+    run_agent_sync_consultative() { printf '%s' "$3" > "$TEST_TMP_DIR/council-synth-cap.txt"; printf 'ok\n'; }
+    council_provider_is_available() { return 0; }
+    COUNCIL_PROVIDER_STATUS_JSON='{"codex":"available"}'
+
+    OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT=900 OCTOPUS_COUNCIL_TIMEOUT_CODEX=300 \
+        council_live_response codex strategy-analyst "dummy prompt" chair-synthesis >/dev/null 2>&1
+    captured_synth="$(cat "$TEST_TMP_DIR/council-synth-cap.txt" 2>/dev/null)"
+
+    OCTOPUS_COUNCIL_SYNTHESIS_TIMEOUT=900 OCTOPUS_COUNCIL_TIMEOUT_CODEX=300 \
+        council_live_response codex code-reviewer "dummy prompt" independent-advice >/dev/null 2>&1
+    captured_advice="$(cat "$TEST_TMP_DIR/council-synth-cap.txt" 2>/dev/null)"
+
+    unset -f run_agent_sync_consultative council_provider_is_available
+
+    if [[ "$captured_synth" == "900" ]] && [[ "$captured_advice" == "300" ]]; then
+        test_pass
+    else
+        test_fail "expected synthesis=900 advice=300; got synthesis=$captured_synth advice=$captured_advice"
+        return 1
+    fi
+}
+
 test_council_detach_escape_hatch_uses_inline() {
     test_case "OCTOPUS_COUNCIL_DETACH=0 falls back to inline dispatch (no sentinel)"
     load_council_lib || return 1
@@ -2035,6 +2083,8 @@ test_council_fixture_dispatch_uses_inline_transport
 test_council_detached_seat_survives_interrupt
 test_council_detached_seat_timeout_is_cancelled
 test_council_seat_timeout_precedence
+test_council_synthesis_timeout_overrides_seat_cap
+test_council_live_response_uses_synthesis_timeout_for_chair
 test_council_seat_timeout_rejects_zero_and_nonnumeric
 test_council_response_has_verdict_salvage
 test_council_chair_only_vendor_excluded_from_quorum
