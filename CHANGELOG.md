@@ -8,10 +8,12 @@
   independently of the per-seat cap. Synthesis reads every member artifact and
   writes the final structured document, so it routinely needs more room than a
   single advice seat — and on a slow chair path (e.g. codex via the
-  chatgpt.com MCP transport) the plain seat cap can expire mid-write. When
-  unset, synthesis keeps falling back to the chair provider's normal per-seat
-  resolution, so existing tuning (`OCTOPUS_COUNCIL_TIMEOUT_<PROVIDER>`,
-  `--seat-timeout`) still applies.
+  chatgpt.com MCP transport) the plain seat cap can expire mid-write. When the
+  override is unset, zero, negative, or non-numeric, synthesis falls back through
+  the chair provider's normal per-seat resolution
+  (`OCTOPUS_COUNCIL_TIMEOUT_<PROVIDER>` → `--seat-timeout` → legacy
+  `OCTOPUS_COUNCIL_AGENT_TIMEOUT` → built-in default), so a malformed value never
+  disables the cap.
 
 ## [9.64.0] - 2026-08-13
 
