@@ -1419,6 +1419,66 @@ test_council_run_does_not_clobber_healthy_summary() {
     fi
 }
 
+test_council_run_replaces_malformed_body_summary() {
+    test_case "council_run treats an empty/malformed body summary.json as missing and repairs it"
+    load_council_lib || return 1
+
+    local d
+    d="$(mktemp -d "$TEST_TMP_DIR/council-malformed.XXXXXX")"
+
+    # A jq failure mid-write can leave garbage that -f would accept. The wrapper
+    # must treat unparseable JSON as no summary and replace it with a valid one.
+    _council_run_impl() { COUNCIL_RUN_DIR="$d"; printf 'not json{' > "$d/summary.json"; return 0; }
+    council_write_summary_json() { printf '{"status":"%s"}\n' "$1" > "${COUNCIL_RUN_DIR}/summary.json"; }
+    council_print_run_warnings() { :; }
+
+    local rc=0
+    council_run "dummy task" >/dev/null 2>&1 || rc=$?
+
+    local status valid=1
+    jq -e . "$d/summary.json" >/dev/null 2>&1 || valid=0
+    status="$(jq -r '.status' "$d/summary.json" 2>/dev/null)"
+
+    unset -f _council_run_impl council_write_summary_json council_print_run_warnings
+
+    if [[ "$valid" -eq 1 && "$status" == "incomplete" && "$rc" -ne 0 ]]; then
+        test_pass
+    else
+        test_fail "expected repaired valid incomplete summary + nonzero rc; valid=$valid status='$status' rc=$rc"
+        return 1
+    fi
+}
+
+test_council_run_writes_minimal_summary_when_rich_writer_fails() {
+    test_case "council_run drops a minimal valid summary.json when the rich writer fails"
+    load_council_lib || return 1
+
+    local d
+    d="$(mktemp -d "$TEST_TMP_DIR/council-writerfail.XXXXXX")"
+
+    # Body leaves no summary AND the rich writer itself fails (e.g. jq errors) —
+    # the wrapper must still guarantee a parseable, machine-detectable artifact.
+    _council_run_impl() { COUNCIL_RUN_DIR="$d"; return 1; }
+    council_write_summary_json() { return 1; }
+    council_print_run_warnings() { :; }
+
+    local rc=0
+    council_run "dummy task" >/dev/null 2>&1 || rc=$?
+
+    local status valid=1
+    jq -e . "$d/summary.json" >/dev/null 2>&1 || valid=0
+    status="$(jq -r '.status' "$d/summary.json" 2>/dev/null)"
+
+    unset -f _council_run_impl council_write_summary_json council_print_run_warnings
+
+    if [[ "$valid" -eq 1 && "$status" == "incomplete" && "$rc" -ne 0 ]]; then
+        test_pass
+    else
+        test_fail "expected minimal valid incomplete summary + nonzero rc; valid=$valid status='$status' rc=$rc"
+        return 1
+    fi
+}
+
 test_council_command_files_are_registered
 test_council_orchestrate_route_exists
 test_council_benchmark_routing_lib_is_extracted
@@ -1476,6 +1536,8 @@ test_council_veto_scan_ignores_discussed_token
 test_council_dispatch_strips_blocked_env_but_sets_disposable_mode
 test_council_run_emits_summary_when_body_leaves_none
 test_council_run_does_not_clobber_healthy_summary
+test_council_run_replaces_malformed_body_summary
+test_council_run_writes_minimal_summary_when_rich_writer_fails
 
 test_council_host_native_detection() {
     test_case "council_detect_providers marks host provider as host-native (issue #444)"

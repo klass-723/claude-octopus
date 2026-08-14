@@ -2879,16 +2879,27 @@ _council_run_impl() {
     echo "Council complete: ${COUNCIL_RUN_DIR}/summary.json"
 }
 
+council_summary_is_valid() {
+    # A summary.json is only useful to a polling caller if it is present,
+    # non-empty, and parseable JSON. A jq failure mid-write can truncate the file
+    # to empty or garbage, which is exactly as unreadable as a missing one — treat
+    # all three as "no usable summary" so the safety net below recovers them.
+    local f="$1"
+    [[ -s "$f" ]] || return 1
+    jq -e . "$f" >/dev/null 2>&1
+}
+
 # Public entrypoint. The runner writes summary.json on every intended exit path
 # (dry-run, partial/no-quorum, veto-aborted, completed). But a real run can leave
-# the run directory with NO summary.json at all when:
+# the run directory with NO usable summary.json when:
 #   - the chair-synthesis dispatch is SIGKILLed at the seat timeout cap and the
-#     nonzero return trips an early exit before the final write, or
+#     nonzero return trips an early exit before the final write,
 #   - a late helper returns nonzero (council_process_implementation_gates /
 #     council_append_corpus_artifacts both `|| return 1` AFTER synthesis but
-#     BEFORE the "completed" summary write).
+#     BEFORE the "completed" summary write), or
+#   - the completed-summary write itself fails and leaves an empty/garbage file.
 # In those cases a caller that polls for summary.json waits indefinitely — the
-# runner is dead but nothing signals it. This wrapper guarantees a
+# runner is dead but nothing signals it. This wrapper guarantees a valid,
 # machine-detectable summary.json ("incomplete") so "runner unhealthy" is never
 # an unbounded wait, and points the caller at whatever partial artifacts exist.
 council_run() {
@@ -2900,15 +2911,25 @@ council_run() {
     local _council_rc=0
     _council_run_impl "$@" || _council_rc=$?
 
-    # Safety net: only fires when the body exited without leaving a summary.json.
-    # All normal paths already wrote one, so this is a no-op on healthy runs and
-    # never clobbers a real summary. Guarded on COUNCIL_RUN_DIR because arg-parse
-    # / missing-task / dry-run-help failures never create a run directory.
-    if [[ -n "${COUNCIL_RUN_DIR:-}" && -d "${COUNCIL_RUN_DIR}" \
-          && ! -f "${COUNCIL_RUN_DIR}/summary.json" ]]; then
+    # Safety net: fires when the body left NO usable summary.json (absent, empty,
+    # or unparseable). Healthy paths write a valid summary, so this is a no-op
+    # there and never clobbers a real one. Guarded on COUNCIL_RUN_DIR because
+    # arg-parse / missing-task / dry-run-help failures never create a run dir.
+    local _summary="${COUNCIL_RUN_DIR:-}/summary.json"
+    if [[ -n "${COUNCIL_RUN_DIR:-}" && -d "${COUNCIL_RUN_DIR}" ]] \
+          && ! council_summary_is_valid "$_summary"; then
+        # Prefer the rich summary; if it fails or still yields invalid JSON, drop a
+        # minimal valid one so the caller ALWAYS has a machine-detectable status.
         council_write_summary_json "incomplete" 2>/dev/null || true
+        if ! council_summary_is_valid "$_summary"; then
+            printf '{"status":"incomplete"}\n' > "$_summary" 2>/dev/null || true
+        fi
         council_print_run_warnings 2>/dev/null || true
-        echo "Council ended before writing a summary (status=incomplete); review partial artifacts under ${COUNCIL_RUN_DIR}" >&2
+        if council_summary_is_valid "$_summary"; then
+            echo "Council ended before writing a summary (status=incomplete); review partial artifacts under ${COUNCIL_RUN_DIR}" >&2
+        else
+            echo "Council ended before writing a summary and a fallback summary could not be created under ${COUNCIL_RUN_DIR}" >&2
+        fi
         # Preserve a genuine failure code; surface one if the body somehow
         # returned success while skipping its own summary write.
         [[ "$_council_rc" -eq 0 ]] && _council_rc=1
