@@ -2889,6 +2889,17 @@ council_summary_is_valid() {
     jq -e . "$f" >/dev/null 2>&1
 }
 
+_council_warn() {
+    # Route diagnostics through the project logger when it is available (the
+    # runner sources it), falling back to stderr when council.sh is sourced
+    # standalone (e.g. the unit suite). Mirrors the guarded pattern in agent-sync.sh.
+    if declare -F log >/dev/null 2>&1; then
+        log WARN "$1"
+    else
+        printf 'WARN: %s\n' "$1" >&2
+    fi
+}
+
 # Public entrypoint. The runner writes summary.json on every intended exit path
 # (dry-run, partial/no-quorum, veto-aborted, completed). But a real run can leave
 # the run directory with NO usable summary.json when:
@@ -2926,9 +2937,9 @@ council_run() {
         fi
         council_print_run_warnings 2>/dev/null || true
         if council_summary_is_valid "$_summary"; then
-            echo "Council ended before writing a summary (status=incomplete); review partial artifacts under ${COUNCIL_RUN_DIR}" >&2
+            _council_warn "Council ended before writing a summary (status=incomplete); review partial artifacts under ${COUNCIL_RUN_DIR}"
         else
-            echo "Council ended before writing a summary and a fallback summary could not be created under ${COUNCIL_RUN_DIR}" >&2
+            _council_warn "Council ended before writing a summary and a fallback summary could not be created under ${COUNCIL_RUN_DIR}"
         fi
         # Preserve a genuine failure code; surface one if the body somehow
         # returned success while skipping its own summary write.
