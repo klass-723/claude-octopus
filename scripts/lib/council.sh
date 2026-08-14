@@ -53,6 +53,7 @@ COUNCIL_IMPLEMENTATION_HANDOFF_JSON=""
 COUNCIL_ABORTED_FOR_COST=""
 COUNCIL_DIVERSITY_REPLACED=""
 COUNCIL_DIVERSITY_WARNING=""
+COUNCIL_TIMEOUT_WARNINGS=""
 COUNCIL_BENCHMARK_FRESHNESS_WEIGHT=""
 COUNCIL_COST_CHECK_ESTIMATED=""
 COUNCIL_VETO_TRIGGERED=""
@@ -1848,11 +1849,35 @@ council_compute_approving_providers() {
     printf '%s' "$approving"
 }
 
+council_rc_is_timeout() {
+    # True when a seat's dispatch rc came from hitting its own timeout cap rather
+    # than a provider-level error. run_with_timeout kills an over-cap seat with the
+    # coreutils convention (124) or, on the macOS bash fallback, SIGTERM then SIGKILL
+    # — so the seat process exits 143 (128+15) or 137 (128+9). Distinguishing these
+    # keeps a codex seat killed at the ~5-min cap from reading as a mysterious
+    # SIGKILL/OOM: it is our own watchdog firing, and the remedy is a larger cap.
+    case "${1:-}" in
+        124|137|143) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+council_note_seat_timeout() {
+    # Accumulate an actionable end-of-run warning for a seat that hit its cap,
+    # naming the exact env knob that would give that provider more time.
+    local provider="$1" persona="$2" rc="$3" cap="$4" knob line
+    knob="OCTOPUS_COUNCIL_TIMEOUT_$(printf '%s' "$provider" | tr '[:lower:]-' '[:upper:]_')"
+    line="seat ${provider} (${persona}) exceeded its ${cap}s cap (rc=${rc}) — raise ${knob} to give it more time"
+    COUNCIL_TIMEOUT_WARNINGS="${COUNCIL_TIMEOUT_WARNINGS:+${COUNCIL_TIMEOUT_WARNINGS}
+}${line}"
+}
+
 council_run_advice_phase() {
     COUNCIL_RESPONSES_RECEIVED="0"
     COUNCIL_CHAIR_RESPONSE_RECEIVED="false"
     COUNCIL_RESPONDING_PROVIDERS=""
     COUNCIL_SEAT_RECORDS_JSON="[]"
+    COUNCIL_TIMEOUT_WARNINGS=""
     local dissenting_providers=""
 
     local index=0 member persona slug output_path seat mprovider verdict
@@ -1919,6 +1944,16 @@ council_run_advice_phase() {
             else
                 seat_status="no-response"
             fi
+        fi
+        # A seat killed by its own timeout monitor (run_with_timeout: 124, or the
+        # macOS SIGTERM->SIGKILL fallback: 143/137) that left no usable response is a
+        # timeout, not a generic provider shortage. Classify it distinctly so
+        # summary.json and the end-of-run warnings say "hit the cap, raise the knob"
+        # instead of surfacing a bare exit 137 that reads like an OOM. (The salvage
+        # path above already keeps a timed-out-but-complete review as "responded".)
+        if [[ "$seat_status" == "no-response" ]] && council_rc_is_timeout "$dispatch_rc"; then
+            seat_status="timed-out"
+            council_note_seat_timeout "$mprovider" "$persona" "$dispatch_rc" "$(council_seat_timeout "$mprovider")"
         fi
         # Per-seat record for summary.json — makes quorum integrity machine-checkable
         # (a chair or degenerate seat can no longer masquerade as a distinct approving
@@ -2779,6 +2814,13 @@ council_print_run_warnings() {
 
     if [[ "$COUNCIL_CHAIR_FALLBACK_USED" == "true" ]]; then
         echo "Council warning: chair fallback used (${COUNCIL_CHAIR_FALLBACK_PERSONA})."
+    fi
+
+    if [[ -n "${COUNCIL_TIMEOUT_WARNINGS:-}" ]]; then
+        local _tw
+        while IFS= read -r _tw; do
+            [[ -n "$_tw" ]] && echo "Council warning: $_tw"
+        done <<< "$COUNCIL_TIMEOUT_WARNINGS"
     fi
 }
 

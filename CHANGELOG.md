@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Council advice seats killed by their own timeout monitor are now recorded as
+  `timed-out` in `summary.json` instead of a generic `no-response`, and the run
+  prints an actionable warning naming the exact knob to raise
+  (`OCTOPUS_COUNCIL_TIMEOUT_<PROVIDER>`). A codex seat SIGKILLed at the ~5-min cap
+  (exit 137) on the slow chatgpt.com MCP path previously read like an unexplained
+  OOM; it is our own watchdog firing, and the summary/warning now say so.
+
 ## [9.64.0] - 2026-08-13
 
 ### Changed

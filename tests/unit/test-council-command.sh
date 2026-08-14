@@ -1611,6 +1611,49 @@ test_council_seat_timeout_precedence() {
     fi
 }
 
+test_council_rc_is_timeout_recognizes_cap_kill_codes() {
+    test_case "council_rc_is_timeout matches watchdog kill codes (124/137/143), not other failures"
+    load_council_lib || return 1
+    local ok="" bad=""
+    local c
+    for c in 124 137 143; do council_rc_is_timeout "$c" && ok="${ok}${c} " || bad="${bad}${c}!TIMEOUT "; done
+    for c in 0 1 2 126 127; do council_rc_is_timeout "$c" && bad="${bad}${c}!NONTIMEOUT " || ok="${ok}skip$c "; done
+    if [[ -z "$bad" ]]; then
+        test_pass
+    else
+        test_fail "misclassified: $bad"
+        return 1
+    fi
+}
+
+test_council_advice_marks_timed_out_seat() {
+    test_case "advice phase classifies a seat killed at its cap as timed-out with a knob hint"
+    load_council_lib || return 1
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-timeout.XXXXXX")"; mkdir -p "$d/responses"
+    COUNCIL_RUN_DIR="$d"
+    COUNCIL_ROSTER_JSON='[{"persona":"code-reviewer","seat":"member","provider":"codex","provider_org":"openai","model":"gpt"}]'
+    COUNCIL_FIXTURE=""
+    COUNCIL_TIMEOUT_WARNINGS=""
+    # Simulate the reported codex-137 case: dispatch killed at the cap, no response file.
+    council_dispatch_member_detached() { return 137; }
+    council_run_chair_fallback() { :; }
+
+    OCTOPUS_COUNCIL_TIMEOUT_CODEX=300 council_run_advice_phase >/dev/null 2>&1 || true
+
+    local status warns
+    status="$(jq -r '.[0].status' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
+    warns="$COUNCIL_TIMEOUT_WARNINGS"
+
+    unset -f council_dispatch_member_detached council_run_chair_fallback
+
+    if [[ "$status" == "timed-out" ]] && [[ "$warns" == *"OCTOPUS_COUNCIL_TIMEOUT_CODEX"* ]] && [[ "$warns" == *"300s"* ]]; then
+        test_pass
+    else
+        test_fail "expected timed-out status + knob hint; status='$status' warns=[$warns]"
+        return 1
+    fi
+}
+
 test_council_detach_escape_hatch_uses_inline() {
     test_case "OCTOPUS_COUNCIL_DETACH=0 falls back to inline dispatch (no sentinel)"
     load_council_lib || return 1
@@ -2035,6 +2078,8 @@ test_council_fixture_dispatch_uses_inline_transport
 test_council_detached_seat_survives_interrupt
 test_council_detached_seat_timeout_is_cancelled
 test_council_seat_timeout_precedence
+test_council_rc_is_timeout_recognizes_cap_kill_codes
+test_council_advice_marks_timed_out_seat
 test_council_seat_timeout_rejects_zero_and_nonnumeric
 test_council_response_has_verdict_salvage
 test_council_chair_only_vendor_excluded_from_quorum
