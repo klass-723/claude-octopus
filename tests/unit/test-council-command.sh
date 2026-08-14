@@ -1640,16 +1640,21 @@ test_council_advice_marks_timed_out_seat() {
 
     OCTOPUS_COUNCIL_TIMEOUT_CODEX=300 council_run_advice_phase >/dev/null 2>&1 || true
 
-    local status warns
+    local status warns output
     status="$(jq -r '.[0].status' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
     warns="$COUNCIL_TIMEOUT_WARNINGS"
+    # Also assert the end-of-run renderer actually prints it, so a regression in
+    # council_print_run_warnings can't pass while the warning silently disappears.
+    output="$(council_print_run_warnings)"
 
     unset -f council_dispatch_member_detached council_run_chair_fallback
 
-    if [[ "$status" == "timed-out" ]] && [[ "$warns" == *"OCTOPUS_COUNCIL_TIMEOUT_CODEX"* ]] && [[ "$warns" == *"300s"* ]]; then
+    if [[ "$status" == "timed-out" ]] &&
+       [[ "$warns" == *"OCTOPUS_COUNCIL_TIMEOUT_CODEX"* ]] && [[ "$warns" == *"300s"* ]] &&
+       [[ "$output" == *"rc=137"* ]] && [[ "$output" == *"OCTOPUS_COUNCIL_TIMEOUT_CODEX"* ]]; then
         test_pass
     else
-        test_fail "expected timed-out status + knob hint; status='$status' warns=[$warns]"
+        test_fail "expected timed-out status + printed knob hint; status='$status' warns=[$warns] output=[$output]"
         return 1
     fi
 }
