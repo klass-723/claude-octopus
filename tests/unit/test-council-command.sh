@@ -1360,6 +1360,9 @@ test_council_run_status_beacon_lifecycle() {
     test_case "council writes a run-status.json beacon: running at run-dir creation, finished at summary"
     load_council_lib || return 1
 
+    # create_run_dir runs in THIS process, so the staged beacon must record this
+    # shell's own pid — assert the exact value, not merely a positive integer.
+    local expected_pid_running="${BASHPID:-$$}"
     # Unit: create_run_dir beacons "running" (with run_id + a live pid) BEFORE any
     # summary.json exists — the signal a poller uses to tell in-progress from
     # died-on-spawn. Surface a setup failure rather than masking it with `|| true`.
@@ -1397,7 +1400,7 @@ test_council_run_status_beacon_lifecycle() {
     state_finished="$(jq -r '.state' "$rs2" 2>/dev/null)"
     status_finished="$(jq -r '.status' "$rs2" 2>/dev/null)"
 
-    if [[ "$state_running" == "running" && "$pid_running" =~ ^[1-9][0-9]*$ \
+    if [[ "$state_running" == "running" && "$pid_running" == "$expected_pid_running" \
           && "$rid_running" == "$run_id_running" && "$had_summary" == "no" \
           && "$sub_pid" == "$sub_expect" \
           && "$state_finished" == "finished" && "$status_finished" == "dry-run" ]]; then
