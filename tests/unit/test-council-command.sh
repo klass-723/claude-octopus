@@ -1356,8 +1356,42 @@ test_council_dispatch_strips_blocked_env_but_sets_disposable_mode() {
     fi
 }
 
+test_council_run_status_beacon_lifecycle() {
+    test_case "council writes a run-status.json beacon: running at run-dir creation, finished at summary"
+    load_council_lib || return 1
+
+    # Unit: create_run_dir beacons "running" with this process's pid, before any
+    # summary.json exists — the signal a poller uses to tell in-progress from
+    # died-on-spawn.
+    local tmp; tmp="$(mktemp -d "$TEST_TMP_DIR/council-runstatus.XXXXXX")"
+    COUNCIL_OUTPUT_DIR="$tmp" council_create_run_dir >/dev/null 2>&1 || true
+    local rs="${COUNCIL_RUN_DIR}/run-status.json"
+    local state_running pid_running
+    state_running="$(jq -r '.state' "$rs" 2>/dev/null)"
+    pid_running="$(jq -r '.pid' "$rs" 2>/dev/null)"
+
+    # Integration: a real dry-run flips the beacon to "finished" with the terminal
+    # status, through council_write_summary_json (one hook covers every exit).
+    local tmp2; tmp2="$(mktemp -d "$TEST_TMP_DIR/council-runstatus2.XXXXXX")"
+    council_run --dry-run --goal advice --depth quick --benchmark auto \
+        --output-dir "$tmp2" "Should we cache?" >/dev/null 2>&1 || true
+    local rs2 state_finished status_finished
+    rs2="$(find "$tmp2" -name run-status.json -type f | head -1)"
+    state_finished="$(jq -r '.state' "$rs2" 2>/dev/null)"
+    status_finished="$(jq -r '.status' "$rs2" 2>/dev/null)"
+
+    if [[ "$state_running" == "running" && "$pid_running" == "$$" \
+          && "$state_finished" == "finished" && "$status_finished" == "dry-run" ]]; then
+        test_pass
+    else
+        test_fail "beacon lifecycle wrong: running(state=$state_running pid=$pid_running/$$) finished(state=$state_finished status=$status_finished)"
+        return 1
+    fi
+}
+
 test_council_command_files_are_registered
 test_council_orchestrate_route_exists
+test_council_run_status_beacon_lifecycle
 test_council_benchmark_routing_lib_is_extracted
 test_council_defaults_are_depth_aware
 test_council_rejects_non_usd_budget

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Council runs now write a `run-status.json` liveness beacon in the run
+  directory, so a backgrounded or detached run is pollable instead of
+  silent-empty. It records `state` (`running` at run-dir creation → `finished`
+  when `summary.json` is written) and the orchestrator `pid`, letting a caller
+  distinguish: no file → died before the run dir existed; `running` with a live
+  pid → in progress; `running` with a dead pid → crashed/killed mid-run;
+  `finished` → done (read `summary.json` for the result). Written atomically so a
+  poller never reads a half-written file.
+
 ## [9.64.0] - 2026-08-13
 
 ### Changed

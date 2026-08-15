@@ -2598,6 +2598,34 @@ council_parse_args() {
     council_detect_providers || return $?
 }
 
+council_write_run_status() {
+    # Machine-detectable liveness beacon for a (possibly backgrounded) council
+    # run, so a caller polling the run dir can tell these apart instead of seeing
+    # a silent-empty result:
+    #   - no run dir / no run-status.json    -> died before the run dir existed
+    #   - state "running" AND `kill -0 pid`  -> still running
+    #   - state "running" AND pid gone       -> crashed/killed mid-run
+    #   - state "finished"                   -> done; read summary.json for result
+    # summary.json stays the authoritative RESULT; this is only the liveness/pid
+    # signal, written atomically so a poller never reads a half-written file. It
+    # must never crash the run.
+    local state="$1" status="${2:-}"
+    [[ -n "${COUNCIL_RUN_DIR:-}" && -d "${COUNCIL_RUN_DIR}" ]] || return 0
+    local path="${COUNCIL_RUN_DIR}/run-status.json"
+    local tmp="${COUNCIL_RUN_DIR}/run-status.json.tmp"
+    if jq -n --arg state "$state" --arg status "$status" \
+            --arg run_id "${COUNCIL_RUN_ID:-}" --argjson pid "$$" \
+            '{state:$state, pid:$pid, run_id:$run_id,
+              status:(if $status == "" then null else $status end)}' \
+            > "$tmp" 2>/dev/null && mv -f "$tmp" "$path" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    # Fall back to a minimal valid beacon rather than leaving none.
+    printf '{"state":"%s","pid":%s}\n' "$state" "$$" > "$path" 2>/dev/null || true
+    return 0
+}
+
 council_create_run_dir() {
     local parent="$COUNCIL_OUTPUT_DIR"
     if [[ -z "$parent" ]]; then
@@ -2621,6 +2649,11 @@ council_create_run_dir() {
     done
 
     mkdir -p "$COUNCIL_RUN_DIR/responses" "$COUNCIL_RUN_DIR/critiques" "$COUNCIL_RUN_DIR/revisions" || return 1
+
+    # Beacon "running" the moment the run dir exists, so a backgrounded run is
+    # pollable (and a crash-on-spawn is distinguishable from work-in-progress)
+    # long before summary.json is produced.
+    council_write_run_status "running"
 }
 
 council_write_summary_json() {
@@ -2766,6 +2799,11 @@ council_write_summary_json() {
           },
           fixture: (if $fixture == "" then null else $fixture end)
         }' > "$summary_path"
+
+    # summary.json is the terminal artifact for every intended exit
+    # (dry-run/partial/aborted/completed) and the incomplete-recovery fallback,
+    # so flip the liveness beacon to "finished" here — one hook covers them all.
+    council_write_run_status "finished" "$status"
 }
 
 council_print_run_warnings() {
