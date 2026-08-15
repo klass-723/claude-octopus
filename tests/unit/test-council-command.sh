@@ -1360,31 +1360,50 @@ test_council_run_status_beacon_lifecycle() {
     test_case "council writes a run-status.json beacon: running at run-dir creation, finished at summary"
     load_council_lib || return 1
 
-    # Unit: create_run_dir beacons "running" with this process's pid, before any
+    # Unit: create_run_dir beacons "running" (with run_id + a live pid) BEFORE any
     # summary.json exists — the signal a poller uses to tell in-progress from
-    # died-on-spawn.
+    # died-on-spawn. Surface a setup failure rather than masking it with `|| true`.
     local tmp; tmp="$(mktemp -d "$TEST_TMP_DIR/council-runstatus.XXXXXX")"
-    COUNCIL_OUTPUT_DIR="$tmp" council_create_run_dir >/dev/null 2>&1 || true
-    local rs="${COUNCIL_RUN_DIR}/run-status.json"
-    local state_running pid_running
+    if ! COUNCIL_OUTPUT_DIR="$tmp" council_create_run_dir >/dev/null 2>&1; then
+        test_fail "council_create_run_dir failed"; return 1
+    fi
+    local rs="${COUNCIL_RUN_DIR}/run-status.json" run_id_running="$COUNCIL_RUN_ID"
+    local state_running pid_running rid_running had_summary=no
     state_running="$(jq -r '.state' "$rs" 2>/dev/null)"
     pid_running="$(jq -r '.pid' "$rs" 2>/dev/null)"
+    rid_running="$(jq -r '.run_id' "$rs" 2>/dev/null)"
+    [[ -e "${COUNCIL_RUN_DIR}/summary.json" ]] && had_summary=yes
+
+    # #1: a beacon written from a subshell must record the writing process's own
+    # pid (BASHPID), not the parent shell — otherwise a poller watches the wrong
+    # process. Capture the writer's pid and the recorded pid in the SAME subshell
+    # (comparing across two subshells would compare two different pids). On bash
+    # 3.2 (BASHPID unset) both resolve to $$, so this holds on every bash.
+    local sub_result sub_expect sub_pid
+    sub_result="$( ( council_write_run_status "running" >/dev/null 2>&1
+                     printf '%s|%s' "${BASHPID:-$$}" "$(jq -r '.pid' "$rs" 2>/dev/null)" ) )"
+    sub_expect="${sub_result%%|*}"
+    sub_pid="${sub_result##*|}"
 
     # Integration: a real dry-run flips the beacon to "finished" with the terminal
     # status, through council_write_summary_json (one hook covers every exit).
     local tmp2; tmp2="$(mktemp -d "$TEST_TMP_DIR/council-runstatus2.XXXXXX")"
-    council_run --dry-run --goal advice --depth quick --benchmark auto \
-        --output-dir "$tmp2" "Should we cache?" >/dev/null 2>&1 || true
+    if ! council_run --dry-run --goal advice --depth quick --benchmark auto \
+        --output-dir "$tmp2" "Should we cache?" >/dev/null 2>&1; then
+        test_fail "council_run --dry-run failed"; return 1
+    fi
     local rs2 state_finished status_finished
     rs2="$(find "$tmp2" -name run-status.json -type f | head -1)"
     state_finished="$(jq -r '.state' "$rs2" 2>/dev/null)"
     status_finished="$(jq -r '.status' "$rs2" 2>/dev/null)"
 
-    if [[ "$state_running" == "running" && "$pid_running" == "$$" \
+    if [[ "$state_running" == "running" && "$pid_running" =~ ^[1-9][0-9]*$ \
+          && "$rid_running" == "$run_id_running" && "$had_summary" == "no" \
+          && "$sub_pid" == "$sub_expect" \
           && "$state_finished" == "finished" && "$status_finished" == "dry-run" ]]; then
         test_pass
     else
-        test_fail "beacon lifecycle wrong: running(state=$state_running pid=$pid_running/$$) finished(state=$state_finished status=$status_finished)"
+        test_fail "beacon lifecycle wrong: running(state=$state_running pid=$pid_running run_id=$rid_running/$run_id_running summary=$had_summary subpid=$sub_pid/$sub_expect) finished(state=$state_finished status=$status_finished)"
         return 1
     fi
 }

@@ -2611,18 +2611,28 @@ council_write_run_status() {
     # must never crash the run.
     local state="$1" status="${2:-}"
     [[ -n "${COUNCIL_RUN_DIR:-}" && -d "${COUNCIL_RUN_DIR}" ]] || return 0
+    # BASHPID is the *current* process; $$ stays the parent shell PID when a
+    # sourced caller runs council_run in a subshell or background job, so a
+    # poller's `kill -0` would watch the wrong process. Prefer BASHPID, fall back
+    # to $$ on bash 3.2 (macOS default) where BASHPID is unset.
+    local pid="${BASHPID:-$$}"
     local path="${COUNCIL_RUN_DIR}/run-status.json"
     local tmp="${COUNCIL_RUN_DIR}/run-status.json.tmp"
     if jq -n --arg state "$state" --arg status "$status" \
-            --arg run_id "${COUNCIL_RUN_ID:-}" --argjson pid "$$" \
+            --arg run_id "${COUNCIL_RUN_ID:-}" --argjson pid "$pid" \
             '{state:$state, pid:$pid, run_id:$run_id,
               status:(if $status == "" then null else $status end)}' \
             > "$tmp" 2>/dev/null && mv -f "$tmp" "$path" 2>/dev/null; then
         return 0
     fi
-    rm -f "$tmp" 2>/dev/null || true
-    # Fall back to a minimal valid beacon rather than leaving none.
-    printf '{"state":"%s","pid":%s}\n' "$state" "$$" > "$path" 2>/dev/null || true
+    # Fall back to a minimal valid beacon — still written atomically (tmp + mv) so
+    # a poller never reads a half-written file and a prior valid beacon is not
+    # clobbered by a partial direct write.
+    if printf '{"state":"%s","pid":%s}\n' "$state" "$pid" > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$path" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+    else
+        rm -f "$tmp" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -2637,7 +2647,7 @@ council_create_run_dir() {
     local timestamp
     timestamp="$(date -u +%Y%m%d-%H%M%S)"
     local suffix
-    suffix="$(printf '%06x' "$$")"
+    suffix="$(printf '%06x' "${BASHPID:-$$}")"
     COUNCIL_RUN_ID="${timestamp}-${suffix}"
     COUNCIL_RUN_DIR="${parent}/${COUNCIL_RUN_ID}"
 
@@ -2648,12 +2658,23 @@ council_create_run_dir() {
         COUNCIL_RUN_DIR="${parent}/${COUNCIL_RUN_ID}"
     done
 
-    mkdir -p "$COUNCIL_RUN_DIR/responses" "$COUNCIL_RUN_DIR/critiques" "$COUNCIL_RUN_DIR/revisions" || return 1
-
-    # Beacon "running" the moment the run dir exists, so a backgrounded run is
-    # pollable (and a crash-on-spawn is distinguishable from work-in-progress)
-    # long before summary.json is produced.
+    # Publish the run directory atomically WITH its "running" beacon: build the
+    # artifact subdirs and write the beacon under a temporary staging dir in the
+    # SAME parent (so the rename is atomic on one filesystem), then rename it into
+    # place. This guarantees the invariant a poller relies on — a visible run
+    # directory always contains run-status.json — even if the process is killed
+    # mid-setup (the half-built staging dir is never named as the run dir).
+    local staging="${parent}/.staging-${COUNCIL_RUN_ID}.${BASHPID:-$$}"
+    rm -rf "$staging" 2>/dev/null
+    mkdir -p "$staging/responses" "$staging/critiques" "$staging/revisions" || { rm -rf "$staging" 2>/dev/null; return 1; }
+    local _final="$COUNCIL_RUN_DIR"
+    COUNCIL_RUN_DIR="$staging"
     council_write_run_status "running"
+    COUNCIL_RUN_DIR="$_final"
+    if ! mv "$staging" "$COUNCIL_RUN_DIR" 2>/dev/null; then
+        rm -rf "$staging" 2>/dev/null
+        return 1
+    fi
 }
 
 council_write_summary_json() {
@@ -2798,7 +2819,13 @@ council_write_summary_json() {
             handoff: $handoff
           },
           fixture: (if $fixture == "" then null else $fixture end)
-        }' > "$summary_path"
+        }' > "$summary_path" || {
+        # A failed serialization can leave an empty/partial summary.json. Remove it
+        # and fail so the caller's `|| return 1` fires (and #919's safety net writes
+        # a valid fallback) — never mark the run "finished" over a broken summary.
+        rm -f "$summary_path" 2>/dev/null || true
+        return 1
+    }
 
     # summary.json is the terminal artifact for every intended exit
     # (dry-run/partial/aborted/completed) and the incomplete-recovery fallback,
