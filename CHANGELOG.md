@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `OCTOPUS_AGY_MODEL` validation no longer aborts a run when the agy catalog is
+  unreachable. A restricted sandbox or an offline host makes `agy models` return
+  an empty catalog; the validator treated that "cannot validate" case like a
+  definitively invalid pin and failed model resolution, crashing the council on
+  spawn even when the pin was valid. Validation now fails **open** when the
+  catalog is unreachable (agy still rejects a genuinely bad model at dispatch,
+  with a clear error) and only fails **closed** for a model that is absent from a
+  *reachable* catalog. Set `OCTOPUS_AGY_MODEL_STRICT=1` to require validation and
+  restore the previous fail-closed behavior.
+
 ## [9.64.0] - 2026-08-13
 
 ### Changed
