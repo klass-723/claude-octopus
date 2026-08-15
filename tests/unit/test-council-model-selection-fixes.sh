@@ -80,7 +80,7 @@ MOCK_AGY_EMPTY
 chmod 755 "$STUB_EMPTY/agy"
 
 test_case "agy pin fails open when the catalog is unreachable (sandboxed/offline)"
-if printf 'payload' | env PATH="$STUB_EMPTY:$PATH" bash -c '
+if printf 'payload' | env "PATH=$STUB_EMPTY:$PATH" bash -c '
     log() { :; }
     source "'"$PROJECT_ROOT"'/scripts/lib/model-resolver.sh" 2>/dev/null
     validate_agy_model_name "Gemini 3.5 Flash (Low)"
@@ -91,7 +91,7 @@ else
 fi
 
 test_case "OCTOPUS_AGY_MODEL_STRICT=1 restores fail-closed on an unreachable catalog"
-if printf 'payload' | env PATH="$STUB_EMPTY:$PATH" OCTOPUS_AGY_MODEL_STRICT=1 bash -c '
+if printf 'payload' | env "PATH=$STUB_EMPTY:$PATH" "OCTOPUS_AGY_MODEL_STRICT=1" bash -c '
     log() { :; }
     source "'"$PROJECT_ROOT"'/scripts/lib/model-resolver.sh" 2>/dev/null
     validate_agy_model_name "Gemini 3.5 Flash (Low)"
