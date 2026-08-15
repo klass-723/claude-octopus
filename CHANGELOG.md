@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Council `quorum.met` no longer reports `false` when the chair is the host
+  runtime. A host-native chair (e.g. Claude Code running the council) cannot
+  self-dispatch, so it never produces a substantive chair response file — but it
+  is present and synthesizes the council in-context. `met` was gated on the chair
+  response, so a run with two cleanly-approving vendors was falsely reported
+  `quorum.met=false` (`distinct_approving_providers: 2`, `chair_received: false`).
+  `met` now treats a host-native chair as a present, synthesis-capable chair, and
+  `summary.json` exposes `quorum.chair_host_native` so the decision is
+  recomputable. A chair that is merely unavailable (not host-native) still fails
+  quorum.
+
 ## [9.64.0] - 2026-08-13
 
 ### Changed
