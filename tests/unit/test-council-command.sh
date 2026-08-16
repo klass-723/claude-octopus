@@ -1614,6 +1614,14 @@ test_council_one_vote_per_vendor_opt_in() {
     council_dedup_vendor_seats
     default_openai="$(jq '[.[] | select(.provider_org=="openai")] | length' <<< "$COUNCIL_ROSTER_JSON")"
 
+    # Explicit disable: ONLY the exact value "1" enables the policy. A non-"1"
+    # value (e.g. "0") must behave exactly like unset — guards against a future
+    # nonempty-value predicate silently enabling it on "0"/"false".
+    local off_openai
+    COUNCIL_ROSTER_JSON="$roster"
+    OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=0 council_dedup_vendor_seats
+    off_openai="$(jq '[.[] | select(.provider_org=="openai")] | length' <<< "$COUNCIL_ROSTER_JSON")"
+
     # Enabled: one openai voting seat (the higher-scored backend-architect wins),
     # chair untouched, agy kept.
     local on_openai on_persona on_chair on_total
@@ -1624,11 +1632,11 @@ test_council_one_vote_per_vendor_opt_in() {
     on_chair="$(jq '[.[] | select(.seat=="chair")] | length' <<< "$COUNCIL_ROSTER_JSON")"
     on_total="$(jq 'length' <<< "$COUNCIL_ROSTER_JSON")"
 
-    if [[ "$default_openai" == "2" && "$on_openai" == "1" && "$on_persona" == "backend-architect" \
-          && "$on_chair" == "1" && "$on_total" == "3" ]]; then
+    if [[ "$default_openai" == "2" && "$off_openai" == "2" && "$on_openai" == "1" \
+          && "$on_persona" == "backend-architect" && "$on_chair" == "1" && "$on_total" == "3" ]]; then
         test_pass
     else
-        test_fail "dedup wrong: default_openai=$default_openai on(openai=$on_openai persona=$on_persona chair=$on_chair total=$on_total)"
+        test_fail "dedup wrong: default_openai=$default_openai off_openai=$off_openai on(openai=$on_openai persona=$on_persona chair=$on_chair total=$on_total)"
         return 1
     fi
 }
