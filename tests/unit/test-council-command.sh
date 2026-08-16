@@ -1606,37 +1606,43 @@ test_council_one_vote_per_vendor_opt_in() {
       {"persona":"research-synthesizer","seat":"member","provider":"agy","provider_org":"google","score":"0.7"}
     ]'
 
-    # Default (flag unset): opt-in feature is off, roster is untouched — both openai
-    # seats remain, preserving today's upstream behavior.
-    local default_openai
+    # Compare the WHOLE roster (normalized), not just seat counts, so a regression
+    # that swaps a seat or replaces the chair can't slip through.
+    local roster_norm; roster_norm="$(jq -Sc . <<< "$roster")"
+    # Enabled result: the lower-scored openai seat (security-auditor) is dropped;
+    # chair + higher-scored openai (backend-architect) + agy remain, order preserved.
+    local expected_on; expected_on="$(jq -Sc . <<< '[
+      {"persona":"strategy-analyst","seat":"chair","provider":"claude","provider_org":"anthropic","score":"0.9"},
+      {"persona":"backend-architect","seat":"member","provider":"codex","provider_org":"openai","score":"0.8"},
+      {"persona":"research-synthesizer","seat":"member","provider":"agy","provider_org":"google","score":"0.7"}
+    ]')"
+
+    # Default (flag unset): opt-in feature is off, roster is byte-for-byte untouched.
+    local default_norm
     unset OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR
     COUNCIL_ROSTER_JSON="$roster"
     council_dedup_vendor_seats
-    default_openai="$(jq '[.[] | select(.provider_org=="openai")] | length' <<< "$COUNCIL_ROSTER_JSON")"
+    default_norm="$(jq -Sc . <<< "$COUNCIL_ROSTER_JSON")"
 
     # Explicit disable: ONLY the exact value "1" enables the policy. A non-"1"
-    # value (e.g. "0") must behave exactly like unset — guards against a future
-    # nonempty-value predicate silently enabling it on "0"/"false".
-    local off_openai
+    # value (e.g. "0") must leave the roster identical to unset — guards against a
+    # future nonempty-value predicate silently enabling it on "0"/"false".
+    local off_norm
     COUNCIL_ROSTER_JSON="$roster"
     OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=0 council_dedup_vendor_seats
-    off_openai="$(jq '[.[] | select(.provider_org=="openai")] | length' <<< "$COUNCIL_ROSTER_JSON")"
+    off_norm="$(jq -Sc . <<< "$COUNCIL_ROSTER_JSON")"
 
-    # Enabled: one openai voting seat (the higher-scored backend-architect wins),
-    # chair untouched, agy kept.
-    local on_openai on_persona on_chair on_total
+    # Enabled: roster reduced to exactly the expected one-vote-per-vendor set.
+    local on_norm
     COUNCIL_ROSTER_JSON="$roster"
     OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1 council_dedup_vendor_seats
-    on_openai="$(jq '[.[] | select(.provider_org=="openai")] | length' <<< "$COUNCIL_ROSTER_JSON")"
-    on_persona="$(jq -r '[.[] | select(.provider_org=="openai")][0].persona' <<< "$COUNCIL_ROSTER_JSON")"
-    on_chair="$(jq '[.[] | select(.seat=="chair")] | length' <<< "$COUNCIL_ROSTER_JSON")"
-    on_total="$(jq 'length' <<< "$COUNCIL_ROSTER_JSON")"
+    on_norm="$(jq -Sc . <<< "$COUNCIL_ROSTER_JSON")"
 
-    if [[ "$default_openai" == "2" && "$off_openai" == "2" && "$on_openai" == "1" \
-          && "$on_persona" == "backend-architect" && "$on_chair" == "1" && "$on_total" == "3" ]]; then
+    if [[ "$default_norm" == "$roster_norm" && "$off_norm" == "$roster_norm" \
+          && "$on_norm" == "$expected_on" ]]; then
         test_pass
     else
-        test_fail "dedup wrong: default_openai=$default_openai off_openai=$off_openai on(openai=$on_openai persona=$on_persona chair=$on_chair total=$on_total)"
+        test_fail "dedup roster identity wrong: default==input?$([[ "$default_norm" == "$roster_norm" ]] && echo y || echo n) off==input?$([[ "$off_norm" == "$roster_norm" ]] && echo y || echo n) on=$on_norm"
         return 1
     fi
 }
