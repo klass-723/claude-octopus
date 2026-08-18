@@ -34,17 +34,28 @@ run_gate() {
 
         COUNTS=($1)
         REVIEW_RCS=(${REVIEW_RC_SEQUENCE:-})
+        CORRECTION_STATUSES=(${CORRECTION_STATUS_SEQUENCE:-})
+        KEY_SEQ="${FINDING_KEY_SEQUENCE:-}"
         IDX_FILE="$RESULTS_DIR/count-idx"
         REVIEW_IDX_FILE="$RESULTS_DIR/review-idx"
+        KEY_IDX_FILE="$RESULTS_DIR/key-idx"
+        VALIDATE_CALLS_FILE="$RESULTS_DIR/validate-calls"
+        REVIEW_CALLS_FILE="$RESULTS_DIR/context-review-calls"
         echo 0 > "$IDX_FILE"
         echo 0 > "$REVIEW_IDX_FILE"
+        echo 0 > "$KEY_IDX_FILE"
+        echo 0 > "$VALIDATE_CALLS_FILE"
+        echo 0 > "$REVIEW_CALLS_FILE"
         CORRECTION_CALLS=0
+        CORRECTION_STRATEGIES=()
 
         source "$2/scripts/lib/workflows.sh" 2>/dev/null
 
         tangle_build_develop_review_context() { echo "$RESULTS_DIR/ctx-$7.md"; }
         tangle_run_context_code_review() {
-            local ridx rc
+            local ridx rc calls
+            calls=$(cat "$REVIEW_CALLS_FILE")
+            echo $((calls + 1)) > "$REVIEW_CALLS_FILE"
             TANGLE_REVIEW_FINDINGS_FILE="$RESULTS_DIR/findings-$3.json"
             echo "{\"findings\":[]}" > "$TANGLE_REVIEW_FINDINGS_FILE"
             ridx=$(cat "$REVIEW_IDX_FILE")
@@ -64,21 +75,55 @@ run_gate() {
             echo "$c"
         }
         tangle_findings_signature() { echo "sig-$(cat "$IDX_FILE")"; }
+        tangle_normal_finding_keys() {
+            local idx c i
+            idx=$(cat "$KEY_IDX_FILE")
+            echo $((idx + 1)) > "$KEY_IDX_FILE"
+            if [[ -n "$KEY_SEQ" ]]; then
+                printf "%s\n" "$KEY_SEQ" | sed -n "$((idx + 1))p" | tr "," "\n"
+            else
+                c="${COUNTS[$idx]:-0}"
+                for ((i=1; i<=c; i++)); do echo "same-$i"; done
+            fi
+        }
         tangle_validation_signature() { echo "vsig"; }
         tangle_apply_review_corrections() {
+            CORRECTION_STRATEGIES+=("${6:-}")
+            local status="${CORRECTION_STATUSES[$((CORRECTION_CALLS))]:-done}"
             CORRECTION_CALLS=$((CORRECTION_CALLS + 1))
-            TANGLE_CORRECTION_STATUS="done"
-            TANGLE_CORRECTION_CHANGED=1
+            TANGLE_CORRECTION_STATUS="$status"
             TANGLE_CORRECTION_CONTAMINATION=""
             TANGLE_CORRECTION_FILE="$RESULTS_DIR/corr-$CORRECTION_CALLS.md"
+            case "$status" in
+                failed-no-progress)
+                    TANGLE_CORRECTION_CHANGED=0
+                    return 1
+                    ;;
+                interrupted-partial)
+                    TANGLE_CORRECTION_CHANGED=0
+                    return 1
+                    ;;
+                *)
+                    TANGLE_CORRECTION_CHANGED=1
+                    return 0
+                    ;;
+            esac
+        }
+        validate_tangle_results() {
+            local calls
+            calls=$(cat "$VALIDATE_CALLS_FILE")
+            echo $((calls + 1)) > "$VALIDATE_CALLS_FILE"
             return 0
         }
-        validate_tangle_results() { return 0; }
 
         rc=0
         tangle_contextual_review_gate tg "prompt" "ctx" "subtasks" \
             "$RESULTS_DIR/validation.md" "$RESULTS_DIR/wt.txt" 0 codex || rc=$?
-        echo "rounds=$CORRECTION_CALLS rc=$rc"
+        if [[ "${ASSERT_STRATEGIES:-0}" == "1" ]]; then
+            echo "rounds=$CORRECTION_CALLS rc=$rc strategies=${CORRECTION_STRATEGIES[*]} validate=$(cat "$VALIDATE_CALLS_FILE") reviews=$(cat "$REVIEW_CALLS_FILE")"
+        else
+            echo "rounds=$CORRECTION_CALLS rc=$rc"
+        fi
     ' _ "$seq" "$PROJECT_ROOT"
 }
 
@@ -116,12 +161,55 @@ else
     test_fail "expected rounds=1 rc=1, got '$out'"
 fi
 
+test_case "single failed-no-progress round consumes convergence budget and retries"
+out=$(ASSERT_STRATEGIES=1 CORRECTION_STATUS_SEQUENCE="failed-no-progress done" OCTOPUS_TANGLE_CONVERGENCE_NO_PROGRESS_ROUNDS=3 run_gate "2 1 0")
+if [[ "$out" == "rounds=3 rc=0 strategies=delta single-finding delta validate=2 reviews=3" ]]; then
+    test_pass
+else
+    test_fail "expected failed-no-progress retry to recover, got '$out'"
+fi
+
+test_case "three consecutive failed-no-progress rounds stop at convergence limit"
+out=$(ASSERT_STRATEGIES=1 CORRECTION_STATUS_SEQUENCE="failed-no-progress failed-no-progress failed-no-progress done" OCTOPUS_TANGLE_CONVERGENCE_NO_PROGRESS_ROUNDS=3 run_gate "2 1 0")
+if [[ "$out" == "rounds=3 rc=1 strategies=delta single-finding single-finding validate=0 reviews=1" ]]; then
+    test_pass
+else
+    test_fail "expected three failed-no-progress rounds to stop, got '$out'"
+fi
+
+test_case "interrupted correction remains terminal"
+out=$(ASSERT_STRATEGIES=1 CORRECTION_STATUS_SEQUENCE="interrupted-partial done" OCTOPUS_TANGLE_CONVERGENCE_NO_PROGRESS_ROUNDS=3 run_gate "2 1 0")
+if [[ "$out" == "rounds=1 rc=1 strategies=delta validate=0 reviews=1" ]]; then
+    test_pass
+else
+    test_fail "expected interrupted correction to remain terminal, got '$out'"
+fi
+
 test_case "static blockers trip convergence guard (default 3 no-progress rounds)"
 out=$(OCTOPUS_TANGLE_CONVERGENCE_NO_PROGRESS_ROUNDS=3 run_gate "5 5 5 5 5 5 5 5 5 5")
 if [[ "$out" == "rounds=3 rc=1" ]]; then
     test_pass
 else
     test_fail "expected rounds=3 rc=1, got '$out'"
+fi
+
+test_case "resolved blocker identities reset convergence even without a new best count"
+# Best count reaches 3, then later reviews expose different blockers. Each round
+# resolves at least one blocker from the immediately previous review, so the
+# no-progress watchdog must not stop before the hard cap / eventual convergence.
+out=$(FINDING_KEY_SEQUENCE=$'a,b,c,d,e,f,g\na,b,c\nd,e,f,g,h,i,j\nd,e,f,g,h,i,j\ne,f,g,h,i' OCTOPUS_TANGLE_CONVERGENCE_NO_PROGRESS_ROUNDS=3 OCTOPUS_TANGLE_CORRECTION_HARD_CAP=5 run_gate "7 3 7 7 5 0")
+if [[ "$out" == "rounds=5 rc=0" ]]; then
+    test_pass
+else
+    test_fail "expected identity-aware progress to continue to zero, got '$out'"
+fi
+
+test_case "rewritten count without resolved identities still trips convergence guard"
+out=$(FINDING_KEY_SEQUENCE=$'a,b,c,d,e\na,b,c,d,e\na,b,c,d,e\na,b,c,d,e' OCTOPUS_TANGLE_CONVERGENCE_NO_PROGRESS_ROUNDS=3 run_gate "5 5 5 5 5")
+if [[ "$out" == "rounds=3 rc=1" ]]; then
+    test_pass
+else
+    test_fail "expected unchanged blocker identities to stop at 3 rounds, got '$out'"
 fi
 
 test_case "hard cap stops improving-but-never-zero loop"

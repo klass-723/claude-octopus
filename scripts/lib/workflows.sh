@@ -1717,6 +1717,26 @@ tangle_findings_signature() {
     jq -r '[.findings[]? | select((.severity // "") == "normal") | (.title // .message // "untitled")] | sort | join(" | ")' "$findings_file" 2>/dev/null || echo "unparseable"
 }
 
+# Stable blocker identities for convergence tracking. File + normalized title is
+# intentionally stronger than count-only progress while remaining resilient to
+# line movement and detail/confidence rewrites between review rounds.
+tangle_normal_finding_keys() {
+    local findings_file="$1"
+    [[ -f "$findings_file" ]] || return 0
+    jq -r '''
+        .findings[]?
+        | select((.severity // "") == "normal")
+        | ((.file // "unknown") | ascii_downcase) + "|" +
+          (((.title // .message // "untitled") | ascii_downcase | gsub("[[:space:]]+"; " ") | sub("^ "; "") | sub(" $"; "")))
+    ''' "$findings_file" 2>/dev/null | sort -u || true
+}
+
+tangle_resolved_finding_count() {
+    local previous_keys="$1"
+    local current_keys="$2"
+    comm -23         <(printf '%s\n' "$previous_keys" | sed '/^$/d' | sort -u)         <(printf '%s\n' "$current_keys" | sed '/^$/d' | sort -u)         | awk 'NF { n++ } END { print n + 0 }'
+}
+
 # Fingerprint only the actionable validation-gate decision. This lets the
 # correction loop distinguish useful validation movement from a static gate that
 # is being recomputed from immutable initial subtask result files.
@@ -3420,6 +3440,8 @@ tangle_contextual_review_gate() {
     local previous_normal_count="$normal_count"
     local previous_signature
     previous_signature=$(tangle_findings_signature "$findings_file")
+    local previous_finding_keys
+    previous_finding_keys=$(tangle_normal_finding_keys "$findings_file")
     local previous_validation_signature
     previous_validation_signature=$(tangle_validation_signature "$validation_file")
     local best_normal_count="$normal_count"
@@ -3448,9 +3470,22 @@ tangle_contextual_review_gate() {
             return 1
         fi
 
-        if ! tangle_apply_review_corrections "$resolved_prompt" "$review_context_file" "$findings_file" "$correction_round" "$tangle_coding_agent" "$correction_strategy"; then
-            log WARN "Correction round ${correction_round} made no observable progress; escalating without starting a hot loop"
-            return 1
+        local correction_rc=0
+        tangle_apply_review_corrections "$resolved_prompt" "$review_context_file" "$findings_file" "$correction_round" "$tangle_coding_agent" "$correction_strategy" || correction_rc=$?
+        if [[ "$correction_rc" -ne 0 ]]; then
+            if [[ "${TANGLE_CORRECTION_STATUS:-}" == "failed-no-progress" && "${TANGLE_CORRECTION_CHANGED:-0}" != "1" ]]; then
+                no_progress_rounds=$((no_progress_rounds + 1))
+                correction_strategy="single-finding"
+                log WARN "Correction round ${correction_round} made no observable worktree progress (${no_progress_rounds}/${convergence_round_limit}); retrying under convergence policy"
+                if [[ "${convergence_round_limit:-0}" -gt 0 && "$no_progress_rounds" -ge "$convergence_round_limit" ]]; then
+                    log ERROR "Stopping tangle correction loop after ${no_progress_rounds} consecutive failed-no-progress rounds"
+                    return 1
+                fi
+                ((correction_round++)) || true
+                continue
+            fi
+            log WARN "Correction round ${correction_round} failed with terminal status=${TANGLE_CORRECTION_STATUS:-unknown}; stopping correction loop"
+            return "$correction_rc"
         fi
 
         if [[ -n "${TANGLE_CORRECTION_CONTAMINATION:-}" ]]; then
@@ -3476,6 +3511,8 @@ tangle_contextual_review_gate() {
         normal_count=$(tangle_review_blocking_count "$findings_file")
         local current_signature
         current_signature=$(tangle_findings_signature "$findings_file")
+        local current_finding_keys
+        current_finding_keys=$(tangle_normal_finding_keys "$findings_file")
 
         if [[ "$review_rc" -ne 0 ]]; then
             if [[ "${normal_count:-0}" -gt 0 ]]; then
@@ -3504,9 +3541,15 @@ tangle_contextual_review_gate() {
         local current_validation_signature
         current_validation_signature=$(tangle_validation_signature "$validation_file")
         local made_progress=0
+        local resolved_finding_count=0
+        resolved_finding_count=$(tangle_resolved_finding_count "$previous_finding_keys" "$current_finding_keys")
         if [[ "${normal_count:-0}" -lt "${best_normal_count:-0}" ]]; then
             best_normal_count="$normal_count"
             made_progress=1
+        fi
+        if [[ "${resolved_finding_count:-0}" -gt 0 ]]; then
+            made_progress=1
+            log INFO "Correction round ${correction_round} resolved ${resolved_finding_count} blocker identity/identities from the previous review; resetting convergence guard"
         fi
         if [[ "$current_validation_signature" != "$previous_validation_signature" ]]; then
             if octo_bool_enabled "$validation_progress_resets_convergence"; then
@@ -3535,6 +3578,7 @@ tangle_contextual_review_gate() {
 
         previous_normal_count="$normal_count"
         previous_signature="$current_signature"
+        previous_finding_keys="$current_finding_keys"
         previous_validation_signature="$current_validation_signature"
         ((correction_round++)) || true
     done
