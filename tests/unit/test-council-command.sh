@@ -1675,8 +1675,11 @@ test_council_per_session_pool_isolation() {
     load_council_lib || return 1
     local ws; ws="$(mktemp -d "$TEST_TMP_DIR/council-pool.XXXXXX")"
 
-    # slug is filesystem-safe and reflects the session id.
-    local slug; slug="$(CLAUDE_CODE_SESSION_ID='sess/A b!' council_session_slug)"
+    # slug is filesystem-safe and INJECTIVE: two ids that sanitize to the same
+    # prefix ("sess/A b!" and "sess?A b!") must not collapse to one pool.
+    local slug1 slug2
+    slug1="$(CLAUDE_CODE_SESSION_ID='sess/A b!' council_session_slug)"
+    slug2="$(CLAUDE_CODE_SESSION_ID='sess?A b!' council_session_slug)"
 
     # Default pool is namespaced per session; two sessions get separate pools.
     local dirA dirB shared explicit
@@ -1687,20 +1690,21 @@ test_council_per_session_pool_isolation() {
     # Opt-out restores the flat shared pool (no session- segment).
     COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessA" OCTOPUS_COUNCIL_SHARED_POOL=1 council_create_run_dir >/dev/null 2>&1
     shared="$COUNCIL_RUN_DIR"
-    # An explicit --output-dir (COUNCIL_OUTPUT_DIR) is honored unchanged.
+    # An explicit --output-dir (COUNCIL_OUTPUT_DIR) must select $out DIRECTLY —
+    # the run dir's parent is $out, never $out/session-<slug>.
     local out; out="$(mktemp -d "$TEST_TMP_DIR/council-explicit.XXXXXX")"
     COUNCIL_OUTPUT_DIR="$out" council_create_run_dir >/dev/null 2>&1
     explicit="$COUNCIL_RUN_DIR"
 
-    if [[ "$slug" == "sess_A_b_" \
-          && "$dirA" == "$ws/councils/session-sessA/"* \
-          && "$dirB" == "$ws/councils/session-sessB/"* \
+    if [[ "$slug1" == "sess_A_b_-"* && "$slug2" == "sess_A_b_-"* && "$slug1" != "$slug2" \
+          && "$dirA" == "$ws/councils/session-sessA-"*/* \
+          && "$dirB" == "$ws/councils/session-sessB-"*/* \
           && "$dirA" != "$dirB" \
           && "$shared" == "$ws/councils/"* && "$shared" != *"/session-"* \
-          && "$explicit" == "$out/"* ]]; then
+          && "$(dirname "$explicit")" == "$out" ]]; then
         test_pass
     else
-        test_fail "pool isolation wrong: slug=$slug A=$dirA B=$dirB shared=$shared explicit=$explicit"
+        test_fail "pool isolation wrong: slug1=$slug1 slug2=$slug2 A=$dirA B=$dirB shared=$shared explicit=$explicit"
         return 1
     fi
 }

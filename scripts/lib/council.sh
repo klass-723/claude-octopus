@@ -2877,7 +2877,13 @@ council_session_slug() {
     local key="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
     [[ -z "$key" ]] && key="$(basename "$(pwd -P 2>/dev/null)" 2>/dev/null)"
     [[ -z "$key" || "$key" == "/" || "$key" == "." ]] && key="${BASHPID:-$$}"
-    printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-64
+    # Sanitizing alone is lossy: distinct ids that differ only in unsafe chars
+    # (e.g. "a/b" vs "a?b") would collapse to the same slug and share a pool.
+    # Append a checksum of the RAW key so the slug stays readable but injective.
+    local safe hash
+    safe="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-48)"
+    hash="$(printf '%s' "$key" | cksum | cut -d' ' -f1)"
+    printf '%s-%s' "$safe" "$hash"
 }
 
 council_create_run_dir() {
