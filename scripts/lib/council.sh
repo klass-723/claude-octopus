@@ -2879,7 +2879,11 @@ council_session_slug() {
     [[ -z "$key" || "$key" == "/" || "$key" == "." ]] && key="${BASHPID:-$$}"
     # Sanitizing alone is lossy: distinct ids that differ only in unsafe chars
     # (e.g. "a/b" vs "a?b") would collapse to the same slug and share a pool.
-    # Append a checksum of the RAW key so the slug stays readable but injective.
+    # Append a checksum of the RAW key to disambiguate them. This is best-effort
+    # collision mitigation, not a guarantee: a real Claude session id is a UUID
+    # that fits the 48-char cap and is unique, and the cwd/pid fallbacks make a
+    # same-machine collision astronomically unlikely — but a 32-bit cksum over a
+    # capped prefix is not provably injective.
     local safe hash
     safe="$(printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-48)"
     hash="$(printf '%s' "$key" | cksum | cut -d' ' -f1)"

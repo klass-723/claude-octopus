@@ -1675,8 +1675,8 @@ test_council_per_session_pool_isolation() {
     load_council_lib || return 1
     local ws; ws="$(mktemp -d "$TEST_TMP_DIR/council-pool.XXXXXX")"
 
-    # slug is filesystem-safe and INJECTIVE: two ids that sanitize to the same
-    # prefix ("sess/A b!" and "sess?A b!") must not collapse to one pool.
+    # slug is filesystem-safe and collision-resistant: two ids that sanitize to
+    # the same prefix ("sess/A b!" and "sess?A b!") must not collapse to one pool.
     local slug1 slug2
     slug1="$(CLAUDE_CODE_SESSION_ID='sess/A b!' council_session_slug)"
     slug2="$(CLAUDE_CODE_SESSION_ID='sess?A b!' council_session_slug)"
