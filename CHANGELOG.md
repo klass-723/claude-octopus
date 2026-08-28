@@ -6,6 +6,15 @@
 
 - Make review-fleet construction fail closed when the provider allowlist library cannot be loaded, and remove the unused optional cursor-agent library load.
 - Harden Tangle scope and verification safety: keep repository context out of implicit write authorization, share effective-scope resolution between validation and consolidation, verify overlap repair before worker dispatch, and terminate cleanly after INT/TERM verification cleanup while preserving caller traps.
+- Council runs are isolated per session by default. Concurrent governed sessions
+  on one machine previously shared a single `~/.claude-octopus/councils/` pool, so
+  a sibling session's runs appeared as "the newest run", its `run-status.json`
+  misled this session's diagnostics, and foreign/duplicate run directories
+  collided. The default pool is now namespaced by session
+  (`councils/session-<id>/…`, keyed on the Claude Code session id, falling back to
+  the worktree basename then the pid), so each session owns its runs and the
+  newest directory is always its own. An explicit `--output-dir` is honored
+  unchanged; set `OCTOPUS_COUNCIL_SHARED_POOL=1` to restore the flat shared pool.
 
 ## [10.1.0] - 2026-08-30
 

@@ -2869,10 +2869,32 @@ council_write_run_status() {
     return 0
 }
 
+council_session_slug() {
+    # A stable, filesystem-safe per-session key so concurrent governed sessions on
+    # one machine do not share a councils/ pool. Prefer the Claude Code session id;
+    # fall back to the worktree/cwd basename (governed sessions run one worktree
+    # each), then the pid.
+    local key="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
+    [[ -z "$key" ]] && key="$(basename "$(pwd -P 2>/dev/null)" 2>/dev/null)"
+    [[ -z "$key" || "$key" == "/" || "$key" == "." ]] && key="${BASHPID:-$$}"
+    printf '%s' "$key" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-64
+}
+
 council_create_run_dir() {
     local parent="$COUNCIL_OUTPUT_DIR"
     if [[ -z "$parent" ]]; then
         parent="${WORKSPACE_DIR:-${HOME}/.claude-octopus}/councils"
+        # Per-session isolation. Concurrent governed sessions on one machine
+        # otherwise share this single councils/ pool: a sibling session's runs
+        # then appear as "the newest run", its run-status.json misleads this
+        # session's diagnostics (the reported cross-session confusion), and
+        # foreign/duplicate dirs collide. Namespace the DEFAULT pool by session so
+        # each session owns its runs and the newest dir is always its own. An
+        # explicit --output-dir is honored unchanged; OCTOPUS_COUNCIL_SHARED_POOL=1
+        # restores the flat shared pool.
+        if [[ "${OCTOPUS_COUNCIL_SHARED_POOL:-}" != "1" ]]; then
+            parent="${parent}/session-$(council_session_slug)"
+        fi
     fi
 
     mkdir -p "$parent" || return 1

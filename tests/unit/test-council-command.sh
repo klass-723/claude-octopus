@@ -1670,9 +1670,45 @@ test_council_one_vote_per_vendor_opt_in() {
     fi
 }
 
+test_council_per_session_pool_isolation() {
+    test_case "council namespaces the default pool per session; --output-dir and opt-out are unaffected"
+    load_council_lib || return 1
+    local ws; ws="$(mktemp -d "$TEST_TMP_DIR/council-pool.XXXXXX")"
+
+    # slug is filesystem-safe and reflects the session id.
+    local slug; slug="$(CLAUDE_CODE_SESSION_ID='sess/A b!' council_session_slug)"
+
+    # Default pool is namespaced per session; two sessions get separate pools.
+    local dirA dirB shared explicit
+    COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessA" council_create_run_dir >/dev/null 2>&1
+    dirA="$COUNCIL_RUN_DIR"
+    COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessB" council_create_run_dir >/dev/null 2>&1
+    dirB="$COUNCIL_RUN_DIR"
+    # Opt-out restores the flat shared pool (no session- segment).
+    COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessA" OCTOPUS_COUNCIL_SHARED_POOL=1 council_create_run_dir >/dev/null 2>&1
+    shared="$COUNCIL_RUN_DIR"
+    # An explicit --output-dir (COUNCIL_OUTPUT_DIR) is honored unchanged.
+    local out; out="$(mktemp -d "$TEST_TMP_DIR/council-explicit.XXXXXX")"
+    COUNCIL_OUTPUT_DIR="$out" council_create_run_dir >/dev/null 2>&1
+    explicit="$COUNCIL_RUN_DIR"
+
+    if [[ "$slug" == "sess_A_b_" \
+          && "$dirA" == "$ws/councils/session-sessA/"* \
+          && "$dirB" == "$ws/councils/session-sessB/"* \
+          && "$dirA" != "$dirB" \
+          && "$shared" == "$ws/councils/"* && "$shared" != *"/session-"* \
+          && "$explicit" == "$out/"* ]]; then
+        test_pass
+    else
+        test_fail "pool isolation wrong: slug=$slug A=$dirA B=$dirB shared=$shared explicit=$explicit"
+        return 1
+    fi
+}
+
 test_council_command_files_are_registered
 test_council_orchestrate_route_exists
 test_council_run_status_beacon_lifecycle
+test_council_per_session_pool_isolation
 test_council_benchmark_routing_lib_is_extracted
 test_council_chair_is_host_native_detects_status
 test_council_quorum_met_with_host_native_chair
