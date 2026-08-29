@@ -2091,6 +2091,48 @@ test_council_advice_marks_timed_out_seat() {
     fi
 }
 
+test_council_advice_marks_blind_seat() {
+    test_case "advice phase flags a seat that verdicts without reading the artifact as blind, excludes it from quorum, and surfaces it"
+    load_council_lib || return 1
+
+    # Unit: the read-failure signature is blind; a grounded review is not.
+    local bd; bd="$(mktemp -d "$TEST_TMP_DIR/council-blindunit.XXXXXX")"
+    printf 'I cannot read the files due to a permission restriction.\n\nVERDICT: REVISE\n' > "$bd/blind.md"
+    printf '## Review\n\nsrc/app.ts:42 is missing the guard; otherwise sound.\n\nVERDICT: APPROVE\n' > "$bd/real.md"
+    local blind_yes=n blind_no=n
+    council_response_is_blind "$bd/blind.md" && blind_yes=y
+    council_response_is_blind "$bd/real.md" || blind_no=y
+
+    # Integration: a blind agy seat is classified "blind", excluded from the
+    # responder set, recorded in COUNCIL_BLIND_SEATS, and warned about.
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-blind.XXXXXX")"; mkdir -p "$d/responses"
+    COUNCIL_RUN_DIR="$d"
+    COUNCIL_ROSTER_JSON='[{"persona":"security-auditor","seat":"member","provider":"agy","provider_org":"google","model":"gemini"}]'
+    COUNCIL_FIXTURE=""
+    COUNCIL_BLIND_SEATS=""
+    council_dispatch_member_detached() { printf 'I cannot read the files due to a permission restriction.\n\nVERDICT: REVISE\n' > "$3"; return 0; }
+    council_run_chair_fallback() { :; }
+
+    council_run_advice_phase >/dev/null 2>&1 || true
+
+    local status blind responding output
+    status="$(jq -r '.[0].status' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
+    blind="$COUNCIL_BLIND_SEATS"
+    responding="$COUNCIL_RESPONDING_PROVIDERS"
+    output="$(council_print_run_warnings)"
+
+    unset -f council_dispatch_member_detached council_run_chair_fallback
+
+    if [[ "$blind_yes" == "y" && "$blind_no" == "y" \
+          && "$status" == "blind" && "$blind" == *"agy"* && "$responding" != *"agy"* \
+          && "$output" == *"blind seat"* && "$output" == *"agy"* ]]; then
+        test_pass
+    else
+        test_fail "blind detection wrong: unit(blind=$blind_yes real_not_blind=$blind_no) status='$status' blind=[$blind] responding=[$responding] output=[$output]"
+        return 1
+    fi
+}
+
 test_council_advice_does_not_infer_timeout_from_provider_rc() {
     test_case "advice phase keeps provider-returned 137 as no-response without a timeout hint"
     load_council_lib || return 1
@@ -2548,6 +2590,7 @@ test_council_synthesis_timeout_overrides_seat_cap
 test_council_live_response_uses_synthesis_timeout_for_chair
 test_council_rc_is_timeout_requires_watchdog_provenance
 test_council_advice_marks_timed_out_seat
+test_council_advice_marks_blind_seat
 test_council_advice_does_not_infer_timeout_from_provider_rc
 test_council_seat_timeout_rejects_zero_and_nonnumeric
 test_council_response_has_verdict_salvage
