@@ -2099,18 +2099,26 @@ test_council_advice_marks_blind_seat() {
     local bd; bd="$(mktemp -d "$TEST_TMP_DIR/council-blindunit.XXXXXX")"
     printf 'I cannot read the files due to a permission restriction.\n\nVERDICT: REVISE\n' > "$bd/blind.md"
     printf '## Review\n\nsrc/app.ts:42 is missing the guard; otherwise sound.\n\nVERDICT: APPROVE\n' > "$bd/real.md"
-    local blind_yes=n blind_no=n
+    # The CodeRabbit fixture: a permission-only refusal that never names the
+    # artifact. It matches is_blind (permission-denied shape) but slips past the
+    # narrower is_substantive read-failure pattern — so the SHARED gate must
+    # still reject it, or it counts toward quorum as a responder (Finding 1).
+    printf 'Permission denied. VERDICT: REVISE\n' > "$bd/perm.md"
+    local blind_yes=n blind_no=n perm_blind=n perm_not_substantive=n
     council_response_is_blind "$bd/blind.md" && blind_yes=y
     council_response_is_blind "$bd/real.md" || blind_no=y
+    council_response_is_blind "$bd/perm.md" && perm_blind=y
+    council_response_is_substantive "$bd/perm.md" || perm_not_substantive=y
 
-    # Integration: a blind agy seat is classified "blind", excluded from the
-    # responder set, recorded in COUNCIL_BLIND_SEATS, and warned about.
+    # Integration: a permission-only refusal (the Finding-1 case) is classified
+    # "blind", excluded from the responder/quorum set, recorded in
+    # COUNCIL_BLIND_SEATS, and warned about — NOT scored as a responder.
     local d; d="$(mktemp -d "$TEST_TMP_DIR/council-blind.XXXXXX")"; mkdir -p "$d/responses"
     COUNCIL_RUN_DIR="$d"
     COUNCIL_ROSTER_JSON='[{"persona":"security-auditor","seat":"member","provider":"agy","provider_org":"google","model":"gemini"}]'
     COUNCIL_FIXTURE=""
     COUNCIL_BLIND_SEATS=""
-    council_dispatch_member_detached() { printf 'I cannot read the files due to a permission restriction.\n\nVERDICT: REVISE\n' > "$3"; return 0; }
+    council_dispatch_member_detached() { printf 'Permission denied. VERDICT: REVISE\n' > "$3"; return 0; }
     council_run_chair_fallback() { :; }
 
     council_run_advice_phase >/dev/null 2>&1 || true
@@ -2124,11 +2132,12 @@ test_council_advice_marks_blind_seat() {
     unset -f council_dispatch_member_detached council_run_chair_fallback
 
     if [[ "$blind_yes" == "y" && "$blind_no" == "y" \
+          && "$perm_blind" == "y" && "$perm_not_substantive" == "y" \
           && "$status" == "blind" && "$blind" == *"agy"* && "$responding" != *"agy"* \
           && "$output" == *"blind seat"* && "$output" == *"agy"* ]]; then
         test_pass
     else
-        test_fail "blind detection wrong: unit(blind=$blind_yes real_not_blind=$blind_no) status='$status' blind=[$blind] responding=[$responding] output=[$output]"
+        test_fail "blind detection wrong: unit(blind=$blind_yes real_not_blind=$blind_no perm_blind=$perm_blind perm_not_substantive=$perm_not_substantive) status='$status' blind=[$blind] responding=[$responding] output=[$output]"
         return 1
     fi
 }

@@ -38,6 +38,7 @@
   extension and MCP integration remain supported.
 
 ### Fixed
+
 - Migrate legacy generated `codex-mini` pins such as `gpt-5-codex-mini` to
   `gpt-5.6-luna`, preventing quick workflows from selecting a model that is
   unsupported for ChatGPT-authenticated Codex CLI sessions. Agent help now

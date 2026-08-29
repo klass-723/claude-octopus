@@ -1898,6 +1898,18 @@ council_response_is_substantive() {
         return 1
     fi
 
+    # 3) A "blind" seat — a verdict returned without reading the artifact (permission
+    #    denied / no file access) — reviewed nothing and must never count toward the
+    #    quorum. council_response_is_blind matches a strict SUPERSET of case 2 (it adds
+    #    the permission-denied / no-file-access shapes), so a reply like
+    #    "Permission denied. VERDICT: REVISE" would otherwise slip past cases 1-2 and
+    #    be scored as a substantive responder. Fold it in here so the single
+    #    substantive gate the quorum tally keys on and the advice-phase `blind` label
+    #    agree; the advice phase still re-tests is_blind to label it distinctly.
+    if council_response_is_blind "$f"; then
+        return 1
+    fi
+
     return 0
 }
 
