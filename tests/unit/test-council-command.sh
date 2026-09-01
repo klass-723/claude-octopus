@@ -1574,7 +1574,7 @@ test_council_run_status_beacon_lifecycle() {
 }
 
 test_council_quorum_met_with_host_native_chair() {
-    test_case "quorum.met is true when a host-native chair + two vendors approve (chair_received stays false)"
+    test_case "quorum.met reflects the vote: host-native chair (synthesis available) and chair-absent (met stays true, synthesis flagged unavailable) both keep two vendor approvals"
     load_council_lib || return 1
     local d; d="$(mktemp -d "$TEST_TMP_DIR/council-hnchair.XXXXXX")"; mkdir -p "$d/responses"
     COUNCIL_RUN_DIR="$d"
@@ -1600,21 +1600,75 @@ test_council_quorum_met_with_host_native_chair() {
 
     COUNCIL_PROVIDER_STATUS_JSON='{"claude":"host-native","codex":"available","agy":"available"}' \
         council_run_advice_phase >/dev/null 2>&1 || true
-    local met_hn chair_recv_hn hostnative_hn
-    met_hn="$COUNCIL_QUORUM_MET"; chair_recv_hn="$COUNCIL_CHAIR_RESPONSE_RECEIVED"; hostnative_hn="$COUNCIL_CHAIR_HOST_NATIVE"
+    local met_hn chair_recv_hn hostnative_hn synth_hn
+    met_hn="$COUNCIL_QUORUM_MET"; chair_recv_hn="$COUNCIL_CHAIR_RESPONSE_RECEIVED"
+    hostnative_hn="$COUNCIL_CHAIR_HOST_NATIVE"; synth_hn="$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE"
 
-    # Negative control: same two approvals but the chair provider is merely
-    # "available" and never responded — chair is genuinely absent, met must be false.
+    # Chair genuinely absent (provider merely "available", never responded, no
+    # fallback): the two vendor approvals still carry the VOTE, so met stays true
+    # (Finding 4 — a missing/degenerate chair must not corrupt the tally to
+    # met=false), but the missing synthesis is flagged chair_synthesis_available=false.
     COUNCIL_PROVIDER_STATUS_JSON='{"claude":"available","codex":"available","agy":"available"}' \
         council_run_advice_phase >/dev/null 2>&1 || true
-    local met_absent="$COUNCIL_QUORUM_MET"
+    local met_absent="$COUNCIL_QUORUM_MET" synth_absent="$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE"
 
     unset -f council_dispatch_member_detached council_run_chair_fallback
 
-    if [[ "$met_hn" == "true" && "$chair_recv_hn" == "false" && "$hostnative_hn" == "true" && "$met_absent" == "false" ]]; then
+    if [[ "$met_hn" == "true" && "$chair_recv_hn" == "false" && "$hostnative_hn" == "true" && "$synth_hn" == "true" \
+          && "$met_absent" == "true" && "$synth_absent" == "false" ]]; then
         test_pass
     else
-        test_fail "host-native chair quorum wrong: met=$met_hn chair_received=$chair_recv_hn host_native=$hostnative_hn ; absent-chair met=$met_absent"
+        test_fail "host-native chair quorum wrong: met=$met_hn chair_received=$chair_recv_hn host_native=$hostnative_hn synth=$synth_hn ; absent-chair met=$met_absent synth=$synth_absent"
+        return 1
+    fi
+}
+
+test_council_degenerate_chair_keeps_vote_and_flags_synthesis() {
+    test_case "a dispatched chair that returns a degenerate response keeps quorum.met=true on the two vendor approvals, flags chair_synthesis_available=false, and warns (Finding 4)"
+    load_council_lib || return 1
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-degchair.XXXXXX")"; mkdir -p "$d/responses"
+    COUNCIL_RUN_DIR="$d"
+    COUNCIL_DEPTH="standard"   # required_non_chair = 2
+    COUNCIL_FIXTURE=""
+    COUNCIL_CHAIR_FALLBACK_USED="false"; COUNCIL_CHAIR_FALLBACK_PERSONA=""
+    COUNCIL_ROSTER_JSON='[
+      {"persona":"strategy-analyst","seat":"chair","provider":"codex","provider_org":"openai","model":"gpt"},
+      {"persona":"backend-architect","seat":"member","provider":"codex","provider_org":"openai","model":"gpt"},
+      {"persona":"security-auditor","seat":"member","provider":"agy","provider_org":"google","model":"gemini"}
+    ]'
+    # The two non-chair vendors cleanly APPROVE with grounded evidence; the chair
+    # seat is DISPATCHED but returns the host self-dispatch stub (non-substantive →
+    # degenerate). The chair provider is NOT host-native, and no fallback recovers
+    # it, so the chair synthesis is genuinely absent — but the vote still carries.
+    council_dispatch_member_detached() {
+        local mj="$1" out="$3" seat
+        seat="$(jq -r '.seat // "member"' <<< "$mj")"
+        if [[ "$seat" == "chair" ]]; then
+            printf 'Subprocess dispatch is unavailable in this environment.\n' > "$out"
+            return 0
+        fi
+        printf '## Review\n\nsrc/app.ts:42 correctly guards the nil case; tests cover it.\n\nVERDICT: APPROVE\n' > "$out"
+        return 0
+    }
+    council_run_chair_fallback() { :; }   # no dispatched fallback available
+
+    COUNCIL_PROVIDER_STATUS_JSON='{"codex":"available","agy":"available"}' \
+        council_run_advice_phase >/dev/null 2>&1 || true
+
+    local met synth chair_status approving warn
+    met="$COUNCIL_QUORUM_MET"
+    synth="$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE"
+    chair_status="$(jq -r 'map(select(.seat == "chair"))[0].status // "none"' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
+    approving="$COUNCIL_DISTINCT_APPROVING_MODEL_FAMILIES"
+    warn="$(council_print_run_warnings)"
+
+    unset -f council_dispatch_member_detached council_run_chair_fallback
+
+    if [[ "$met" == "true" && "$synth" == "false" && "$chair_status" == "degenerate" \
+          && "$approving" == "2" && "$warn" == *"chair synthesis was unavailable"* ]]; then
+        test_pass
+    else
+        test_fail "degenerate-chair quorum wrong: met=$met synth=$synth chair_status=$chair_status approving_families=$approving warn=[$warn]"
         return 1
     fi
 }
@@ -1732,6 +1786,7 @@ test_council_per_session_pool_isolation
 test_council_benchmark_routing_lib_is_extracted
 test_council_chair_is_host_native_detects_status
 test_council_quorum_met_with_host_native_chair
+test_council_degenerate_chair_keeps_vote_and_flags_synthesis
 test_council_one_vote_per_vendor_opt_in
 test_council_defaults_are_depth_aware
 test_council_rejects_non_usd_budget
