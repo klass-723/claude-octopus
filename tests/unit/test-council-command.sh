@@ -2104,11 +2104,14 @@ test_council_advice_marks_blind_seat() {
     # narrower is_substantive read-failure pattern — so the SHARED gate must
     # still reject it, or it counts toward quorum as a responder (Finding 1).
     printf 'Permission denied. VERDICT: REVISE\n' > "$bd/perm.md"
-    local blind_yes=n blind_no=n perm_blind=n perm_not_substantive=n
+    printf 'Access denied. VERDICT: REVISE\n' > "$bd/access.md"
+    local blind_yes=n blind_no=n perm_blind=n perm_not_substantive=n access_blind=n access_not_substantive=n
     council_response_is_blind "$bd/blind.md" && blind_yes=y
     council_response_is_blind "$bd/real.md" || blind_no=y
     council_response_is_blind "$bd/perm.md" && perm_blind=y
     council_response_is_substantive "$bd/perm.md" || perm_not_substantive=y
+    council_response_is_blind "$bd/access.md" && access_blind=y
+    council_response_is_substantive "$bd/access.md" || access_not_substantive=y
 
     # Integration: a permission-only refusal (the Finding-1 case) is classified
     # "blind", excluded from the responder/quorum set, recorded in
@@ -2118,7 +2121,7 @@ test_council_advice_marks_blind_seat() {
     COUNCIL_ROSTER_JSON='[{"persona":"security-auditor","seat":"member","provider":"agy","provider_org":"google","model":"gemini"}]'
     COUNCIL_FIXTURE=""
     COUNCIL_BLIND_SEATS=""
-    council_dispatch_member_detached() { printf 'Permission denied. VERDICT: REVISE\n' > "$3"; return 0; }
+    council_dispatch_member_detached() { printf 'Access denied. VERDICT: REVISE\n' > "$3"; return 0; }
     council_run_chair_fallback() { :; }
 
     council_run_advice_phase >/dev/null 2>&1 || true
@@ -2133,11 +2136,12 @@ test_council_advice_marks_blind_seat() {
 
     if [[ "$blind_yes" == "y" && "$blind_no" == "y" \
           && "$perm_blind" == "y" && "$perm_not_substantive" == "y" \
+          && "$access_blind" == "y" && "$access_not_substantive" == "y" \
           && "$status" == "blind" && "$blind" == *"agy"* && "$responding" != *"agy"* \
           && "$output" == *"blind seat"* && "$output" == *"agy"* ]]; then
         test_pass
     else
-        test_fail "blind detection wrong: unit(blind=$blind_yes real_not_blind=$blind_no perm_blind=$perm_blind perm_not_substantive=$perm_not_substantive) status='$status' blind=[$blind] responding=[$responding] output=[$output]"
+        test_fail "blind detection wrong: unit(blind=$blind_yes real_not_blind=$blind_no perm_blind=$perm_blind perm_not_substantive=$perm_not_substantive access_blind=$access_blind access_not_substantive=$access_not_substantive) status='$status' blind=[$blind] responding=[$responding] output=[$output]"
         return 1
     fi
 }

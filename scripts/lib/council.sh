@@ -1936,7 +1936,7 @@ council_response_is_blind() {
     # code behavior or a finding and is not evidence that the reviewer was blind.
     tr '\n' ' ' < "$f" \
         | tr -s '[:space:]' ' ' \
-        | grep -ciE '^[[:space:]]*permission[[:space:]-]*(restriction|denied|error)[[:space:][:punct:]]*(verdict:[[:space:]]*(approve|revise|block)[[:space:][:punct:]]*)?$' >/dev/null
+        | grep -ciE '^[[:space:]]*(permission[[:space:]-]*(restriction|denied|error)|access[[:space:]-]*denied)[[:space:][:punct:]]*(verdict:[[:space:]]*(approve|revise|block)[[:space:][:punct:]]*)?$' >/dev/null
 }
 
 council_response_verdict() {
