@@ -2903,8 +2903,8 @@ council_create_run_dir() {
         # otherwise share this single councils/ pool: a sibling session's runs
         # then appear as "the newest run", its run-status.json misleads this
         # session's diagnostics (the reported cross-session confusion), and
-        # foreign/duplicate dirs collide. Namespace the DEFAULT pool by session so
-        # each session owns its runs and the newest dir is always its own. An
+        # foreign/duplicate dirs collide. Namespace the DEFAULT pool by a
+        # best-effort session slug so normal sessions select their own runs. An
         # explicit --output-dir is honored unchanged; OCTOPUS_COUNCIL_SHARED_POOL=1
         # restores the flat shared pool.
         if [[ "${OCTOPUS_COUNCIL_SHARED_POOL:-}" != "1" ]]; then
