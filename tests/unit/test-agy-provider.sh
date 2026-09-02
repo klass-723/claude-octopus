@@ -1050,6 +1050,7 @@ MOCK_AGY
         OCTO_ROOT="$PROJECT_ROOT" \
         OCTOPUS_AGY_MODEL='gemini-test' \
         OCTOPUS_AGY_HEALTH_TIMEOUT=1 \
+        OCTOPUS_PROVIDER_LIVE_TIMEOUT=1 \
         PATH="$tmp_bin:/usr/bin:/bin" \
             bash "$PROJECT_ROOT/scripts/doctor.sh" providers --live --json
     )"
