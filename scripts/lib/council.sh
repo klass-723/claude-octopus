@@ -147,6 +147,8 @@ council_reset_defaults() {
     COUNCIL_RESPONSES_RECEIVED="0"
     COUNCIL_QUORUM_MET="false"
     COUNCIL_CHAIR_RESPONSE_RECEIVED="false"
+    COUNCIL_CHAIR_HOST_NATIVE="false"
+    COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
     COUNCIL_CHAIR_FALLBACK_USED="false"
     COUNCIL_CHAIR_FALLBACK_PERSONA=""
     COUNCIL_IMPLEMENTATION_PLAN_WRITTEN="false"
@@ -2244,15 +2246,8 @@ council_run_advice_phase() {
     if [[ "$COUNCIL_CHAIR_RESPONSE_RECEIVED" != "true" ]] && council_chair_is_host_native; then
         COUNCIL_CHAIR_HOST_NATIVE="true"
     fi
-    local chair_present="false"
-    if [[ "$COUNCIL_CHAIR_RESPONSE_RECEIVED" == "true" || "$COUNCIL_CHAIR_HOST_NATIVE" == "true" ]]; then
-        chair_present="true"
-    fi
-    # A present, synthesis-capable chair is what makes a synthesized recommendation
-    # possible. Track it separately from the vote: the chair is the synthesizer, not
-    # an independent cross-lab reviewer (see the seats[] note above), so its absence
-    # must not flip a passed vote to met=false.
-    COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="$chair_present"
+    # Chair response and host-native state identify a synthesis candidate.
+    # COUNCIL_CHAIR_SYNTHESIS_AVAILABLE stays false until synthesis succeeds.
 
     # The independent cross-lab VOTE, from the non-chair seats' verdicts alone:
     # >= `required` responders AND, for standard/deep, >= `required` DISTINCT
@@ -2503,6 +2498,7 @@ Medium
 
 Review \`summary.json\` and approve, revise, debate, or stop.
 EOF
+    return 1
 }
 
 council_needs_implementation_plan() {
@@ -3226,7 +3222,12 @@ council_print_run_warnings() {
     fi
 
     if [[ "$COUNCIL_QUORUM_MET" == "true" && "${COUNCIL_CHAIR_SYNTHESIS_AVAILABLE:-}" != "true" ]]; then
-        echo "Council warning: quorum met on independent vendor approvals, but chair synthesis was unavailable (no chair response / all chair seats degenerate). No synthesized recommendation was produced — read responses/*.md for the per-seat verdicts. See summary.json quorum.chair_synthesis_available."
+        local _chair_synthesis_warning="Council warning: quorum met on independent vendor approvals, but chair synthesis was unavailable (no chair response / all chair seats degenerate). No synthesized recommendation was produced — read responses/*.md for the per-seat verdicts. See summary.json quorum.chair_synthesis_available."
+        if declare -F log >/dev/null 2>&1; then
+            log WARN "$_chair_synthesis_warning" 2>&1
+        else
+            printf '%s\n' "$_chair_synthesis_warning"
+        fi
     fi
 }
 
@@ -3288,7 +3289,8 @@ _council_run_impl() {
         echo "Council stopped before synthesis: quorum was not met. See ${COUNCIL_RUN_DIR}/summary.json"
         return 1
     fi
-    if [[ "$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE" != "true" ]]; then
+    if [[ "$COUNCIL_CHAIR_RESPONSE_RECEIVED" != "true" \
+          && "$COUNCIL_CHAIR_HOST_NATIVE" != "true" ]]; then
         council_append_corpus_artifacts || return 1
         council_write_summary_json "partial" || return 1
         council_print_run_warnings
@@ -3316,7 +3318,16 @@ _council_run_impl() {
         [[ "$COUNCIL_ABORTED_FOR_COST" == "true" ]] && return 0
         return 1
     fi
-    council_write_synthesis
+    COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
+    if council_write_synthesis; then
+        COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="true"
+    else
+        council_append_corpus_artifacts || return 1
+        council_write_summary_json "partial" || return 1
+        council_print_run_warnings
+        echo "Council quorum met on independent vendor approvals, but chair synthesis was unavailable — no synthesized recommendation was produced this round. Read the per-seat verdicts in ${COUNCIL_RUN_DIR}/responses/ (summary.json quorum.met=true, chair_synthesis_available=false)."
+        return 1
+    fi
     if council_check_cost_cap "implementation" "implementation planning"; then
         :
     else
