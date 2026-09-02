@@ -853,8 +853,10 @@ test_agy_spawn_bypasses_timeout_wrapper() {
 test_agy_sync_bypasses_timeout_wrapper() {
     test_case "sync dispatch enforces timeout wrapper for agy"
 
+    local sync_block
+    sync_block="$(sed -n '/^run_agent_sync() {/,/^}/p' "$PROJECT_ROOT/scripts/lib/agent-sync.sh")"
     if grep -q 'agent_type.*agy' "$PROJECT_ROOT/scripts/lib/agent-sync.sh" && \
-       sed -n '/^run_agent_sync() {/,/^}/p' "$PROJECT_ROOT/scripts/lib/agent-sync.sh" | grep -q 'run_with_timeout'; then
+       [[ "$sync_block" == *"run_with_timeout"* ]]; then
         test_pass
     else
         test_fail "agent-sync.sh should wrap agy in run_with_timeout"
