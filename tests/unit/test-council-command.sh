@@ -2105,13 +2105,17 @@ test_council_advice_marks_blind_seat() {
     # still reject it, or it counts toward quorum as a responder (Finding 1).
     printf 'Permission denied. VERDICT: REVISE\n' > "$bd/perm.md"
     printf 'Access denied. VERDICT: REVISE\n' > "$bd/access.md"
-    local blind_yes=n blind_no=n perm_blind=n perm_not_substantive=n access_blind=n access_not_substantive=n
+    printf 'Permission is denied. VERDICT: REVISE\n' > "$bd/perm-is.md"
+    printf 'Access is denied. VERDICT: REVISE\n' > "$bd/access-is.md"
+    local blind_yes=n blind_no=n perm_blind=n perm_not_substantive=n access_blind=n access_not_substantive=n perm_is_blind=n access_is_blind=n
     council_response_is_blind "$bd/blind.md" && blind_yes=y
     council_response_is_blind "$bd/real.md" || blind_no=y
     council_response_is_blind "$bd/perm.md" && perm_blind=y
     council_response_is_substantive "$bd/perm.md" || perm_not_substantive=y
     council_response_is_blind "$bd/access.md" && access_blind=y
     council_response_is_substantive "$bd/access.md" || access_not_substantive=y
+    council_response_is_blind "$bd/perm-is.md" && perm_is_blind=y
+    council_response_is_blind "$bd/access-is.md" && access_is_blind=y
 
     # Integration: a permission-only refusal (the Finding-1 case) is classified
     # "blind", excluded from the responder/quorum set, recorded in
@@ -2121,10 +2125,12 @@ test_council_advice_marks_blind_seat() {
     COUNCIL_ROSTER_JSON='[{"persona":"security-auditor","seat":"member","provider":"agy","provider_org":"google","model":"gemini"}]'
     COUNCIL_FIXTURE=""
     COUNCIL_BLIND_SEATS=""
-    council_dispatch_member_detached() { printf 'Access denied. VERDICT: REVISE\n' > "$3"; return 0; }
+    council_dispatch_member_detached() { printf 'Access is denied. VERDICT: REVISE\n' > "$3"; return 0; }
     council_run_chair_fallback() { :; }
 
     council_run_advice_phase >/dev/null 2>&1 || true
+    council_note_blind_seat agy
+    council_note_blind_seat agy
 
     local status blind responding output
     status="$(jq -r '.[0].status' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
@@ -2137,6 +2143,7 @@ test_council_advice_marks_blind_seat() {
     if [[ "$blind_yes" == "y" && "$blind_no" == "y" \
           && "$perm_blind" == "y" && "$perm_not_substantive" == "y" \
           && "$access_blind" == "y" && "$access_not_substantive" == "y" \
+          && "$perm_is_blind" == "y" && "$access_is_blind" == "y" && "$blind" == "agy" \
           && "$status" == "blind" && "$blind" == *"agy"* && "$responding" != *"agy"* \
           && "$output" == *"blind seat"* && "$output" == *"agy"* ]]; then
         test_pass
@@ -2594,6 +2601,7 @@ test_council_seats_array_makes_quorum_inspectable() {
                           or (.status == "responded" and .verdict == "APPROVE")))
         and (.quorum.distinct_approving_providers
              == ([.seats[] | select(.counted_as_approver) | .provider] | unique | length))
+        and (.quorum.blind_seats | type == "array")
     ' "$s" >/dev/null; then
         test_pass
     else
