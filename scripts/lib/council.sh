@@ -17,6 +17,7 @@ _council_registry_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${_council_registry_dir}/agent-spec.sh" 2>/dev/null || true
 source "${_council_registry_dir}/provider-registry.sh" 2>/dev/null || true
 source "${_council_registry_dir}/provider-policy.sh" 2>/dev/null || true
+source "${_council_registry_dir}/session-id.sh" 2>/dev/null || true
 COUNCIL_PROVIDER_POLICY_VALID="true"
 COUNCIL_DEFAULT_PROVIDERS="$(octo_council_default_providers)" || COUNCIL_PROVIDER_POLICY_VALID="false"
 COUNCIL_MAX_COST=""
@@ -2871,10 +2872,11 @@ council_write_run_status() {
 
 council_session_slug() {
     # A stable, filesystem-safe per-session key so concurrent governed sessions on
-    # one machine do not share a councils/ pool. Prefer the Claude Code session id;
+    # one machine do not share a councils/ pool. Prefer the host session id;
     # fall back to the worktree/cwd basename (governed sessions run one worktree
     # each), then the pid.
-    local key="${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-}}"
+    local key
+    key="$(octo_resolve_session_id "" 2>/dev/null || true)"
     [[ -z "$key" ]] && key="$(basename "$(pwd -P 2>/dev/null)" 2>/dev/null)"
     [[ -z "$key" || "$key" == "/" || "$key" == "." ]] && key="${BASHPID:-$$}"
     # Sanitizing alone is lossy: distinct ids that differ only in unsafe chars

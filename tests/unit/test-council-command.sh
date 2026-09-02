@@ -1677,9 +1677,22 @@ test_council_per_session_pool_isolation() {
 
     # slug is filesystem-safe and collision-resistant: two ids that sanitize to
     # the same prefix ("sess/A b!" and "sess?A b!") must not collapse to one pool.
-    local slug1 slug2
+    local slug1 slug2 codex_slug1 codex_slug2 codex_precedence_slug codex_task_slug claude_host_slug
     slug1="$(CLAUDE_CODE_SESSION_ID='sess/A b!' council_session_slug)"
     slug2="$(CLAUDE_CODE_SESSION_ID='sess?A b!' council_session_slug)"
+    codex_slug1="$(OCTOPUS_HOST=codex CODEX_SESSION_ID='codex/A' CODEX_TASK_ID= \
+        CLAUDE_CODE_SESSION_ID= CLAUDE_SESSION_ID= council_session_slug)"
+    codex_slug2="$(OCTOPUS_HOST=codex CODEX_SESSION_ID='codex?A' CODEX_TASK_ID= \
+        CLAUDE_CODE_SESSION_ID= CLAUDE_SESSION_ID= council_session_slug)"
+    codex_precedence_slug="$(OCTOPUS_HOST=codex CODEX_SESSION_ID='codex/A' CODEX_TASK_ID='task/B' \
+        CLAUDE_CODE_SESSION_ID= CLAUDE_SESSION_ID= council_session_slug)"
+    codex_task_slug="$(
+        unset CODEX_SESSION_ID
+        OCTOPUS_HOST=codex CODEX_TASK_ID='task/A' \
+            CLAUDE_CODE_SESSION_ID= CLAUDE_SESSION_ID= council_session_slug
+    )"
+    claude_host_slug="$(OCTOPUS_HOST=claude CODEX_SESSION_ID='codex/A' \
+        CLAUDE_CODE_SESSION_ID='claude/A' CLAUDE_SESSION_ID= council_session_slug)"
 
     # Default pool is namespaced per session; two sessions get separate pools.
     local dirA dirB shared explicit
@@ -1697,6 +1710,9 @@ test_council_per_session_pool_isolation() {
     explicit="$COUNCIL_RUN_DIR"
 
     if [[ "$slug1" == "sess_A_b_-"* && "$slug2" == "sess_A_b_-"* && "$slug1" != "$slug2" \
+          && "$codex_slug1" == "codex_A-"* && "$codex_slug2" == "codex_A-"* \
+          && "$codex_slug1" != "$codex_slug2" && "$codex_precedence_slug" == "$codex_slug1" \
+          && "$codex_task_slug" == "task_A-"* && "$claude_host_slug" == "claude_A-"* \
           && "$dirA" == "$ws/councils/session-sessA-"*/* \
           && "$dirB" == "$ws/councils/session-sessB-"*/* \
           && "$dirA" != "$dirB" \
@@ -1704,7 +1720,7 @@ test_council_per_session_pool_isolation() {
           && "$(dirname "$explicit")" == "$out" ]]; then
         test_pass
     else
-        test_fail "pool isolation wrong: slug1=$slug1 slug2=$slug2 A=$dirA B=$dirB shared=$shared explicit=$explicit"
+        test_fail "pool isolation wrong: slug1=$slug1 slug2=$slug2 codex1=$codex_slug1 codex2=$codex_slug2 codex_precedence=$codex_precedence_slug codex_task=$codex_task_slug claude_host=$claude_host_slug A=$dirA B=$dirB shared=$shared explicit=$explicit"
         return 1
     fi
 }
