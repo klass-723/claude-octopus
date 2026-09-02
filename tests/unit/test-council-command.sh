@@ -1953,10 +1953,12 @@ test_council_split_double_seat_fails_quorum() {
     OCTOPUS_COUNCIL_FIXTURE_REVISE_PERSONAS='code-reviewer' \
         council_run --depth standard --output-dir "$tmp_dir" "Review X" >/dev/null 2>&1 || true
     rd="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -1)"
-    if jq -e '.quorum.met == false and .quorum.distinct_approving_providers == 1 and .quorum.approving_providers == "agy"' "$rd/summary.json" >/dev/null; then
+    # This run stops before synthesis (quorum not met), so synthesis.md is never
+    # written — summary.json must NOT advertise it (artifacts.synthesis == null).
+    if jq -e '.quorum.met == false and .quorum.distinct_approving_providers == 1 and .quorum.approving_providers == "agy" and .artifacts.synthesis == null' "$rd/summary.json" >/dev/null; then
         test_pass
     else
-        test_fail "split double-seat did not fail quorum: $(jq -c .quorum "$rd/summary.json" 2>/dev/null)"
+        test_fail "split double-seat did not fail quorum or advertised a missing synthesis.md: quorum=$(jq -c .quorum "$rd/summary.json" 2>/dev/null) synthesis=$(jq -c .artifacts.synthesis "$rd/summary.json" 2>/dev/null)"
         return 1
     fi
 }
@@ -1966,10 +1968,11 @@ test_council_all_approve_meets_quorum() {
     load_council_lib || return 1
     prepare_cached_all_approve_run || { test_fail "cached all-approve run failed"; return 1; }
     local rd="$CACHED_COUNCIL_ALL_APPROVE_RUN_DIR"
-    if jq -e '.quorum.met == true and .quorum.distinct_approving_providers >= 2' "$rd/summary.json" >/dev/null; then
+    # This run completes through synthesis, so summary.json advertises synthesis.md.
+    if jq -e '.quorum.met == true and .quorum.distinct_approving_providers >= 2 and .artifacts.synthesis == "synthesis.md"' "$rd/summary.json" >/dev/null; then
         test_pass
     else
-        test_fail "clean all-approve did not meet quorum: $(jq -c .quorum "$rd/summary.json" 2>/dev/null)"
+        test_fail "clean all-approve did not meet quorum or failed to advertise synthesis.md: quorum=$(jq -c .quorum "$rd/summary.json" 2>/dev/null) synthesis=$(jq -c .artifacts.synthesis "$rd/summary.json" 2>/dev/null)"
         return 1
     fi
 }

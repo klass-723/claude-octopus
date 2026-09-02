@@ -3033,6 +3033,13 @@ council_write_summary_json() {
     council_scan_veto_artifacts
     received_non_chair="$(council_received_non_chair)"
 
+    # Only advertise synthesis.md when it was actually written. The stop-before-
+    # synthesis paths (quorum not met, or vote passed but no chair to synthesize)
+    # return before council_write_synthesis, so a hardcoded path would point a
+    # consumer at a file that does not exist.
+    local synthesis_written="false"
+    [[ -f "${COUNCIL_RUN_DIR}/synthesis.md" ]] && synthesis_written="true"
+
     jq -n \
         --arg run_id "$COUNCIL_RUN_ID" \
         --arg status "$status" \
@@ -3083,6 +3090,7 @@ council_write_summary_json() {
         --arg chair_fallback_used "$COUNCIL_CHAIR_FALLBACK_USED" \
         --arg chair_fallback_persona "$COUNCIL_CHAIR_FALLBACK_PERSONA" \
         --arg implementation_plan_written "$COUNCIL_IMPLEMENTATION_PLAN_WRITTEN" \
+        --arg synthesis_written "$synthesis_written" \
         --arg gate_a_approved "$COUNCIL_GATE_A_APPROVED" \
         --arg gate_b_approved "$COUNCIL_GATE_B_APPROVED" \
         --argjson handoff "$COUNCIL_IMPLEMENTATION_HANDOFF_JSON" \
@@ -3165,7 +3173,7 @@ council_write_summary_json() {
             overridden: false
           },
           artifacts: {
-            synthesis: "synthesis.md",
+            synthesis: (if $synthesis_written == "true" then "synthesis.md" else null end),
             responses_dir: "responses",
             critiques_dir: "critiques",
             revisions_dir: "revisions",
