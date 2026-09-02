@@ -12,9 +12,9 @@
   misled this session's diagnostics, and foreign/duplicate run directories
   collided. The default pool is now namespaced by session
   (`councils/session-<id>/…`, keyed on the Claude Code or Codex session id, with
-  Codex task id, worktree basename, and pid fallbacks). This isolates normal
-  sessions while treating fallback and checksum collisions as a best-effort
-  edge case; an explicit `--output-dir` is honored unchanged. Set
+  Codex task id, current-working-directory basename, and pid fallbacks). This
+  isolates normal sessions while treating fallback and checksum collisions as a
+  best-effort edge case; an explicit `--output-dir` is honored unchanged. Set
   `OCTOPUS_COUNCIL_SHARED_POOL=1` to restore the flat shared pool.
 
 ## [10.1.0] - 2026-08-30
