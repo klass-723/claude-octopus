@@ -1898,10 +1898,10 @@ council_response_is_substantive() {
         return 1
     fi
 
-    # 3) A "blind" seat — a verdict returned without reading the artifact (permission
-    #    denied / no file access) — reviewed nothing and must never count toward the
-    #    quorum. council_response_is_blind matches a strict SUPERSET of case 2 (it adds
-    #    the permission-denied / no-file-access shapes), so a reply like
+    # 3) A "blind" seat — a verdict returned without reading the artifact (a
+    #    refusal-only permission error / no file access) — reviewed nothing and must
+    #    never count toward the quorum. council_response_is_blind matches a strict
+    #    SUPERSET of case 2, so a reply like
     #    "Permission denied. VERDICT: REVISE" would otherwise slip past cases 1-2 and
     #    be scored as a substantive responder. Fold it in here so the single
     #    substantive gate the quorum tally keys on and the advice-phase `blind` label
@@ -1927,7 +1927,16 @@ council_response_is_blind() {
     local nlen
     nlen="$(tr -d '[:space:]' < "$f" | wc -c | tr -d '[:space:]')"
     (( nlen < 1600 )) || return 1
-    grep -ciE "(cannot|could not|couldn'?t|unable to|can'?t)[[:space:]]+(access|read|open|locate|find|view|retrieve)[^.]{0,60}(file|plan|prd|diff|patch|artifact|document|spec)|permission[[:space:]-]*(restriction|denied|error)|no[[:space:]]+(file|read)[[:space:]]+access" "$f" >/dev/null
+    if grep -ciE "(cannot|could not|couldn'?t|unable to|can'?t)[[:space:]]+(access|read|open|locate|find|view|retrieve)[^.]{0,60}(file|plan|prd|diff|patch|artifact|document|spec)|no[[:space:]]+(file|read)[[:space:]]+access" "$f" >/dev/null; then
+        return 0
+    fi
+
+    # A bare permission error is only conclusive when it is the whole response,
+    # apart from an optional verdict. In review prose, the same phrase can describe
+    # code behavior or a finding and is not evidence that the reviewer was blind.
+    tr '\n' ' ' < "$f" \
+        | tr -s '[:space:]' ' ' \
+        | grep -ciE '^[[:space:]]*permission[[:space:]-]*(restriction|denied|error)[[:space:][:punct:]]*(verdict:[[:space:]]*(approve|revise|block)[[:space:][:punct:]]*)?$' >/dev/null
 }
 
 council_response_verdict() {

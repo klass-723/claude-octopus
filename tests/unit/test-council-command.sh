@@ -2142,6 +2142,22 @@ test_council_advice_marks_blind_seat() {
     fi
 }
 
+test_council_permission_denied_finding_is_substantive() {
+    test_case "a short grounded review may mention permission denied without being blind"
+    load_council_lib || return 1
+
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-permission-finding.XXXXXX")"
+    printf 'The permission denied branch in src/auth.sh:42 returns the wrong status code.\n\nVERDICT: REVISE\n' > "$d/review.md"
+
+    if ! council_response_is_blind "$d/review.md" &&
+       council_response_is_substantive "$d/review.md"; then
+        test_pass
+    else
+        test_fail "grounded permission-denied finding was misclassified as blind"
+        return 1
+    fi
+}
+
 test_council_advice_does_not_infer_timeout_from_provider_rc() {
     test_case "advice phase keeps provider-returned 137 as no-response without a timeout hint"
     load_council_lib || return 1
@@ -2600,6 +2616,7 @@ test_council_live_response_uses_synthesis_timeout_for_chair
 test_council_rc_is_timeout_requires_watchdog_provenance
 test_council_advice_marks_timed_out_seat
 test_council_advice_marks_blind_seat
+test_council_permission_denied_finding_is_substantive
 test_council_advice_does_not_infer_timeout_from_provider_rc
 test_council_seat_timeout_rejects_zero_and_nonnumeric
 test_council_response_has_verdict_salvage
