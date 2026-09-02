@@ -1624,24 +1624,46 @@ test_council_quorum_met_with_host_native_chair() {
 }
 
 test_council_reset_defaults_clears_chair_state() {
-    test_case "council_reset_defaults clears host-native and synthesis state from a prior run"
+    test_case "council_reset_defaults clears chair and blind-seat state from a prior run"
     load_council_lib || return 1
 
     COUNCIL_CHAIR_HOST_NATIVE="true"
     COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="true"
+    COUNCIL_BLIND_SEATS="codex agy"
     council_reset_defaults
 
     if [[ "$COUNCIL_CHAIR_HOST_NATIVE" == "false" \
-          && "$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE" == "false" ]]; then
+          && "$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE" == "false" \
+          && -z "$COUNCIL_BLIND_SEATS" ]]; then
         test_pass
     else
-        test_fail "chair state survived reset: host_native=$COUNCIL_CHAIR_HOST_NATIVE synthesis=$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE"
+        test_fail "per-run state survived reset: host_native=$COUNCIL_CHAIR_HOST_NATIVE synthesis=$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE blind=[$COUNCIL_BLIND_SEATS]"
         return 1
     fi
 }
 
-test_council_failed_host_native_synthesis_is_partial() {
-    test_case "failed host-native synthesis records a partial run and leaves synthesis unavailable"
+test_council_dry_run_does_not_reuse_blind_seats() {
+    test_case "a dry run does not report blind seats retained from a prior run"
+    load_council_lib || return 1
+    local d summary
+    d="$(mktemp -d "$TEST_TMP_DIR/council-blind-reset.XXXXXX")"
+
+    COUNCIL_BLIND_SEATS="codex agy"
+    council_run --dry-run --goal advice --depth quick --benchmark off \
+        --output-dir "$d" "Review the change" >/dev/null
+    summary="$(find "$d" -name summary.json -type f -print -quit)"
+
+    if [[ -f "$summary" ]] && jq -e \
+        '.status == "dry-run" and .quorum.blind_seats == []' "$summary" >/dev/null; then
+        test_pass
+    else
+        test_fail "dry-run retained blind seats: $(jq -c '.quorum.blind_seats' "$summary" 2>/dev/null || printf missing)"
+        return 1
+    fi
+}
+
+test_council_host_native_placeholder_completes_in_context() {
+    test_case "host-native synthesis placeholder remains completed and available in context"
     load_council_lib || return 1
     local d; d="$(mktemp -d "$TEST_TMP_DIR/council-hnsynth.XXXXXX")"
     mkdir -p "$d/responses" "$d/critiques" "$d/revisions"
@@ -1659,7 +1681,54 @@ test_council_failed_host_native_synthesis_is_partial() {
         COUNCIL_QUORUM_MET="true"
         COUNCIL_CHAIR_RESPONSE_RECEIVED="false"
         COUNCIL_CHAIR_HOST_NATIVE="true"
-        COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="true"
+        COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
+    }
+    council_run_critique_phase() { :; }
+    council_run_revision_phase() { :; }
+    council_dispatch_member() { return 1; }
+    council_append_corpus_artifacts() { :; }
+    council_write_summary_json() { printf '%s' "$1" > "$d/summary-status"; }
+    council_print_run_warnings() { :; }
+    council_write_implementation_plan() { :; }
+    council_scan_veto_artifacts() { :; }
+    council_needs_implementation_plan() { return 1; }
+    council_process_implementation_gates() { :; }
+
+    local rc=0
+    _council_run_impl "Review the change" >/dev/null 2>&1 || rc=$?
+    local status=""
+    status="$(cat "$d/summary-status" 2>/dev/null)"
+
+    if [[ "$rc" -eq 0 && "$status" == "completed" \
+          && "$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE" == "true" \
+          && -s "$d/synthesis.md" ]]; then
+        test_pass
+    else
+        test_fail "host-native placeholder contract wrong: rc=$rc status=$status synthesis=$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE artifact=$([[ -s "$d/synthesis.md" ]] && printf yes || printf no)"
+        return 1
+    fi
+}
+
+test_council_failed_dispatched_synthesis_is_partial() {
+    test_case "a failed dispatched chair synthesis remains partial and unavailable"
+    load_council_lib || return 1
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-dispatched-synth.XXXXXX")"
+    mkdir -p "$d/responses" "$d/critiques" "$d/revisions"
+
+    council_parse_args() { council_reset_defaults; COUNCIL_TASK="Review the change"; }
+    council_create_run_dir() { COUNCIL_RUN_DIR="$d"; COUNCIL_RUN_ID="test-dispatched-synthesis"; }
+    council_build_roster() {
+        COUNCIL_RESOLVED_MEMBERS="strategy-analyst,backend-architect,security-auditor"
+        COUNCIL_ROSTER_JSON='[{"persona":"strategy-analyst","seat":"chair","provider":"codex"}]'
+    }
+    council_write_config_json() { :; }
+    council_write_research_artifact() { :; }
+    council_check_cost_cap() { return 0; }
+    council_run_advice_phase() {
+        COUNCIL_QUORUM_MET="true"
+        COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
+        COUNCIL_CHAIR_HOST_NATIVE="false"
+        COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
     }
     council_run_critique_phase() { :; }
     council_run_revision_phase() { :; }
@@ -1678,11 +1747,10 @@ test_council_failed_host_native_synthesis_is_partial() {
     status="$(cat "$d/summary-status" 2>/dev/null)"
 
     if [[ "$rc" -ne 0 && "$status" == "partial" \
-          && "$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE" == "false" \
-          && -s "$d/synthesis.md" ]]; then
+          && "$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE" == "false" ]]; then
         test_pass
     else
-        test_fail "failed synthesis was not partial: rc=$rc status=$status synthesis=$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE artifact=$([[ -s "$d/synthesis.md" ]] && printf yes || printf no)"
+        test_fail "failed dispatched synthesis contract wrong: rc=$rc status=$status synthesis=$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE"
         return 1
     fi
 }
@@ -1877,7 +1945,9 @@ test_council_per_session_pool_isolation
 test_council_benchmark_routing_lib_is_extracted
 test_council_chair_is_host_native_detects_status
 test_council_reset_defaults_clears_chair_state
-test_council_failed_host_native_synthesis_is_partial
+test_council_dry_run_does_not_reuse_blind_seats
+test_council_host_native_placeholder_completes_in_context
+test_council_failed_dispatched_synthesis_is_partial
 test_council_synthesis_warning_uses_logger_and_stays_capturable
 test_council_quorum_met_with_host_native_chair
 test_council_degenerate_chair_keeps_vote_and_flags_synthesis

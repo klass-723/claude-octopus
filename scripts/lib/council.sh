@@ -149,6 +149,7 @@ council_reset_defaults() {
     COUNCIL_CHAIR_RESPONSE_RECEIVED="false"
     COUNCIL_CHAIR_HOST_NATIVE="false"
     COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
+    COUNCIL_BLIND_SEATS=""
     COUNCIL_CHAIR_FALLBACK_USED="false"
     COUNCIL_CHAIR_FALLBACK_PERSONA=""
     COUNCIL_IMPLEMENTATION_PLAN_WRITTEN="false"
@@ -2247,7 +2248,8 @@ council_run_advice_phase() {
         COUNCIL_CHAIR_HOST_NATIVE="true"
     fi
     # Chair response and host-native state identify a synthesis candidate.
-    # COUNCIL_CHAIR_SYNTHESIS_AVAILABLE stays false until synthesis succeeds.
+    # Availability stays false until dispatched synthesis succeeds or the
+    # expected host-native in-context placeholder has been written.
 
     # The independent cross-lab VOTE, from the non-chair seats' verdicts alone:
     # >= `required` responders AND, for standard/deep, >= `required` DISTINCT
@@ -3320,6 +3322,11 @@ _council_run_impl() {
     fi
     COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
     if council_write_synthesis; then
+        COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="true"
+    elif [[ "$COUNCIL_CHAIR_HOST_NATIVE" == "true" \
+          && -s "${COUNCIL_RUN_DIR}/synthesis.md" ]]; then
+        # A host-native chair cannot dispatch itself. Its expected fallback file
+        # keeps the in-context synthesis contract available to the host run.
         COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="true"
     else
         council_append_corpus_artifacts || return 1
