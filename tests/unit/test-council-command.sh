@@ -1678,8 +1678,8 @@ test_council_per_session_pool_isolation() {
     # slug is filesystem-safe and collision-resistant: two ids that sanitize to
     # the same prefix ("sess/A b!" and "sess?A b!") must not collapse to one pool.
     local slug1 slug2 codex_slug1 codex_slug2 codex_precedence_slug codex_task_slug claude_host_slug
-    slug1="$(CLAUDE_CODE_SESSION_ID='sess/A b!' council_session_slug)"
-    slug2="$(CLAUDE_CODE_SESSION_ID='sess?A b!' council_session_slug)"
+    slug1="$(OCTOPUS_HOST=claude CLAUDE_CODE_SESSION_ID='sess/A b!' council_session_slug)"
+    slug2="$(OCTOPUS_HOST=claude CLAUDE_CODE_SESSION_ID='sess?A b!' council_session_slug)"
     codex_slug1="$(OCTOPUS_HOST=codex CODEX_SESSION_ID='codex/A' CODEX_TASK_ID= \
         CLAUDE_CODE_SESSION_ID= CLAUDE_SESSION_ID= council_session_slug)"
     codex_slug2="$(OCTOPUS_HOST=codex CODEX_SESSION_ID='codex?A' CODEX_TASK_ID= \
@@ -1696,12 +1696,12 @@ test_council_per_session_pool_isolation() {
 
     # Default pool is namespaced per session; two sessions get separate pools.
     local dirA dirB shared explicit
-    COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessA" council_create_run_dir >/dev/null 2>&1
+    OCTOPUS_HOST=claude COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessA" council_create_run_dir >/dev/null 2>&1
     dirA="$COUNCIL_RUN_DIR"
-    COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessB" council_create_run_dir >/dev/null 2>&1
+    OCTOPUS_HOST=claude COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessB" council_create_run_dir >/dev/null 2>&1
     dirB="$COUNCIL_RUN_DIR"
     # Opt-out restores the flat shared pool (no session- segment).
-    COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessA" OCTOPUS_COUNCIL_SHARED_POOL=1 council_create_run_dir >/dev/null 2>&1
+    OCTOPUS_HOST=claude COUNCIL_OUTPUT_DIR="" WORKSPACE_DIR="$ws" CLAUDE_CODE_SESSION_ID="sessA" OCTOPUS_COUNCIL_SHARED_POOL=1 council_create_run_dir >/dev/null 2>&1
     shared="$COUNCIL_RUN_DIR"
     # An explicit --output-dir (COUNCIL_OUTPUT_DIR) must select $out DIRECTLY —
     # the run dir's parent is $out, never $out/session-<slug>.

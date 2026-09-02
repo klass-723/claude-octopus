@@ -103,6 +103,7 @@ Options:
   --output-dir <path>
 
 Budget values are USD decimal numbers only, for example: 2, 2.00, 0.50.
+Default runs are isolated per session; set OCTOPUS_COUNCIL_SHARED_POOL=1 to share the default pool.
 EOF
 }
 
@@ -2878,7 +2879,9 @@ council_session_slug() {
     local key
     key="$(octo_resolve_session_id "" 2>/dev/null || true)"
     [[ -z "$key" ]] && key="$(basename "$(pwd -P 2>/dev/null)" 2>/dev/null)"
-    [[ -z "$key" || "$key" == "/" || "$key" == "." ]] && key="${BASHPID:-$$}"
+    # Use the stable top-level shell pid. BASHPID changes when this function is
+    # called through command substitution on Bash 4+, producing a new pool per call.
+    [[ -z "$key" || "$key" == "/" || "$key" == "." ]] && key="$$"
     # Sanitizing alone is lossy: distinct ids that differ only in unsafe chars
     # (e.g. "a/b" vs "a?b") would collapse to the same slug and share a pool.
     # Append a checksum of the RAW key to disambiguate them. This is best-effort
