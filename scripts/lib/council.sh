@@ -3296,7 +3296,7 @@ _council_run_impl() {
         council_append_corpus_artifacts || return 1
         council_write_summary_json "partial" || return 1
         council_print_run_warnings
-        echo "Council quorum met on independent vendor approvals, but chair synthesis was unavailable — no synthesized recommendation was produced this round. Read the per-seat verdicts in ${COUNCIL_RUN_DIR}/responses/ (summary.json quorum.met=true, chair_synthesis_available=false)."
+        _council_warn "Council quorum met on independent vendor approvals, but chair synthesis was unavailable — no synthesized recommendation was produced this round. Read the per-seat verdicts in ${COUNCIL_RUN_DIR}/responses/ (summary.json quorum.met=true, chair_synthesis_available=false)."
         return 1
     fi
 
@@ -3332,7 +3332,7 @@ _council_run_impl() {
         council_append_corpus_artifacts || return 1
         council_write_summary_json "partial" || return 1
         council_print_run_warnings
-        echo "Council quorum met on independent vendor approvals, but chair synthesis was unavailable — no synthesized recommendation was produced this round. Read the per-seat verdicts in ${COUNCIL_RUN_DIR}/responses/ (summary.json quorum.met=true, chair_synthesis_available=false)."
+        _council_warn "Council quorum met on independent vendor approvals, but chair synthesis was unavailable — no synthesized recommendation was produced this round. Read the per-seat verdicts in ${COUNCIL_RUN_DIR}/responses/ (summary.json quorum.met=true, chair_synthesis_available=false)."
         return 1
     fi
     if council_check_cost_cap "implementation" "implementation planning"; then
