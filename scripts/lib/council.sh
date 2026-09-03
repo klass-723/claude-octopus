@@ -1924,10 +1924,30 @@ council_response_is_blind() {
     # provider explicitly reports it could not reach the file/permission, rather
     # than a host self-dispatch stub. Surfacing it (vs a generic "degenerate")
     # lets the operator switch that provider's mode/model after the FIRST blind
-    # round instead of eating several. Brevity-gated so a long real review that
-    # merely quotes such a phrase is never flagged.
+    # round instead of eating several. The explicit-refusal checks below are
+    # brevity-gated so a long real review that merely quotes such a phrase is
+    # never flagged; the fabricated-narrative check just above is length-
+    # independent because that failure mode is, by construction, long.
     local f="$1"
     [[ -f "$f" ]] || return 1
+
+    # Length-INDEPENDENT "fabricated narrative" blind seat (sail-cruisey #2459):
+    # a reviewer dispatched without file-read tools that writes a long, plausible
+    # VERDICT entirely from the prose task-summary. It slips past the brevity gate
+    # below (these fabrications run well over 1600 chars). Flag it only when it
+    # BOTH (a) admits it could not reach the artifact — file access restricted /
+    # prohibited from file-or-terminal tools / "assuming the described changes" /
+    # cannot-read-files — AND (b) cites zero real source references (path.ext:line).
+    # Both are required so a genuine review is never flagged for merely mentioning
+    # a summary. NOTE: a bare "based on the provided summary" is deliberately NOT a
+    # trigger — a legitimate plan/design review (which has no code to cite) uses
+    # that phrasing, so it would false-positive; the (a) set is limited to explicit
+    # could-not-read-the-artifact admissions.
+    if grep -ciE "(direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|assuming[[:space:]]+the[[:space:]]+described[[:space:]]+changes|(cannot|could[[:space:]]*not|couldn'?t|unable[[:space:]]+to|can'?t)[[:space:]]+(open|read|access|view)[^.]{0,40}files?" "$f" >/dev/null \
+        && ! grep -ciE '\.(tsx?|jsx?|css|mjs|cjs):[0-9]+' "$f" >/dev/null; then
+        return 0
+    fi
+
     local nlen
     nlen="$(tr -d '[:space:]' < "$f" | wc -c | tr -d '[:space:]')"
     (( nlen < 1600 )) || return 1

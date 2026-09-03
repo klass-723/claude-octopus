@@ -19,6 +19,19 @@
   `"severity":` signal in a seat's output — from a `WARN` to a hard `ERROR`
   naming the affected seat file, instead of a silent drop.
   (#1004)
+- Council blind-seat detection now catches a "fabricated narrative" seat: a
+  reviewer dispatched without file-read tools that returns a long, plausible
+  `VERDICT: APPROVE` written entirely from the prose task summary, never having
+  read the artifact. The prior check was brevity-gated (skipped responses over
+  ~1600 chars), so these long fabrications slipped through and a single-vendor
+  council was recorded as `met: true`. A new length-independent signature flags a
+  seat only when it BOTH admits it could not reach the artifact (file access
+  restricted / prohibited from file-or-terminal tools / "assuming the described
+  changes" / cannot-read-files) AND cites zero real source references
+  (`path.ext:line`); such seats are excluded from quorum and recorded in
+  `summary.json` `quorum.blind_seats` like any other blind seat. A bare "based on
+  the provided summary" is intentionally not a trigger, so a legitimate plan or
+  design review (which has no code to cite) is never flagged.
 - Store `/octo:plan` artifacts in unique, resolved run directories and share
   that location with plan-mode hooks and review skills, preventing writes into
   the global `~/.claude/` configuration directory and same-session overwrites.

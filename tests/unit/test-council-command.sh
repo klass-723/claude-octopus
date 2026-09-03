@@ -2375,6 +2375,110 @@ test_council_advice_marks_blind_seat() {
     fi
 }
 
+test_council_blind_fabricated_narrative() {
+    test_case "a long fabricated-narrative seat (admits no file access, zero source cites) is blind regardless of length; grounded long reviews and plan reviews are not (sail-cruisey #2459)"
+    load_council_lib || return 1
+
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-fabricated.XXXXXX")"
+
+    # (a) Fabricated narrative: LONG (>1600 non-ws chars, clears the brevity gate),
+    # admits "direct file access is restricted by the output rules", cites zero
+    # path.ext:line references, still emits VERDICT: APPROVE. This is the exact
+    # shape of the agy seat in the #2459 council that recorded met:true wrongly.
+    {
+        echo "## Review"
+        echo
+        for _i in $(seq 1 24); do
+            echo "Based on the provided summary of the changes, the approach is architecturally sound and the described refactor preserves the existing data contract between the frontend and the backend API surface while keeping the component boundaries intact."
+        done
+        echo
+        echo "I am assuming the described changes accurately reflect the contents of the diff, as direct file access is restricted by the output rules."
+        echo
+        echo "VERDICT: APPROVE"
+    } > "$d/fabricated.md"
+
+    # (b) Grounded long review: same length class, but carries real file:line
+    # evidence — must NOT be flagged even though it also references "the summary".
+    {
+        echo "## Review"
+        echo
+        for _i in $(seq 1 24); do
+            echo "Based on the provided summary and the diff, the guard added in src/WatcherDashboard.tsx:142 correctly handles the nil price point and the fixture wiring is consistent across the affected suite."
+        done
+        echo
+        echo "src/WatcherDashboard.test.tsx:88 asserts the success case; src/api/types.ts:53 defines the contract."
+        echo
+        echo "VERDICT: APPROVE"
+    } > "$d/grounded.md"
+
+    # (c) Plan/design review control: LONG, references "based on the provided
+    # summary", cites zero code lines (there is no code to cite in a plan review),
+    # but makes NO could-not-read-the-artifact admission. Must NOT be flagged —
+    # this is the #2527 false-positive guard.
+    {
+        echo "## Recommendation"
+        echo
+        for _i in $(seq 1 24); do
+            echo "Approve the plan. Solving the contrast issue at the design-token architecture level and enforcing it with an automated end-to-end assertion is aligned with robust, systemic engineering practice and prevents future regressions."
+        done
+        echo
+        echo "Confidence: High (based on the provided summary of the plan's methodology)."
+        echo
+        echo "VERDICT: APPROVE"
+    } > "$d/planreview.md"
+
+    local fab_len fab=n grounded_ok=n plan_ok=n
+    fab_len="$(tr -d '[:space:]' < "$d/fabricated.md" | wc -c | tr -d '[:space:]')"
+    council_response_is_blind "$d/fabricated.md" && fab=y
+    council_response_is_blind "$d/grounded.md" || grounded_ok=y
+    council_response_is_blind "$d/planreview.md" || plan_ok=y
+
+    # Integration: a fabricated-narrative agy seat alongside a grounded codex seat
+    # in a standard (required=2) council. agy must be classified blind and dropped
+    # from the approving set, leaving a single grounded model family (openai) — so
+    # the vote fails and quorum.met recomputes to false (the #2459 miss).
+    local r; r="$(mktemp -d "$TEST_TMP_DIR/council-fab-int.XXXXXX")"; mkdir -p "$r/responses"
+    COUNCIL_RUN_DIR="$r"
+    COUNCIL_DEPTH="standard"
+    COUNCIL_FIXTURE=""
+    COUNCIL_BLIND_SEATS=""
+    COUNCIL_ROSTER_JSON='[
+      {"persona":"backend-architect","seat":"member","provider":"agy","provider_org":"google","model":"gemini"},
+      {"persona":"security-auditor","seat":"member","provider":"codex","provider_org":"openai","model":"gpt"}
+    ]'
+    council_dispatch_member_detached() {
+        local mj="$1" out="$3" prov
+        prov="$(jq -r '.provider' <<< "$mj")"
+        if [[ "$prov" == "agy" ]]; then
+            cp "$d/fabricated.md" "$out"
+        else
+            printf '## Review\n\nsrc/app.tsx:42 guards the nil case; src/api/types.ts:9 matches.\n\nVERDICT: APPROVE\n' > "$out"
+        fi
+        return 0
+    }
+    council_run_chair_fallback() { :; }
+    COUNCIL_PROVIDER_STATUS_JSON='{"agy":"available","codex":"available"}' \
+        council_run_advice_phase >/dev/null 2>&1 || true
+    unset -f council_dispatch_member_detached council_run_chair_fallback
+
+    local agy_status codex_prov blind met approving_fams
+    agy_status="$(jq -r 'map(select(.provider=="agy"))[0].status // "none"' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
+    blind="$COUNCIL_BLIND_SEATS"
+    met="$COUNCIL_QUORUM_MET"
+    approving_fams="$COUNCIL_DISTINCT_APPROVING_MODEL_FAMILIES"
+    codex_prov="$COUNCIL_RESPONDING_PROVIDERS"
+
+    if [[ "$fab" == "y" && "$fab_len" -gt 1600 && "$grounded_ok" == "y" && "$plan_ok" == "y" \
+          && "$agy_status" == "blind" && "$blind" == *"agy"* \
+          && "$codex_prov" == *"codex"* && "$codex_prov" != *"agy"* \
+          && "$approving_fams" == "1" && "$met" == "false" ]]; then
+        test_pass
+    else
+        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
+        return 1
+    fi
+}
+
 test_council_permission_denied_finding_is_substantive() {
     test_case "a short grounded review may mention permission denied without being blind"
     load_council_lib || return 1
@@ -2850,6 +2954,7 @@ test_council_live_response_uses_synthesis_timeout_for_chair
 test_council_rc_is_timeout_requires_watchdog_provenance
 test_council_advice_marks_timed_out_seat
 test_council_advice_marks_blind_seat
+test_council_blind_fabricated_narrative
 test_council_permission_denied_finding_is_substantive
 test_council_advice_does_not_infer_timeout_from_provider_rc
 test_council_seat_timeout_rejects_zero_and_nonnumeric
