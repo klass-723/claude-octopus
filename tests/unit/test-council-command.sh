@@ -2438,6 +2438,72 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/third-person-restriction.md"
 
+    # First-person prose in one clause must not attach to another reviewer's
+    # access failure in a later semicolon-delimited clause.
+    {
+        for _i in $(seq 1 24); do
+            echo "I completed an independent assessment; another reviewer could not access the files. The implementation remains sound."
+        done
+        echo "VERDICT: APPROVE"
+    } > "$d/mixed-person.md"
+
+    # Ordinary Markdown wrapping must not hide the reviewer's own admission.
+    {
+        for _i in $(seq 1 24); do
+            echo "The proposed implementation appears internally consistent and preserves the documented workflow contract."
+        done
+        printf '%s\n' "I cannot" "access the files in this environment."
+        echo "VERDICT: APPROVE"
+    } > "$d/wrapped-admission.md"
+
+    # Equivalent explicit first-person admissions must not evade the long-form
+    # check merely by avoiding the words "cannot" and "unable".
+    {
+        for _i in $(seq 1 24); do
+            echo "The proposed implementation appears internally consistent and preserves the documented workflow contract."
+        done
+        echo "I did not have access to the repository files in this environment."
+        echo "VERDICT: APPROVE"
+    } > "$d/did-not-have-access.md"
+    {
+        for _i in $(seq 1 24); do
+            echo "The proposed implementation appears internally consistent and preserves the documented workflow contract."
+        done
+        echo "I was not able to read the diff in this environment."
+        echo "VERDICT: APPROVE"
+    } > "$d/was-not-able.md"
+    {
+        for _i in $(seq 1 24); do
+            echo "The proposed implementation appears internally consistent and preserves the documented workflow contract."
+        done
+        echo "I lack direct access to the source files in this environment."
+        echo "VERDICT: APPROVE"
+    } > "$d/lack-access.md"
+
+    # A URL port is not a repository source citation.
+    {
+        for _i in $(seq 1 24); do
+            echo "The service health endpoint is documented at https://example.com:443/status and the overall approach appears sound."
+        done
+        echo "I cannot access the files in this environment."
+        echo "VERDICT: APPROVE"
+    } > "$d/url-port.md"
+
+    # Removing a URL must preserve a following sentence/clause boundary so a
+    # first-person assessment does not attach to a third-person access report.
+    {
+        for _i in $(seq 1 24); do
+            echo "I completed an independent assessment at https://example.com/status. Another reviewer could not access the files."
+        done
+        echo "VERDICT: APPROVE"
+    } > "$d/url-period-boundary.md"
+    {
+        for _i in $(seq 1 24); do
+            echo "I completed an independent assessment at https://example.com/status; another reviewer could not access the files."
+        done
+        echo "VERDICT: APPROVE"
+    } > "$d/url-semicolon-boundary.md"
+
     # (e) Plan review that uses the conditional "assuming the described changes"
     # with no code cites and NO access-failure admission — must NOT be flagged.
     # "assuming the described changes" is a normal conditional, not an admission
@@ -2454,7 +2520,10 @@ test_council_blind_fabricated_narrative() {
     # #1000: shell/py/go citations, not just the frontend allowlist).
     {
         echo "## Review"
-        echo "Even with file access restricted in this sandbox, the guard added at scripts/lib/council.sh:1946 correctly bounds the case; helpers/run.py:12 is consistent."
+        for _i in $(seq 1 24); do
+            echo "The implementation follows the documented control flow and preserves the existing safety boundary."
+        done
+        echo "I cannot access files in this sandbox, but the guard at [scripts/lib/council.sh:1946] correctly bounds the case; helpers/run.py:12 is consistent."
         echo "VERDICT: APPROVE"
     } > "$d/shellcite.md"
 
@@ -2474,8 +2543,17 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/cantdiff.md"
 
-    local fab_len fab=n grounded_ok=n plan_ok=n third_person_ok=n assuming_ok=n shellcite_ok=n cantdiff=n
+    local fab_len fab=n grounded_ok=n plan_ok=n third_person_ok=n mixed_person_ok=n
+    local wrapped=n did_not_have=n was_not_able=n lack_access=n url_port=n
+    local url_period_ok=n url_semicolon_ok=n assuming_ok=n shellcite_ok=n cantdiff=n
     council_response_is_blind "$d/cantdiff.md" && cantdiff=y
+    council_response_is_blind "$d/wrapped-admission.md" && wrapped=y
+    council_response_is_blind "$d/did-not-have-access.md" && did_not_have=y
+    council_response_is_blind "$d/was-not-able.md" && was_not_able=y
+    council_response_is_blind "$d/lack-access.md" && lack_access=y
+    council_response_is_blind "$d/url-port.md" && url_port=y
+    council_response_is_blind "$d/url-period-boundary.md" || url_period_ok=y
+    council_response_is_blind "$d/url-semicolon-boundary.md" || url_semicolon_ok=y
     fab_len="$(tr -d '[:space:]' < "$d/fabricated.md" | wc -c | tr -d '[:space:]')"
     council_response_is_blind "$d/assuming.md" || assuming_ok=y
     council_response_is_blind "$d/shellcite.md" || shellcite_ok=y
@@ -2483,6 +2561,7 @@ test_council_blind_fabricated_narrative() {
     council_response_is_blind "$d/grounded.md" || grounded_ok=y
     council_response_is_blind "$d/planreview.md" || plan_ok=y
     council_response_is_blind "$d/third-person-restriction.md" || third_person_ok=y
+    council_response_is_blind "$d/mixed-person.md" || mixed_person_ok=y
 
     # Integration: a fabricated-narrative agy seat alongside a grounded codex seat
     # in a standard (required=2) council. agy must be classified blind and dropped
@@ -2520,14 +2599,17 @@ test_council_blind_fabricated_narrative() {
     codex_prov="$COUNCIL_RESPONDING_PROVIDERS"
 
     if [[ "$fab" == "y" && "$fab_len" -gt 1600 && "$grounded_ok" == "y" && "$plan_ok" == "y" \
-          && "$third_person_ok" == "y" \
+          && "$third_person_ok" == "y" && "$mixed_person_ok" == "y" \
+          && "$wrapped" == "y" && "$did_not_have" == "y" \
+          && "$was_not_able" == "y" && "$lack_access" == "y" && "$url_port" == "y" \
+          && "$url_period_ok" == "y" && "$url_semicolon_ok" == "y" \
           && "$assuming_ok" == "y" && "$shellcite_ok" == "y" && "$cantdiff" == "y" \
           && "$agy_status" == "blind" && "$blind" == *"agy"* \
           && "$codex_prov" == *"codex"* && "$codex_prov" != *"agy"* \
           && "$approving_fams" == "1" && "$met" == "false" ]]; then
         test_pass
     else
-        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok third_person_ok=$third_person_ok assuming_ok=$assuming_ok shellcite_ok=$shellcite_ok cantdiff=$cantdiff agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
+        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok third_person_ok=$third_person_ok mixed_person_ok=$mixed_person_ok wrapped=$wrapped did_not_have=$did_not_have was_not_able=$was_not_able lack_access=$lack_access url_port=$url_port url_period_ok=$url_period_ok url_semicolon_ok=$url_semicolon_ok assuming_ok=$assuming_ok shellcite_ok=$shellcite_ok cantdiff=$cantdiff agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
         return 1
     fi
 }

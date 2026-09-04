@@ -1948,8 +1948,26 @@ council_response_is_blind() {
     #    explicit "file access is restricted" admission.
     #  - (b) matches any letter-first extension (.sh/.py/.go/.tsx/…), so a grounded
     #    non-frontend review that cites e.g. council.sh:1946 is never flagged.
-    if grep -ciE "(^|[^[:alnum:]_])(i|we|my|our)([^[:alnum:]_]|$)[^.]{0,200}((direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|(cannot|could[[:space:]]*not|couldn'?t|unable[[:space:]]+to|can'?t)[[:space:]]+(open|read|access|view)[^.]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec))" "$f" >/dev/null \
-        && ! grep -ciE '[[:alnum:]_./-]+\.[[:alpha:]][[:alnum:]]*:[0-9]+' "$f" >/dev/null; then
+    # Normalize wrapping, then evaluate one sentence/clause at a time. This
+    # catches Markdown line wraps without letting an unrelated first-person
+    # sentence turn a later third-person access report into an admission.
+    local normalized_without_urls
+    normalized_without_urls="$(tr '\n' ' ' < "$f" | tr -s '[:space:]' ' ' \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E \
+            -e 's#https?://[^[:space:]]*([.!?;])([[:space:]]|$)#\1\2#g' \
+            -e 's#https?://[^[:space:]]+##g')"
+    if printf '%s\n' "$normalized_without_urls" | awk '
+        BEGIN { RS="[.!?;]+"; found=0 }
+        {
+            first_person = ($0 ~ /(^|[^[:alnum:]_])(i|we|my|our)([^[:alnum:]_]|$)/)
+            access_failure = ($0 ~ /((direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|(cannot|could[[:space:]]*not|couldn.t|unable[[:space:]]+to|can.t|was[[:space:]]+not[[:space:]]+able[[:space:]]+to|were[[:space:]]+not[[:space:]]+able[[:space:]]+to)[[:space:]]+(open|read|access|view)[^.!?;]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec)|(did[[:space:]]+not|do[[:space:]]+not|don.t)[[:space:]]+have[[:space:]]+(direct[[:space:]]+)?access[^.!?;]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec)|lack(ed|s)?[[:space:]]+(direct[[:space:]]+)?access[^.!?;]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec))/)
+            if (first_person && access_failure) found=1
+        }
+        END { exit(found ? 0 : 1) }
+    ' >/dev/null 2>&1 \
+        && ! printf '%s\n' "$normalized_without_urls" \
+            | grep -ciE '(^|[^[:alnum:]_./-])[[:alnum:]_./-]+\.[[:alpha:]][[:alnum:]]*:[0-9]+([^0-9]|$)' >/dev/null; then
         return 0
     fi
 
