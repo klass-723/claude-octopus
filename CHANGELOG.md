@@ -25,13 +25,14 @@
   read the artifact. The prior check was brevity-gated (skipped responses over
   ~1600 chars), so these long fabrications slipped through and a single-vendor
   council was recorded as `met: true`. A new length-independent signature flags a
-  seat only when it BOTH admits it could not reach the artifact (file access
-  restricted / prohibited from file-or-terminal tools / "assuming the described
-  changes" / cannot-read-files) AND cites zero real source references
+  seat only when it BOTH admits in the first person that it could not reach the
+  artifact (file access restricted / prohibited from file-or-terminal tools /
+  cannot-read-files) AND cites zero real source references
   (`path.ext:line`); such seats are excluded from quorum and recorded in
   `summary.json` `quorum.blind_seats` like any other blind seat. A bare "based on
-  the provided summary" is intentionally not a trigger, so a legitimate plan or
-  design review (which has no code to cite) is never flagged.
+  the provided summary" or "assuming the described changes" is intentionally not
+  a trigger, so a legitimate plan or design review (which has no code to cite) is
+  never flagged.
 - Store `/octo:plan` artifacts in unique, resolved run directories and share
   that location with plan-mode hooks and review skills, preventing writes into
   the global `~/.claude/` configuration directory and same-session overwrites.

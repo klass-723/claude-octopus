@@ -1935,8 +1935,9 @@ council_response_is_blind() {
     # a reviewer dispatched without file-read tools that writes a long, plausible
     # VERDICT entirely from the prose task-summary. It slips past the brevity gate
     # below (these fabrications run well over 1600 chars). Flag it only when it
-    # BOTH (a) explicitly admits it could not reach the artifact — file access
-    # restricted / prohibited from file-or-terminal tools / cannot-read-files —
+    # BOTH (a) explicitly admits in the first person that it could not reach the
+    # artifact — file access restricted / prohibited from file-or-terminal tools /
+    # cannot-read-files —
     # AND (b) cites zero real source references (extension-neutral path.ext:line).
     # Both are required so a genuine review is never flagged for merely mentioning
     # a summary. NOTES:
@@ -1947,7 +1948,7 @@ council_response_is_blind() {
     #    explicit "file access is restricted" admission.
     #  - (b) matches any letter-first extension (.sh/.py/.go/.tsx/…), so a grounded
     #    non-frontend review that cites e.g. council.sh:1946 is never flagged.
-    if grep -ciE "(direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|(cannot|could[[:space:]]*not|couldn'?t|unable[[:space:]]+to|can'?t)[[:space:]]+(open|read|access|view)[^.]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec)" "$f" >/dev/null \
+    if grep -ciE "(^|[^[:alnum:]_])(i|we|my|our)([^[:alnum:]_]|$)[^.]{0,200}((direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|(cannot|could[[:space:]]*not|couldn'?t|unable[[:space:]]+to|can'?t)[[:space:]]+(open|read|access|view)[^.]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec))" "$f" >/dev/null \
         && ! grep -ciE '[[:alnum:]_./-]+\.[[:alpha:]][[:alnum:]]*:[0-9]+' "$f" >/dev/null; then
         return 0
     fi

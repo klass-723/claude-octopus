@@ -2427,7 +2427,18 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/planreview.md"
 
-    # (d) Plan review that uses the conditional "assuming the described changes"
+    # (d) Substantive third-person review that discusses an access restriction as
+    # implementation behavior. The phrase alone is not a personal admission that
+    # the reviewer could not inspect the artifact, even without source citations.
+    {
+        echo "## Review"
+        for _i in $(seq 1 24); do
+            echo "The implementation correctly documents that file access is restricted by the output rules while preserving the review workflow and its existing operator-facing behavior."
+        done
+        echo "VERDICT: APPROVE"
+    } > "$d/third-person-restriction.md"
+
+    # (e) Plan review that uses the conditional "assuming the described changes"
     # with no code cites and NO access-failure admission — must NOT be flagged.
     # "assuming the described changes" is a normal conditional, not an admission
     # of blindness, so it is not a standalone trigger (CodeRabbit #1000).
@@ -2437,7 +2448,7 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/assuming.md"
 
-    # (e) Grounded review that DOES admit restricted access but cites a real
+    # (f) Grounded review that DOES admit restricted access but cites a real
     # non-frontend source reference (path.ext:line). The extension-neutral cite
     # check must recognize it and keep the seat OUT of the blind set (CodeRabbit
     # #1000: shell/py/go citations, not just the frontend allowlist).
@@ -2447,7 +2458,7 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/shellcite.md"
 
-    # (f) Long, citation-free response whose access admission names a NON-"file"
+    # (g) Long, citation-free response whose access admission names a NON-"file"
     # artifact noun ("cannot access the diff") — must still be flagged. The access
     # clause uses the same artifact nouns as the short-response branch, not just
     # file/files (CodeRabbit #1000).
@@ -2463,7 +2474,7 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/cantdiff.md"
 
-    local fab_len fab=n grounded_ok=n plan_ok=n assuming_ok=n shellcite_ok=n cantdiff=n
+    local fab_len fab=n grounded_ok=n plan_ok=n third_person_ok=n assuming_ok=n shellcite_ok=n cantdiff=n
     council_response_is_blind "$d/cantdiff.md" && cantdiff=y
     fab_len="$(tr -d '[:space:]' < "$d/fabricated.md" | wc -c | tr -d '[:space:]')"
     council_response_is_blind "$d/assuming.md" || assuming_ok=y
@@ -2471,6 +2482,7 @@ test_council_blind_fabricated_narrative() {
     council_response_is_blind "$d/fabricated.md" && fab=y
     council_response_is_blind "$d/grounded.md" || grounded_ok=y
     council_response_is_blind "$d/planreview.md" || plan_ok=y
+    council_response_is_blind "$d/third-person-restriction.md" || third_person_ok=y
 
     # Integration: a fabricated-narrative agy seat alongside a grounded codex seat
     # in a standard (required=2) council. agy must be classified blind and dropped
@@ -2508,13 +2520,14 @@ test_council_blind_fabricated_narrative() {
     codex_prov="$COUNCIL_RESPONDING_PROVIDERS"
 
     if [[ "$fab" == "y" && "$fab_len" -gt 1600 && "$grounded_ok" == "y" && "$plan_ok" == "y" \
+          && "$third_person_ok" == "y" \
           && "$assuming_ok" == "y" && "$shellcite_ok" == "y" && "$cantdiff" == "y" \
           && "$agy_status" == "blind" && "$blind" == *"agy"* \
           && "$codex_prov" == *"codex"* && "$codex_prov" != *"agy"* \
           && "$approving_fams" == "1" && "$met" == "false" ]]; then
         test_pass
     else
-        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok assuming_ok=$assuming_ok shellcite_ok=$shellcite_ok cantdiff=$cantdiff agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
+        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok third_person_ok=$third_person_ok assuming_ok=$assuming_ok shellcite_ok=$shellcite_ok cantdiff=$cantdiff agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
         return 1
     fi
 }
