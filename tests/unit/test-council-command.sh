@@ -2427,8 +2427,30 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/planreview.md"
 
-    local fab_len fab=n grounded_ok=n plan_ok=n
+    # (d) Plan review that uses the conditional "assuming the described changes"
+    # with no code cites and NO access-failure admission — must NOT be flagged.
+    # "assuming the described changes" is a normal conditional, not an admission
+    # of blindness, so it is not a standalone trigger (CodeRabbit #1000).
+    {
+        echo "## Recommendation"
+        echo "Approve. Assuming the described changes land as specified, the token architecture is sound and the rollout sequencing is reasonable."
+        echo "VERDICT: APPROVE"
+    } > "$d/assuming.md"
+
+    # (e) Grounded review that DOES admit restricted access but cites a real
+    # non-frontend source reference (path.ext:line). The extension-neutral cite
+    # check must recognize it and keep the seat OUT of the blind set (CodeRabbit
+    # #1000: shell/py/go citations, not just the frontend allowlist).
+    {
+        echo "## Review"
+        echo "Even with file access restricted in this sandbox, the guard added at scripts/lib/council.sh:1946 correctly bounds the case; helpers/run.py:12 is consistent."
+        echo "VERDICT: APPROVE"
+    } > "$d/shellcite.md"
+
+    local fab_len fab=n grounded_ok=n plan_ok=n assuming_ok=n shellcite_ok=n
     fab_len="$(tr -d '[:space:]' < "$d/fabricated.md" | wc -c | tr -d '[:space:]')"
+    council_response_is_blind "$d/assuming.md" || assuming_ok=y
+    council_response_is_blind "$d/shellcite.md" || shellcite_ok=y
     council_response_is_blind "$d/fabricated.md" && fab=y
     council_response_is_blind "$d/grounded.md" || grounded_ok=y
     council_response_is_blind "$d/planreview.md" || plan_ok=y
@@ -2469,12 +2491,13 @@ test_council_blind_fabricated_narrative() {
     codex_prov="$COUNCIL_RESPONDING_PROVIDERS"
 
     if [[ "$fab" == "y" && "$fab_len" -gt 1600 && "$grounded_ok" == "y" && "$plan_ok" == "y" \
+          && "$assuming_ok" == "y" && "$shellcite_ok" == "y" \
           && "$agy_status" == "blind" && "$blind" == *"agy"* \
           && "$codex_prov" == *"codex"* && "$codex_prov" != *"agy"* \
           && "$approving_fams" == "1" && "$met" == "false" ]]; then
         test_pass
     else
-        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
+        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok assuming_ok=$assuming_ok shellcite_ok=$shellcite_ok agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
         return 1
     fi
 }
