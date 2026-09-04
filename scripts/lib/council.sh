@@ -1947,7 +1947,7 @@ council_response_is_blind() {
     #    explicit "file access is restricted" admission.
     #  - (b) matches any letter-first extension (.sh/.py/.go/.tsx/…), so a grounded
     #    non-frontend review that cites e.g. council.sh:1946 is never flagged.
-    if grep -ciE "(direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|(cannot|could[[:space:]]*not|couldn'?t|unable[[:space:]]+to|can'?t)[[:space:]]+(open|read|access|view)[^.]{0,40}files?" "$f" >/dev/null \
+    if grep -ciE "(direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|(cannot|could[[:space:]]*not|couldn'?t|unable[[:space:]]+to|can'?t)[[:space:]]+(open|read|access|view)[^.]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec)" "$f" >/dev/null \
         && ! grep -ciE '[[:alnum:]_./-]+\.[[:alpha:]][[:alnum:]]*:[0-9]+' "$f" >/dev/null; then
         return 0
     fi

@@ -2447,7 +2447,24 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/shellcite.md"
 
-    local fab_len fab=n grounded_ok=n plan_ok=n assuming_ok=n shellcite_ok=n
+    # (f) Long, citation-free response whose access admission names a NON-"file"
+    # artifact noun ("cannot access the diff") — must still be flagged. The access
+    # clause uses the same artifact nouns as the short-response branch, not just
+    # file/files (CodeRabbit #1000).
+    {
+        echo "## Review"
+        echo
+        for _i in $(seq 1 24); do
+            echo "The refactor keeps the data contract intact and the component boundaries look reasonable given the described behavior of the affected modules and their call sites."
+        done
+        echo
+        echo "I cannot access the diff directly, so this is based on the described behavior."
+        echo
+        echo "VERDICT: APPROVE"
+    } > "$d/cantdiff.md"
+
+    local fab_len fab=n grounded_ok=n plan_ok=n assuming_ok=n shellcite_ok=n cantdiff=n
+    council_response_is_blind "$d/cantdiff.md" && cantdiff=y
     fab_len="$(tr -d '[:space:]' < "$d/fabricated.md" | wc -c | tr -d '[:space:]')"
     council_response_is_blind "$d/assuming.md" || assuming_ok=y
     council_response_is_blind "$d/shellcite.md" || shellcite_ok=y
@@ -2491,13 +2508,13 @@ test_council_blind_fabricated_narrative() {
     codex_prov="$COUNCIL_RESPONDING_PROVIDERS"
 
     if [[ "$fab" == "y" && "$fab_len" -gt 1600 && "$grounded_ok" == "y" && "$plan_ok" == "y" \
-          && "$assuming_ok" == "y" && "$shellcite_ok" == "y" \
+          && "$assuming_ok" == "y" && "$shellcite_ok" == "y" && "$cantdiff" == "y" \
           && "$agy_status" == "blind" && "$blind" == *"agy"* \
           && "$codex_prov" == *"codex"* && "$codex_prov" != *"agy"* \
           && "$approving_fams" == "1" && "$met" == "false" ]]; then
         test_pass
     else
-        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok assuming_ok=$assuming_ok shellcite_ok=$shellcite_ok agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
+        test_fail "fabricated-narrative blind detection wrong: fab=$fab fab_len=$fab_len grounded_ok=$grounded_ok plan_ok=$plan_ok assuming_ok=$assuming_ok shellcite_ok=$shellcite_ok cantdiff=$cantdiff agy_status='$agy_status' blind=[$blind] responders=[$codex_prov] approving_families=$approving_fams met=$met"
         return 1
     fi
 }
