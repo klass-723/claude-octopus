@@ -2447,6 +2447,25 @@ test_council_blind_fabricated_narrative() {
         echo "VERDICT: APPROVE"
     } > "$d/mixed-person.md"
 
+    # First-person analysis and another reviewer's access failure can also share
+    # one clause; the explicit third-party subject keeps it from becoming a
+    # personal admission.
+    {
+        for _i in $(seq 1 24); do
+            echo "I confirmed that another reviewer could not access the files, but their limitation does not change my substantive assessment."
+        done
+        echo "VERDICT: APPROVE"
+    } > "$d/same-clause-third-party.md"
+
+    # A third-party report must not mask an explicit first-person admission in
+    # that same clause.
+    {
+        for _i in $(seq 1 24); do
+            echo "I cannot access the files, and another reviewer could not access them either."
+        done
+        echo "VERDICT: APPROVE"
+    } > "$d/same-clause-self-and-third-party.md"
+
     # Ordinary Markdown wrapping must not hide the reviewer's own admission.
     {
         for _i in $(seq 1 24); do
@@ -2544,6 +2563,7 @@ test_council_blind_fabricated_narrative() {
     } > "$d/cantdiff.md"
 
     local fab_len fab=n grounded_ok=n plan_ok=n third_person_ok=n mixed_person_ok=n
+    local same_clause_third_party_ok=n same_clause_self_and_third_party=n
     local wrapped=n did_not_have=n was_not_able=n lack_access=n url_port=n
     local url_period_ok=n url_semicolon_ok=n assuming_ok=n shellcite_ok=n cantdiff=n
     council_response_is_blind "$d/cantdiff.md" && cantdiff=y
@@ -2562,6 +2582,8 @@ test_council_blind_fabricated_narrative() {
     council_response_is_blind "$d/planreview.md" || plan_ok=y
     council_response_is_blind "$d/third-person-restriction.md" || third_person_ok=y
     council_response_is_blind "$d/mixed-person.md" || mixed_person_ok=y
+    council_response_is_blind "$d/same-clause-third-party.md" || same_clause_third_party_ok=y
+    council_response_is_blind "$d/same-clause-self-and-third-party.md" && same_clause_self_and_third_party=y
 
     # Integration: a fabricated-narrative agy seat alongside a grounded codex seat
     # in a standard (required=2) council. agy must be classified blind and dropped
@@ -2587,6 +2609,8 @@ test_council_blind_fabricated_narrative() {
         return 0
     }
     council_run_chair_fallback() { :; }
+    # This is an assignment word before a function call. Quote the value, not
+    # the complete KEY=value token, which the shell would treat as a command.
     COUNCIL_PROVIDER_STATUS_JSON='{"agy":"available","codex":"available"}' \
         council_run_advice_phase >/dev/null 2>&1 || true
     unset -f council_dispatch_member_detached council_run_chair_fallback
@@ -2600,6 +2624,8 @@ test_council_blind_fabricated_narrative() {
 
     if [[ "$fab" == "y" && "$fab_len" -gt 1600 && "$grounded_ok" == "y" && "$plan_ok" == "y" \
           && "$third_person_ok" == "y" && "$mixed_person_ok" == "y" \
+          && "$same_clause_third_party_ok" == "y" \
+          && "$same_clause_self_and_third_party" == "y" \
           && "$wrapped" == "y" && "$did_not_have" == "y" \
           && "$was_not_able" == "y" && "$lack_access" == "y" && "$url_port" == "y" \
           && "$url_period_ok" == "y" && "$url_semicolon_ok" == "y" \

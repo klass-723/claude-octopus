@@ -1962,7 +1962,9 @@ council_response_is_blind() {
         {
             first_person = ($0 ~ /(^|[^[:alnum:]_])(i|we|my|our)([^[:alnum:]_]|$)/)
             access_failure = ($0 ~ /((direct[[:space:]]+)?file[[:space:]]+access[[:space:]]+is[[:space:]]+restricted|restricted[[:space:]]+by[[:space:]]+the[[:space:]]+output[[:space:]]+rules|prohibited[[:space:]]+from[[:space:]]+using[[:space:]]+any[[:space:]]+(file|terminal|command)|(cannot|could[[:space:]]*not|couldn.t|unable[[:space:]]+to|can.t|was[[:space:]]+not[[:space:]]+able[[:space:]]+to|were[[:space:]]+not[[:space:]]+able[[:space:]]+to)[[:space:]]+(open|read|access|view)[^.!?;]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec)|(did[[:space:]]+not|do[[:space:]]+not|don.t)[[:space:]]+have[[:space:]]+(direct[[:space:]]+)?access[^.!?;]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec)|lack(ed|s)?[[:space:]]+(direct[[:space:]]+)?access[^.!?;]{0,40}(files?|plan|prd|diff|patch|artifact|document|spec))/)
-            if (first_person && access_failure) found=1
+            third_party_access = ($0 ~ /(^|[^[:alnum:]_])(another|other)[[:space:]]+(reviewer|seat|agent|provider|model)([^[:alnum:]_]|$)[^.!?;]{0,80}(cannot|could[[:space:]]*not|couldn.t|unable[[:space:]]+to|can.t|did[[:space:]]+not|lack(ed|s)?)/)
+            first_person_access = ($0 ~ /(^|[^[:alnum:]_])(i|we)[[:space:]]+(cannot|could[[:space:]]*not|couldn.t|unable[[:space:]]+to|can.t|was[[:space:]]+not[[:space:]]+able[[:space:]]+to|were[[:space:]]+not[[:space:]]+able[[:space:]]+to)[[:space:]]+(open|read|access|view)/ || $0 ~ /(^|[^[:alnum:]_])(i|we)[[:space:]]+((did[[:space:]]+not|do[[:space:]]+not|don.t)[[:space:]]+have|lack(ed)?)[[:space:]]+(direct[[:space:]]+)?access/)
+            if (first_person && access_failure && (!third_party_access || first_person_access)) found=1
         }
         END { exit(found ? 0 : 1) }
     ' >/dev/null 2>&1 \
