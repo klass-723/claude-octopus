@@ -12,9 +12,11 @@
   directly (least-privilege: no file tools, no skip-permissions), control-char
   sanitized like research context and bounded by `COUNCIL_CONTEXT_MAX_BYTES`
   (default 128 KiB) with an explicit truncation notice so a partial artifact is
-  never mistaken for the whole. The content lands in a `COUNCIL_*` block the
-  prompt already marks untrusted, which is safer than a caller inlining a diff
-  into the authoritative task string.
+  never mistaken for the whole. The content is fenced with an unforgeable
+  per-artifact nonce delimiter (same technique as `sanitize_external_content`)
+  and only the sanitized basename is shown, so inlined content or a crafted path
+  cannot break out and forge an authoritative block — safer than a caller
+  inlining a diff into the authoritative task string.
 
 ## [11.2.1] - 2026-09-07
 
