@@ -1403,10 +1403,17 @@ test_council_context_file_delimiter_is_unforgeable() {
     begins="$(grep -cE '^<<<COUNCIL_CONTEXT_ARTIFACT:[0-9a-f]+$' <<< "$prompt")"
     ends="$(grep -cE '^COUNCIL_CONTEXT_ARTIFACT:[0-9a-f]+$' <<< "$prompt")"
 
-    if [[ "$nonce_present" == y && "$contained" == "OK" && "$begins" -eq 1 && "$ends" -eq 1 ]]; then
+    # (4) Begin and end markers must use the SAME nonce (a matched pair, not two
+    # independent hex strings).
+    local begin_nonce end_nonce same_nonce=n
+    begin_nonce="$(grep -oE '^<<<COUNCIL_CONTEXT_ARTIFACT:[0-9a-f]+$' <<< "$prompt" | head -1 | sed 's/.*://')"
+    end_nonce="$(grep -oE '^COUNCIL_CONTEXT_ARTIFACT:[0-9a-f]+$' <<< "$prompt" | head -1 | sed 's/.*://')"
+    [[ -n "$begin_nonce" && "$begin_nonce" == "$end_nonce" ]] && same_nonce=y
+
+    if [[ "$nonce_present" == y && "$contained" == "OK" && "$begins" -eq 1 && "$ends" -eq 1 && "$same_nonce" == y ]]; then
         test_pass
     else
-        test_fail "delimiter forgeable: nonce=$nonce_present contained=$contained begins=$begins ends=$ends"
+        test_fail "delimiter forgeable: nonce=$nonce_present contained=$contained begins=$begins ends=$ends same_nonce=$same_nonce"
         return 1
     fi
 }
