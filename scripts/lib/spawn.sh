@@ -1743,23 +1743,37 @@ ${heuristic_ctx}"
 
 # #947: spawn_agent (below) can legitimately block for a while before it ever
 # prints a provider PID, because it runs enforce_context_budget ->
-# summarize_then_dispatch synchronously on an oversized prompt: up to 5
-# summarizer candidates (lib/dispatch.sh's optional OCTOPUS_OVERSIZE_SUMMARIZER
-# plus its 4-candidate fallback chain), each bounded by compute_dynamic_timeout
-# — which OCTOPUS_AGENT_TIMEOUT overrides directly (lib/heartbeat.sh). A fixed
-# 120s wait window (the old 1200-attempt default) could be shorter than a
-# single candidate's own budget, let alone the full chain, so a wrapper that
-# was still legitimately working had its seat discarded by
-# spawn_agent_capture_pid below. Derive the default window from the same
-# per-candidate budget the summarizer chain actually uses, times the
-# worst-case candidate count, so raising OCTOPUS_AGENT_TIMEOUT to help a slow
-# provider can no longer cause its own spawn to be abandoned instead. Falls
-# back to a fixed value if heartbeat.sh (an optional dep of this file) isn't
-# sourced, e.g. a test harness loading only this function. Split out from
-# spawn_agent_capture_pid so the pure derivation is unit-testable without
-# driving the real polling loop.
+# summarize_then_dispatch synchronously on an oversized prompt. Each configured
+# summarizer candidate is bounded by compute_dynamic_timeout — which
+# OCTOPUS_AGENT_TIMEOUT overrides directly (lib/heartbeat.sh). A fixed 120s
+# wait window (the old 1200-attempt default) could be shorter than a single
+# candidate's own budget, so a wrapper that was still legitimately working had
+# its seat discarded by spawn_agent_capture_pid below. Derive the default window
+# from the same per-candidate budget and the configured candidate count, so
+# raising OCTOPUS_AGENT_TIMEOUT to help a slow provider can no longer cause its
+# own spawn to be abandoned instead. Fall back to the historical five-seat
+# estimate when dispatch.sh is not sourced, e.g. a test harness loading only
+# this function. Split out from spawn_agent_capture_pid so the pure derivation
+# is unit-testable without driving the real polling loop.
+_octopus_spawn_summarizer_candidate_count() {
+    local fallback_candidates=5 candidate_count candidates
+    if ! declare -F octo_summarizer_candidates >/dev/null 2>&1; then
+        printf '%s\n' "$fallback_candidates"
+        return 0
+    fi
+
+    if ! candidates="$(octo_summarizer_candidates 2>/dev/null)"; then
+        printf '%s\n' "$fallback_candidates"
+        return 0
+    fi
+    candidate_count="$(printf '%s\n' "$candidates" | awk 'NF { count++ } END { print count + 0 }')"
+    [[ "$candidate_count" =~ ^[1-9][0-9]*$ ]] || candidate_count=1
+    printf '%s\n' "$candidate_count"
+}
+
 _octopus_spawn_pid_wait_default_attempts() {
-    local preflight_candidates=5
+    local preflight_candidates
+    preflight_candidates="$(_octopus_spawn_summarizer_candidate_count)" || preflight_candidates=5
     local preflight_secs=360
     if declare -F compute_dynamic_timeout >/dev/null 2>&1; then
         preflight_secs=$(compute_dynamic_timeout complex 2>/dev/null) || preflight_secs=360

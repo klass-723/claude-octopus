@@ -20,6 +20,7 @@ test_suite "PID-wait window derivation (#947)"
 # compute_dynamic_timeout, and log — mirrors tests/unit/test-spawn-agent-capture-pid.sh.
 eval "$(sed -n '/^_octopus_prune_task_id_reservations() {/,/^}/p' "$PROJECT_ROOT/scripts/lib/spawn.sh")"
 eval "$(sed -n '/^_octopus_next_spawn_task_id() {/,/^}/p' "$PROJECT_ROOT/scripts/lib/spawn.sh")"
+eval "$(sed -n '/^_octopus_spawn_summarizer_candidate_count() {/,/^}/p' "$PROJECT_ROOT/scripts/lib/spawn.sh")"
 eval "$(sed -n '/^_octopus_spawn_pid_wait_default_attempts() {/,/^}/p' "$PROJECT_ROOT/scripts/lib/spawn.sh")"
 eval "$(sed -n '/^spawn_agent_capture_pid() {/,/^}/p' "$PROJECT_ROOT/scripts/lib/spawn.sh")"
 
@@ -218,24 +219,20 @@ else
     test_fail "expected an empty pid and exactly 5600 polling attempts (the derived window; 1200 would mean the old hardcoded default is still in effect), got pid='${pid:-empty}' tick_count=$tick_count"
 fi
 
-test_case "preflight_candidates in spawn.sh stays in lockstep with dispatch.sh's summarizer chain length"
-# #948 review: preflight_candidates=5 (used above) hardcodes the assumption
-# that summarize_then_dispatch's candidate chain in dispatch.sh is "optional
-# OCTOPUS_OVERSIZE_SUMMARIZER + 4 fixed candidates" = worst case 5. Nothing
-# ties the two files together — if dispatch.sh's fixed list grows, this
-# constant silently under-counts again, quietly reintroducing the exact
-# #947 abandonment bug this PR fixes, with no test failure to flag the
-# drift. This fails the moment that happens instead of staying silent.
-spawn_preflight_candidates=$(grep -m1 'local preflight_candidates=' "$PROJECT_ROOT/scripts/lib/spawn.sh" | grep -o '[0-9]\+') || spawn_preflight_candidates=""
-dispatch_fixed_line=$(grep -m1 'candidates+=("agy" "codex-mini" "claude-sonnet" "codex")' "$PROJECT_ROOT/scripts/lib/dispatch.sh") || dispatch_fixed_line=""
-dispatch_fixed_count=$(grep -o '"[^"]*"' <<<"$dispatch_fixed_line" | wc -l | tr -d ' ') || dispatch_fixed_count=0
-# +1 for the optional OCTOPUS_OVERSIZE_SUMMARIZER slot prepended ahead of the fixed chain.
-dispatch_worst_case=$((dispatch_fixed_count + 1))
-if [[ -n "$dispatch_fixed_line" && -n "$spawn_preflight_candidates" && "$spawn_preflight_candidates" == "$dispatch_worst_case" ]]; then
+test_case "preflight_candidates follows dispatch.sh's configured summarizer source"
+# The dispatch library owns candidate admission, deduplication, and ordering.
+# When it is present, spawn.sh must use that same source instead of reviving a
+# removed provider cascade or silently keeping a stale fixed count.
+octo_summarizer_candidates() {
+    printf '%s\n' commandcode codex:gpt-mini claude-sonnet
+}
+result=$(_octopus_spawn_pid_wait_default_attempts)
+if [[ "$result" == "11400" ]]; then
     test_pass
 else
-    test_fail "spawn.sh's preflight_candidates (${spawn_preflight_candidates:-not found}) no longer matches dispatch.sh's worst-case summarizer chain length ($dispatch_worst_case, from $dispatch_fixed_count fixed candidates + 1 optional, fixed-candidate line found: $([[ -n "$dispatch_fixed_line" ]] && echo yes || echo no)) — update _octopus_spawn_pid_wait_default_attempts's preflight_candidates in scripts/lib/spawn.sh to match"
+    test_fail "expected 11400 attempts (360s * 3 configured candidates + 60s margin), got: $result"
 fi
+unset -f octo_summarizer_candidates
 
 test_case "fallback 360s/candidate estimate in spawn.sh stays in lockstep with heartbeat.sh's complex-case formula"
 # #948 review: the 360s fallback used when heartbeat.sh isn't sourced (an

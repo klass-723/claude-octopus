@@ -798,3 +798,7 @@ MIT — see [LICENSE](LICENSE)
 <p align="center">
   <a href="https://github.com/nyldn">nyldn</a> | MIT License | <a href="https://www.reddit.com/r/ClaudeOctopus/">r/ClaudeOctopus</a> | <a href="https://github.com/nyldn/claude-octopus/issues">Report Issues</a>
 </p>
+
+### Tangle external read context
+
+See [Tangle read context](docs/tangle-read-context.md) for the optional `strict`/`contextual` read policy. The upstream default remains `strict`; read authorization never broadens write permission.

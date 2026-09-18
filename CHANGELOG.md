@@ -20,6 +20,7 @@
   never forced `met: false`; a regression test locks in that a mixed-vendor pair of
   enveloped `VERDICT: APPROVE` seats yields `distinct_approving_providers: 2` /
   `met: true` alongside a degenerate chair.
+- Remove the matcher-group `if` keys from the freeze-check and telemetry-webhook entries in `hooks/hooks.json`. Claude Code only reads `if` on individual hook handlers, so it ignored both keys and printed `hooks.json: unknown keys "if" in hooks.PreToolUse[6], "if" in hooks.PostToolUse[3] ignored` at startup. Both scripts already check freeze state and the webhook URL themselves, so hook behavior is unchanged.
 
 ## [11.5.0] - 2026-09-12
 

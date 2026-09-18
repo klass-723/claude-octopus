@@ -53,7 +53,12 @@ else
     test_fail "expected attributed exit 78, got rc=$rc event='$event_args'"
 fi
 
-test_case "summarize strategy dispatches through summarizer"
+test_case "summarize strategy dispatches through configured summarizer"
+SUMMARIZER_CFG="$TEST_TMP_DIR/providers-summarizer.json"
+printf '%s\n' '{"routing":{"features":{"summarizer":["commandcode"]}}}' > "$SUMMARIZER_CFG"
+export OCTOPUS_PROVIDERS_CONFIG="$SUMMARIZER_CFG"
+octo_fallback_canonical_agent_spec() { printf '%s\n' "$1"; }
+octo_fallback_admit_automatic_spec() { return 0; }
 run_agent_sync() {
     echo "condensed prompt"
 }
@@ -69,6 +74,7 @@ if [[ "$output" == "condensed prompt" ]] &&
 else
     test_fail "expected attributed summarized prompt, got output='$output' event='$event_args'"
 fi
+unset OCTOPUS_PROVIDERS_CONFIG
 
 test_case "leading-zero context budget is normalized as decimal before arithmetic"
 decimal_prompt="$(printf '%04000d' 0)"

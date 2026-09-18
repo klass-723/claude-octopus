@@ -1223,6 +1223,7 @@ ${repo_context}
 Execution instructions:
 - Treat the original task as authoritative for requirements, explicit file targets, acceptance criteria, and forbidden changes.
 - Complete the assigned subtask without dropping original constraints that apply to it.
+$(tangle_read_scope_guidance)
 - For [CODING] work, edit the repository files directly in the current worktree. Do not only describe a plan or paste code snippets.
 - For [CODING] work, treat Files: paths/directories as the exclusive write-scope authority for existing/anchored paths and Creates: paths as exclusive authorization for new artifacts. Reads: is read-only context and never grants write permission. The resolved repository context is lookup guidance only; it does not grant permission to edit additional files; do not edit files clearly owned by another subtask or broaden the declared scope.
 - If the subtask creates a new exported component, command, event type, route, hook, or helper, wire it into at least one production call site unless the original task explicitly asks for an isolated artifact.
@@ -1562,6 +1563,58 @@ ${resolved:-<none resolved>}
 EOF
 }
 
+# Read context never grants write authority.
+tangle_read_scope_mode() {
+    case "${OCTOPUS_TANGLE_READ_SCOPE_MODE:-strict}" in
+        strict|contextual) printf "%s\n" "${OCTOPUS_TANGLE_READ_SCOPE_MODE:-strict}" ;;
+        *) echo "Invalid OCTOPUS_TANGLE_READ_SCOPE_MODE (expected strict or contextual)" >&2; return 64 ;;
+    esac
+}
+
+tangle_read_scope_is_allowed() {
+    local scope="${1:-}" mode repo_root
+    mode=$(tangle_read_scope_mode) || return 1
+    repo_root=$(tangle_resolve_repo_root 2>/dev/null) || return 1
+    if [[ "$mode" == strict ]]; then
+        tangle_scope_is_safe_relative_path "$scope" || return 1
+    fi
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 "${BASH_SOURCE[0]%/*}/../tangle-read-scope.py" "$repo_root" "$scope" "$mode"
+}
+
+tangle_read_scope_guidance() {
+    local mode
+    mode=$(tangle_read_scope_mode) || return 1
+    printf "Read context policy: %s.\n" "$mode"
+    if [[ "$mode" == contextual ]]; then
+        printf "%s\n" "- Reads: may name repository-relative paths, absolute paths within the repository, or absolute paths within caller-authorized context entries below. Directories authorize descendants; files authorize only themselves."
+        printf "%s\n" "- Do not infer read roots from task prose or widen them to parent directories. External context is always read-only, including in adaptive write mode."
+        printf "%s\n" "Caller-authorized context entries:" "${OCTOPUS_TANGLE_CONTEXTUAL_READ_ROOTS:-<none>}"
+    else
+        printf "%s\n" "- Reads: must use safe repository-relative paths. External task references do not grant filesystem read authority."
+    fi
+    printf "%s\n" "- Never read credentials, .env files, private keys, auth stores or Git metadata, including through symlinks or recursive scans. Reads: never grants write permission."
+    printf "%s\n" "- This is a declaration/prompt policy, not an OS sandbox. Do not bypass it with another tool."
+}
+
+tangle_validate_read_scopes() {
+    local subtask="$1" scopes scope
+    [[ "$(tangle_structured_clause_count "$subtask" "Reads")" -le 1 ]] || {
+        echo "subtask has multiple Reads clauses"; return 1;
+    }
+    if tangle_scope_clause_has_parenthetical_prose "$subtask" "Reads"; then
+        echo "subtask has descriptive prose inside Reads: scope"; return 1
+    fi
+    scopes=$(tangle_extract_read_scopes "$subtask")
+    while IFS= read -r scope; do
+        [[ -n "$scope" ]] || continue
+        if ! tangle_read_scope_is_allowed "$scope"; then
+            echo "unsafe Reads scope ${scope} for read mode $(tangle_read_scope_mode)"
+            return 1
+        fi
+    done <<< "$scopes"
+}
+
 tangle_scope_is_safe_relative_path() {
     local scope="$1"
     local normalized="${scope#./}"
@@ -1788,6 +1841,8 @@ tangle_reformat_decomposition() {
     local repo_file_map="${4:-}"
     local reformat_prompt="Reformat the previous Octopus task decomposition. Do not add analysis.
 
+$(tangle_read_scope_guidance)
+
 Required output format, exactly one subtask per line:
 1. [CODING] Short title — Files: relative/file.js, another/file.js — Task: specific coding work
 2. [REASONING] Short title — Task: specific reasoning/review work
@@ -1856,6 +1911,8 @@ tangle_redecompose() {
     local original_task="$1" previous_output="$2" reason="$3" repo_file_map="${4:-}" design_resolution="${5:-}"
     local prompt="The previous attempt did not produce a usable Octopus task decomposition. Decompose the original task again from first principles.
 
+$(tangle_read_scope_guidance)
+
 Return only numbered lines. Every [CODING] line must include Files: and/or Creates:, Reads: is read-only, coding scopes must be disjoint, and preserve the original deliverable.
 
 ${repo_file_map}
@@ -1893,6 +1950,8 @@ tangle_decomposition_adequacy_response_valid() {
 tangle_decomposition_adequacy_review() {
     local original_task="$1" subtasks="$2" repo_file_map="${3:-}" design_resolution="${4:-}" planner_decisions="${5:-}"
     local prompt="Review whether this decomposition can materialize the original deliverable. Check coverage, scope coherence, artifact creation, and scope discipline. Reads: never grants write permission.
+
+$(tangle_read_scope_guidance)
 
 Return exactly VERDICT: PASS or FAIL, REASONS:, and SCOPE_REVIEW: NONE or actionable MOVE_TO_READS/REMOVE_WRITE/ADD_WRITE lines.
 
@@ -1938,6 +1997,8 @@ tangle_reconsideration_response_valid() {
 tangle_reconsider_decomposition() {
     local original_task="$1" previous_decomposition="$2" adequacy_review="$3" repo_file_map="${4:-}" design_resolution="${5:-}"
     local prompt="Reconsider this decomposition after an independent adequacy review. For every SCOPE_REVIEW recommendation, explicitly ACCEPT or REJECT it with a reason. Preserve the original deliverable, keep coding scopes disjoint, and return only DECISIONS: followed by DECOMPOSITION: with numbered subtasks.
+
+$(tangle_read_scope_guidance)
 
 ${repo_file_map}
 Design-review resolution: ${design_resolution:-[none]}
@@ -2012,6 +2073,7 @@ tangle_effective_write_scopes() {
 
 tangle_validate_parallel_write_scopes() {
     local subtasks="$1"
+    tangle_read_scope_mode >/dev/null || return 1
     local task_index=0
     local coding_count=0
     local existing_scopes=()
@@ -2024,6 +2086,11 @@ tangle_validate_parallel_write_scopes() {
         local subtask
         subtask=$(echo "$line" | sed -E 's/^[[:space:]]*(\*\*)?[0-9]+[\.\)][[:space:]]*//; s/^[[:space:]]+//')
         ((task_index++)) || true
+        local read_reason
+        if ! read_reason=$(tangle_validate_read_scopes "$subtask"); then
+            echo "subtask ${task_index}: ${read_reason}"
+            return 1
+        fi
 
         if [[ "$subtask" =~ \[REASONING\] ]]; then
             if ! tangle_task_clause_is_valid "$subtask"; then
@@ -2057,22 +2124,12 @@ tangle_validate_parallel_write_scopes() {
         fi
 
         local clause_name
-        for clause_name in Files Creates Reads; do
+        for clause_name in Files Creates; do
             if tangle_scope_clause_has_parenthetical_prose "$subtask" "$clause_name"; then
                 echo "coding subtask ${task_index} has descriptive prose inside ${clause_name}: scope; move descriptions into Task:"
                 return 1
             fi
         done
-
-        local read_scopes
-        read_scopes=$(tangle_extract_read_scopes "$subtask")
-        while IFS= read -r declared_scope; do
-            [[ -z "$declared_scope" ]] && continue
-            if ! tangle_scope_is_safe_relative_path "$declared_scope"; then
-                echo "coding subtask ${task_index} has unsafe Reads scope '${declared_scope}'"
-                return 1
-            fi
-        done <<< "$read_scopes"
 
         local declared_scope
         while IFS= read -r declared_scope; do
@@ -4188,6 +4245,8 @@ $(git -C "$repo_root" ls-files 2>/dev/null | sed -n 1,200p)
     fi
 
     local decompose_prompt="Decompose this task into subtasks that can be executed in parallel.
+
+$(tangle_read_scope_guidance)
 Each subtask should be:
 - Self-contained and independently verifiable
 - Clear about inputs and expected outputs
@@ -4645,8 +4704,7 @@ tangle_authorized_read_scopes() {
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
         tangle_line_is_numbered_subtask "$line" || continue
-        [[ "$line" =~ \[CODING\] ]] || continue
-        subtask=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*(\*\*)?[0-9]+[\.\)][[:space:]]*//; s/^[[:space:]]+//; s/\[CODING\][[:space:]]*//')
+        subtask=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*(\*\*)?[0-9]+[\.\)][[:space:]]*//; s/^[[:space:]]+//; s/\[(CODING|REASONING)\][[:space:]]*//')
         tangle_extract_read_scopes "$subtask"
     done <<< "$subtasks" | sed '/^$/d' | sort -u
 }

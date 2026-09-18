@@ -612,11 +612,14 @@ $(<"$correction_file")
         local effective_fail_count="$fail_count"
         local effective_total="$total"
         local effective_success_rate="$success_rate"
-        if [[ -n "$correction_file" && -f "$correction_file" ]] &&            grep -q "Status: SUCCESS" "$correction_file" 2>/dev/null &&            [[ "${correction_changed:-0}" == "1" || -n "$worktree_changes" ]]; then
+        if [[ -n "$correction_file" && -f "$correction_file" ]] \
+            && [[ "$(tangle_result_latest_status "$correction_file")" == "success" ]] \
+            && ! tangle_result_has_blocker_output "$correction_file" \
+            && [[ "${correction_changed:-0}" == "1" || -n "$worktree_changes" ]]; then
             correction_overlay_applied=true
-            # Correction rounds can prove the worktree was repaired, but keep the
-            # original subtask result rate as the quality-gate decision input.
-            # The overlay is reported separately for operator diagnosis.
+            # A successful correction overlay proves the validated worktree was
+            # repaired. Preserve the original subtask rate for diagnostics, but
+            # use the effective post-correction rate for the quality decision.
             effective_fail_count=0
             effective_success_count=$(( static_total > 0 ? static_total : 1 ))
             effective_total=$((effective_success_count + effective_fail_count))
@@ -624,12 +627,14 @@ $(<"$correction_file")
             log INFO "Post-correction validation overlay applied${correction_round:+ for round ${correction_round}}: static tangle result rate ${static_success_rate}% -> effective ${effective_success_rate}%"
         fi
 
+        local quality_success_rate="$effective_success_rate"
+
         local gate_status="PASSED"
         local gate_color="${GREEN}"
-        if [[ $success_rate -lt $tangle_threshold ]]; then
+        if [[ $quality_success_rate -lt $tangle_threshold ]]; then
             gate_status="FAILED"
             gate_color="${RED}"
-        elif [[ $success_rate -lt 90 ]]; then
+        elif [[ $quality_success_rate -lt 90 ]]; then
             gate_status="WARNING"
             gate_color="${YELLOW}"
         fi
@@ -656,23 +661,23 @@ $(<"$correction_file")
         fi
 
         # v8.20.1: Record quality gate metric
-        record_task_metric "quality_gate" "$success_rate" 2>/dev/null || true
+        record_task_metric "quality_gate" "$quality_success_rate" 2>/dev/null || true
 
         # v8.19.0: Log threshold applied
         write_structured_decision \
             "quality-gate" \
             "validate_tangle_results" \
-            "Quality gate ${gate_status}: ${success_rate}% success rate (threshold: ${tangle_threshold}%)" \
+            "Quality gate ${gate_status}: ${quality_success_rate}% success rate (threshold: ${tangle_threshold}%)" \
             "tangle-${task_group}" \
-            "$(if [[ $success_rate -ge 90 ]]; then echo "high"; elif [[ $success_rate -ge $tangle_threshold ]]; then echo "medium"; else echo "low"; fi)" \
-            "Success: ${success_count}/${total}, failures: ${fail_count}, threshold: ${tangle_threshold}%" \
+            "$(if [[ $quality_success_rate -ge 90 ]]; then echo "high"; elif [[ $quality_success_rate -ge $tangle_threshold ]]; then echo "medium"; else echo "low"; fi)" \
+            "Success: ${effective_success_count}/${effective_total}, failures: ${effective_fail_count}, threshold: ${tangle_threshold}%" \
             "" 2>/dev/null || true
 
         # ═══════════════════════════════════════════════════════════════════════
         # v8.31.0: Anti-sycophancy challenge — devil's advocate on high-pass results
         # Runs silently when results pass too easily (90%+), forcing a critical look
         # ═══════════════════════════════════════════════════════════════════════
-        if [[ "$gate_status" == "PASSED" && $success_rate -ge 90 && "${OCTOPUS_ANTISYCOPHANCY:-true}" != "false" ]]; then
+        if [[ "$gate_status" == "PASSED" && $quality_success_rate -ge 90 && "${OCTOPUS_ANTISYCOPHANCY:-true}" != "false" ]]; then
             echo -e "  ${DIM}Running anti-sycophancy check...${NC}"
             # Randomized bypass token prevents prompt injection from LLM-generated results
             local clean_token="GENUINELY_CLEAN_${RANDOM}${RANDOM}"
@@ -680,7 +685,7 @@ $(<"$correction_file")
             challenge_result=$(run_agent_sync "claude-sonnet" "
 IMPORTANT: Do NOT read, explore, or modify any files. Do NOT run any shell commands. Output TEXT only.
 
-You are a DEVIL'S ADVOCATE reviewer. This implementation passed quality gates with ${success_rate}% success.
+You are a DEVIL'S ADVOCATE reviewer. This implementation passed quality gates with ${quality_success_rate}% success.
 
 YOUR JOB: Find problems the initial review MISSED. Assume the reviewers were too lenient.
 Identify at least 2 concrete issues or risks.
@@ -701,7 +706,7 @@ $(head -c 3000 <<< "$results")
                 gate_status="CHALLENGED"
                 gate_color="${YELLOW}"
                 echo -e "  ${YELLOW}⚠ Anti-sycophancy challenge raised concerns — review recommended${NC}"
-                log WARN "Anti-sycophancy challenge raised concerns on ${success_rate}% pass rate"
+                log WARN "Anti-sycophancy challenge raised concerns on ${quality_success_rate}% pass rate"
                 results+="
 ---
 ## Anti-Sycophancy Challenge (v8.31.0)
@@ -716,7 +721,7 @@ $challenge_result
         # CONDITIONAL BRANCHING - Quality gate decision tree
         # ═══════════════════════════════════════════════════════════════════════
         local quality_branch
-        quality_branch=$(evaluate_quality_branch "$success_rate" "$quality_retry_count")
+        quality_branch=$(evaluate_quality_branch "$quality_success_rate" "$quality_retry_count")
 
         if [[ -n "$hard_gate_retry_feedback" ]]; then
             TANGLE_HARD_GATE_RETRY_FEEDBACK="${hard_gate_retry_feedback}"$'Apply a delta-only correction. Preserve correct existing work, do not restart the whole plan, and explicitly cover the missing hard-gate requirements in the final output.\n'
@@ -740,7 +745,7 @@ $challenge_result
 ## Generated: $(date)
 
 ### Quality Gate: ${gate_status}
-- Success Rate: ${success_rate}% (threshold: ${tangle_threshold}%)
+- Success Rate: ${quality_success_rate}% (threshold: ${tangle_threshold}%)
 - Successful: ${success_count}/${total} result files
 - Failed: ${fail_count}/${total} result files
 - Decision Branch: ${quality_branch}
@@ -794,7 +799,7 @@ EOF
                     echo -e "${YELLOW}${_BOX_TOP}${NC}"
                     echo -e "${YELLOW}║  🐙 Branching: Retry Path (attempt $quality_retry_count/$retry_limit_display)                    ║${NC}"
                     echo -e "${YELLOW}${_BOX_BOT}${NC}"
-                    log WARN "Quality gate at ${success_rate}%, below ${tangle_threshold}%. Retrying..."
+                    log WARN "Quality gate at ${quality_success_rate}%, below ${tangle_threshold}%. Retrying..."
                     # v8.18.0: Lock providers that failed quality gate
                     while IFS= read -r failed_task; do
                         [[ -z "$failed_task" ]] && continue
@@ -822,7 +827,7 @@ EOF
                     sleep 3
                     continue  # Re-validate
                 else
-                    log ERROR "Max retries ($(quality_retry_limit)) exceeded. Proceeding with ${success_rate}%"
+                    log ERROR "Max retries ($(quality_retry_limit)) exceeded. Proceeding with ${quality_success_rate}%"
                 fi
                 ;;
             escalate)
@@ -852,14 +857,14 @@ EOF
                 echo -e "${RED}${_BOX_TOP}${NC}"
                 echo -e "${RED}║  🐙 Branching: Abort Path (quality gate failed)           ║${NC}"
                 echo -e "${RED}${_BOX_BOT}${NC}"
-                log ERROR "Quality gate FAILED with ${success_rate}%. Aborting workflow."
+                log ERROR "Quality gate FAILED with ${quality_success_rate}%. Aborting workflow."
                 return 1
                 ;;
         esac
 
         echo ""
         echo -e "${gate_color}${_BOX_TOP}${NC}"
-        echo -e "${gate_color}║  Quality Gate: ${gate_status} (${success_rate}% of tangle results succeeded)${NC}"
+        echo -e "${gate_color}║  Quality Gate: ${gate_status} (${quality_success_rate}% effective success)${NC}"
         echo -e "${gate_color}${_BOX_BOT}${NC}"
 
         if [[ "$gate_status" == "FAILED" ]]; then
