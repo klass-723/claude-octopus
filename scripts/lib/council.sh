@@ -2084,6 +2084,268 @@ council_response_is_substantive() {
     return 0
 }
 
+council_response_content_match_count() {
+    # Count DISTINCTIVE verbatim code fragments the response quotes that actually
+    # appear (whitespace-normalized) in a source file under the evidence root. This
+    # is the content-match grounding signal (sail-cruisey #2931/#2947): a seat that
+    # quotes real source it read is grounded even when it cites in prose/table form
+    # without a `path:line` (the #2947 claude seats did exactly this), while a seat
+    # that only names bare filenames, package names, or echoes prompt numbers quotes
+    # nothing that resolves and scores zero (the agy "Assumptions" seats). A fragment
+    # counts only if it is long and carries multiple code operators, so ubiquitous
+    # tokens (`toBeUndefined()`), bare paths, and prose never match. Bounded scan:
+    # source-extension files only, size/file caps, vendor/VCS dirs skipped.
+    local response_path="$1" evidence_root="$2"
+    [[ -f "$response_path" && -d "$evidence_root" ]] || { printf '0\n'; return 0; }
+    command -v python3 >/dev/null 2>&1 || { printf '0\n'; return 0; }
+    # Memoize per (response, mtime, evidence root): is_blind can call this twice in
+    # one pass (positive- then general-grounding) and each call otherwise re-walks
+    # up to 40k entries and reads up to 4k files. The cache lives in a per-process
+    # temp dir, never under the evidence root, so the cache file is not itself
+    # scanned (CodeRabbit #1148). Fail-open: any cache hiccup falls through to a
+    # direct compute.
+    local _cm_cache_file="" _cm_mt _cm_rp _cm_rr _cm_key
+    if command -v cksum >/dev/null 2>&1; then
+        _cm_mt="$(stat -f %m "$response_path" 2>/dev/null || stat -c %Y "$response_path" 2>/dev/null || printf 0)"
+        _cm_rp="$(cd "$(dirname "$response_path")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$response_path")")"
+        _cm_rr="$(cd "$evidence_root" 2>/dev/null && pwd -P)"
+        _cm_key="$(printf '%s|%s|%s|%s' "$_cm_rp" "$_cm_mt" "$_cm_rr" "${COUNCIL_OUTPUT_DIR:-}" | cksum | tr -cd '0-9')"
+        if [[ -n "$_cm_key" ]]; then
+            local _cm_dir="${TMPDIR:-/tmp}/octopus-cm-cache-$$"
+            _cm_cache_file="$_cm_dir/$_cm_key"
+            if [[ -f "$_cm_cache_file" ]]; then
+                local _cm_cached; _cm_cached="$(cat "$_cm_cache_file" 2>/dev/null || true)"
+                # Only trust a well-formed integer; a stale/partial entry is ignored
+                # and recomputed rather than returned (CodeRabbit #1148).
+                if [[ "$_cm_cached" =~ ^-?[0-9]+$ ]]; then printf '%s\n' "$_cm_cached"; return 0; fi
+            fi
+            mkdir -p "$_cm_dir" 2>/dev/null || _cm_cache_file=""
+        fi
+    fi
+    # Compute into a temp file (no $(...) around the heredoc — that breaks the bash
+    # 3.2 floor), then emit to stdout and promote to the cache ONLY when python3
+    # exited cleanly and produced a single integer. A crashed/partial run must not
+    # poison the cache with an empty value that would read back as "ungrounded" for
+    # the rest of the process (CodeRabbit #1148).
+    local _cm_tmp="${TMPDIR:-/tmp}/octopus-cm.$$.${RANDOM}${RANDOM}"
+    python3 - "$response_path" "$evidence_root" "${COUNCIL_OUTPUT_DIR:-}" > "$_cm_tmp" 2>/dev/null <<'PY'
+import re, sys
+from pathlib import Path
+
+resp_path = Path(sys.argv[1]).resolve()
+resp = resp_path.read_text(encoding="utf-8", errors="replace")
+root = Path(sys.argv[2]).resolve()
+
+# Council output subtree to exclude from the scan: when --output-dir points
+# inside the evidence root, peer seats' response files live under it, and a seat
+# quoting a peer's response from its prompt must NOT ground on that (CodeRabbit
+# #1148). Only exclude when the artifact root is STRICTLY inside the evidence
+# root — if it equals the root we would nuke the whole source tree, so fall back
+# to the per-response exclusion below; if it is outside the root the candidates
+# (always under root) can never match it anyway.
+artifact_root = None
+if len(sys.argv) > 3 and sys.argv[3]:
+    try:
+        ar = Path(sys.argv[3]).resolve()
+        if ar != root:
+            ar.relative_to(root)   # ValueError unless strictly inside root
+            artifact_root = ar
+    except (OSError, ValueError):
+        artifact_root = None
+
+frags = set()
+for m in re.findall(r"`([^`\n]+)`", resp):            # inline `code` spans
+    frags.add(m)
+for block in re.findall(r"```[^\n]*\n(.*?)```", resp, re.S):  # fenced blocks
+    for line in block.splitlines():
+        frags.add(line)
+for m in re.findall(r'"([^"\n]{1,400})"', resp):     # a source line quoted in plain prose
+    frags.add(m)
+
+CODE_OP = re.compile(r"[=(){}\[\].:;<>?|&+*/-]")
+def distinctive(s):
+    s = re.sub(r"\s+", " ", s).strip()
+    if len(s) < 18:
+        return None
+    if len(CODE_OP.findall(s)) < 2:
+        return None
+    if " " not in s and "/" in s:   # a bare path/filename token, not a quote
+        return None
+    return s
+
+cands = set()
+for fr in frags:
+    d = distinctive(fr)
+    if d:
+        cands.add(d)
+if not cands:
+    print(0); sys.exit(0)
+
+# Basenames the response names, so a file it quotes is scanned regardless of its
+# position in rglob order — a bounded scan that stops before reaching a cited
+# file would otherwise look identical to "no match" and false-blind a grounded,
+# quote-only review (CodeRabbit #1148).
+named = {Path(t).name.lower() for t in re.findall(r"[\w./-]+\.[A-Za-z0-9]+", resp)}
+
+SRC_EXT = {".ts",".tsx",".js",".jsx",".mjs",".cjs",".css",".scss",".sass",".less",
+           ".html",".htm",".vue",".svelte",".py",".go",".rb",".rs",".java",".kt",
+           ".swift",".cs",".c",".cc",".cpp",".cxx",".h",".hh",".hpp",".sh",".bash",
+           ".zsh",".ps1",".sql",".yaml",".yml",".toml",".json",".jsonc",".xml",
+           ".proto",".graphql",".gql",".ini",".cfg",".conf",".env",".gradle",".md",
+           ".mdx",".php",".pl",".lua",".ex",".exs",".scala",".dart",".m",".mm",
+           ".jl",".tf",".r"}
+SKIP = {".git","node_modules","dist","build",".next","coverage",".turbo",".cache","vendor",".venv"}
+
+def eligible(path):
+    # Skip vendor/VCS dirs by the candidate's path RELATIVE to the evidence root,
+    # so an ancestor of the root named e.g. "build" does not disqualify every
+    # file under it (CodeRabbit #1148).
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return False
+    if any(part in SKIP for part in rel.parts):
+        return False
+    if not path.is_file() or path.suffix.lower() not in SRC_EXT:
+        return False
+    # Resolve symlinks and require the real target to stay beneath the evidence
+    # root, so a symlink pointing outside the repo cannot ground a quote from an
+    # external file (CodeRabbit #1148). The seat's own response (a .md under the
+    # root) is excluded too — scanning it would let a seat ground a fabricated
+    # fragment by quoting that fragment in its own review.
+    try:
+        rp = path.resolve()
+        rp.relative_to(root)        # ValueError if the resolved target escapes root
+    except (OSError, ValueError):
+        return False
+    if rp == resp_path:
+        return False
+    if artifact_root is not None:
+        try:
+            rp.relative_to(artifact_root)
+            return False            # a council artifact, not source the seat read
+        except ValueError:
+            pass
+    return True
+
+remaining = set(cands)
+read = 0            # unnamed source files actually read (budget)
+walked = 0          # tree entries examined (walk bound)
+truncated = False
+MAX_FILES = 4000
+MAX_WALK = 40000
+MAX_BYTES = 1_500_000
+
+def scan(path, is_named):
+    global truncated
+    try:
+        st = path.stat()
+    except OSError:
+        return
+    # A cited file too large to read leaves grounding UNDECIDED — treat the scan
+    # as inconclusive rather than returning a definitive zero that could blind a
+    # review quoting that file (CodeRabbit #1148). An oversized UNnamed file was
+    # never going to ground anything the response pointed at, so skip it quietly.
+    if st.st_size > MAX_BYTES:
+        if is_named:
+            truncated = True
+        return
+    try:
+        hay = re.sub(r"\s+", " ", path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return
+    for c in list(remaining):
+        if c in hay:
+            remaining.discard(c)
+
+for path in root.rglob("*"):
+    if not remaining:
+        break
+    walked += 1
+    if walked > MAX_WALK:
+        truncated = True
+        break
+    if not eligible(path):
+        continue
+    if path.name.lower() in named:
+        scan(path, True)     # a cited file is always read, whatever its scan order
+        continue
+    if read >= MAX_FILES:
+        truncated = True     # over budget for unnamed files; keep looking for cited ones
+        continue
+    scan(path, False)
+    read += 1
+
+matched = len(cands) - len(remaining)
+# A truncated scan that matched nothing is INCONCLUSIVE, not proof of no match.
+# Emit -1 so the caller treats grounding as undetermined (and does not blind)
+# rather than as absent (CodeRabbit #1148).
+if matched == 0 and truncated and remaining:
+    print(-1)
+else:
+    print(matched)
+PY
+    local _cm_rc=$?
+    local _cm_val; _cm_val="$(cat "$_cm_tmp" 2>/dev/null || true)"
+    rm -f "$_cm_tmp" 2>/dev/null || true
+    if (( _cm_rc == 0 )) && [[ "$_cm_val" =~ ^-?[0-9]+$ ]]; then
+        printf '%s\n' "$_cm_val"
+        if [[ -n "$_cm_cache_file" ]]; then printf '%s\n' "$_cm_val" > "$_cm_cache_file" 2>/dev/null || true; fi
+    else
+        printf '0\n'   # python failed/partial: fail-safe to not-grounded, never cache
+    fi
+}
+
+council_response_makes_code_claims() {
+    # True when the response asserts code-level facts (vs a purely process/plan
+    # discussion with nothing to ground). Reuses the token-bounded code vocabulary
+    # from the soft-blind detector. Used only to decide whether the positive
+    # grounding gate applies — a review with no code claims is never gated.
+    local f="$1"
+    [[ -f "$f" ]] || return 1
+    grep -ciE '(^|[^[:alnum:]])(test(s|ed|ing|cases?)?|coverage|render(s|ed|ing)?|outputs?|type[- ]?check(s|ed|ing)?|tsc|lint(s|ed|ing|er)?|implement(s|ed|ing|ations?)?|propagat(e|es|ed|ing|ion)?|pass(es|ing|ed)?|regress(es|ed|ions?)?|contracts?|behaviou?r(s|al)?|diff(s|ed)?|assert(s|ed|ing|ions?)?|snapshots?|dom|css|class(es)?|components?|functions?|api(s)?|endpoints?|schema(s|ta)?|payloads?|fields?|joins?|quer(y|ies)|gate[ds]?|fallback|routing?|resolver|interface|serializ|compiler?|authenticat(e|es|ed|ing|ion)?|authoriz(e|es|ed|ing|ation)?|unauthenticated|unauthorized|reject(s|ed|ing|ion)?|guards?|validat(e|es|ed|ing|ion|or|ors)?|sanitiz(e|es|ed|ing|ation)?|escap(e|es|ed|ing)?|permissions?|middleware|tokens?|sessions?|cookies?|headers?)([^[:alnum:]]|$)' "$f" >/dev/null
+}
+
+council_response_has_grounding() {
+    # True when the response carries at least one grounding signal: a validated
+    # `path:line` citation that resolves under the evidence root, OR a content-match
+    # (a distinctive quoted fragment that appears verbatim in a source file). This is
+    # the single gate the quorum tally and the §4 raw-body rule share.
+    local f="$1" evidence_root="${2:-}"
+    [[ -f "$f" ]] || return 1
+    [[ -n "$evidence_root" && -d "$evidence_root" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    local validated
+    validated="$(council_response_evidence_paths_json "$f" "$evidence_root")" || validated='[]'
+    [[ "$(jq 'length' <<< "$validated" 2>/dev/null || printf 0)" -gt 0 ]] && return 0
+    # >0: a distinctive quote resolved in a source file. <0: the bounded scan was
+    # truncated before it could decide — inconclusive, so treat as grounded rather
+    # than blind a possibly-grounded seat (CodeRabbit #1148). ==0: no match.
+    local cm
+    cm="$(council_response_content_match_count "$f" "$evidence_root")"
+    [[ "$cm" =~ ^-?[0-9]+$ ]] && (( cm != 0 )) && return 0
+    return 1
+}
+
+council_response_has_positive_grounding() {
+    # Like council_response_has_grounding, but an INCONCLUSIVE (truncated, -1) scan
+    # does NOT count. Used to exempt a deferral: a seat that defers to the summary
+    # is cleared only by a POSITIVE match or a validated citation — never by an
+    # undecided scan — while the general blind gate keeps the softer inconclusive
+    # exemption so a truncated scan does not over-blind (CodeRabbit #1148).
+    local f="$1" evidence_root="${2:-}"
+    [[ -f "$f" ]] || return 1
+    [[ -n "$evidence_root" && -d "$evidence_root" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 1
+    local validated
+    validated="$(council_response_evidence_paths_json "$f" "$evidence_root")" || validated='[]'
+    [[ "$(jq 'length' <<< "$validated" 2>/dev/null || printf 0)" -gt 0 ]] && return 0
+    local cm
+    cm="$(council_response_content_match_count "$f" "$evidence_root")"
+    [[ "$cm" =~ ^[0-9]+$ ]] && (( cm > 0 )) && return 0
+    return 1
+}
+
 council_response_is_blind() {
     # A "blind" seat returned a verdict WITHOUT reading the artifact — it was
     # dispatched without file-read tools (e.g. permissionMode "plan") and says so.
@@ -2110,11 +2372,55 @@ council_response_is_blind() {
     # Gated on zero file:line citations so a grounded review is never flagged
     # (sail-cruisey #2570 paraphrase, #2463 prior-phase deference).
     if council_response_defers_without_reading "$f" "$evidence_root"; then
-        return 0
+        # A deferral that ALSO quotes real source it read is grounded: the
+        # content-match signal (not just a path:line) satisfies the check, so a
+        # seat that quotes matching source and merely adds "the summary confirms
+        # the tests pass" is not blinded (CodeRabbit #1148). Only when a live
+        # evidence root is present to verify the quote; otherwise the deferral
+        # stands. Explicit access-failure rejection above remains authoritative.
+        if [[ -n "$evidence_root" && -d "$evidence_root" ]] \
+            && command -v python3 >/dev/null 2>&1 \
+            && council_response_has_positive_grounding "$f" "$evidence_root"; then
+            :
+        else
+            return 0
+        fi
     fi
 
     local nlen
     nlen="$(tr -d '[:space:]' < "$f" | wc -c | tr -d '[:space:]')"
+
+    # Positive-grounding gate (sail-cruisey #2931/#2947). A full-length, confident
+    # review that makes code-level claims but grounds NONE of them — no validated
+    # path:line AND no verbatim quote that resolves in a source file under the
+    # evidence root — reviewed nothing it can prove it read. Several agy seats
+    # approved exactly this way (bare filenames + echoed prompt numbers, framed as
+    # "Assumptions") and were wrongly counted toward quorum. Scoped so it cannot
+    # over-blind: skipped in fixture mode; only when a live evidence root + validator
+    # are present (a no-source-tree plan review keeps the prose exemption); only for
+    # responses long enough to be a full review (OCTOPUS_COUNCIL_GROUNDING_MIN_CHARS,
+    # default 700 — a terse "looks good, APPROVE" is not the targeted shape); and
+    # only when the body actually makes code claims. A seat that quotes real source
+    # in prose/table form WITHOUT a path:line (the #2947 claude seats) passes via the
+    # content-match arm of council_response_has_grounding. Runs before the length
+    # short-circuit below because the targeted bodies are long.
+    local grounding_min="${OCTOPUS_COUNCIL_GROUNDING_MIN_CHARS:-700}"
+    # Normalize to a bounded decimal: a leading-zero value like 0700 must not be
+    # read as octal, and 08/invalid/oversized input falls back to 700 instead of
+    # breaking the arithmetic comparison below (CodeRabbit #1148).
+    if [[ "$grounding_min" =~ ^0*[0-9]{1,9}$ ]]; then
+        grounding_min=$((10#$grounding_min))
+    else
+        grounding_min=700
+    fi
+    if [[ -z "${COUNCIL_FIXTURE:-}" && -n "$evidence_root" && -d "$evidence_root" ]] \
+        && (( nlen >= grounding_min )) \
+        && command -v python3 >/dev/null 2>&1 \
+        && council_response_makes_code_claims "$f" \
+        && ! council_response_has_grounding "$f" "$evidence_root"; then
+        return 0
+    fi
+
     (( nlen < 1600 )) || return 1
     if grep -ciE "(cannot|could not|couldn'?t|unable to|can'?t)[[:space:]]+(access|read|open|locate|find|view|retrieve)[^.]{0,60}(file|plan|prd|diff|patch|artifact|document|spec)|no[[:space:]]+(file|read)[[:space:]]+access" "$f" >/dev/null; then
         return 0
