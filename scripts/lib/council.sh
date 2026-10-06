@@ -2196,6 +2196,15 @@ SRC_EXT = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".css", ".scss", ".sass
            ".mdx", ".php", ".pl", ".lua", ".ex", ".exs", ".scala", ".dart", ".m", ".mm",
            ".jl", ".tf", ".r"}
 SKIP = {"node_modules", "dist", "build", "coverage", "vendor", "__pycache__", "private"}
+# Agent-instruction / governing-law boilerplate is injected into every seat's
+# prompt context, so a seat can echo its verbatim prose without reading any
+# source. Those files are instructions, not the code under review — exclude them
+# from the content-match scan so an echo cannot forge a grounding signal. The
+# hidden-name prune already drops `.claude/…`; this also covers the visible
+# repo-root twins like AGENTS-OCTO.md that otherwise remain scannable
+# (sail-cruisey #2970). Fixed set — a security tightening, never widened by env.
+BOILERPLATE = {"claude.md", "claude-octo.md", "agents.md", "agents-octo.md",
+               "gemini.md", "copilot-instructions.md", "cursor.md", "cursorrules.md"}
 PRIVATE_NAME = re.compile(r"(^|[._-])(credentials?|secrets?|private|service[-_]account|id[-_]rsa)([._-]|$)", re.I)
 remaining = set(cands)
 scanned = entries = total_bytes = 0
@@ -2250,9 +2259,11 @@ def scan(directory, depth):
                 return
             entries += 1
             name = entry.name
-            # Prune before opening or enumerating a subtree. Hidden files and
-            # tool state are not implicit source evidence, even with a source suffix.
-            if name.startswith(".") or name.lower() in SKIP or PRIVATE_NAME.search(name):
+            # Prune before opening or enumerating a subtree. Hidden files, tool
+            # state, and injected agent-instruction boilerplate are not implicit
+            # source evidence, even with a source suffix.
+            lowered = name.lower()
+            if name.startswith(".") or lowered in SKIP or lowered in BOILERPLATE or PRIVATE_NAME.search(name):
                 continue
             try:
                 metadata = entry.stat(follow_symlinks=False)

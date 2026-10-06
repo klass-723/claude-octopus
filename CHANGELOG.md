@@ -16,6 +16,15 @@
 
 ### Fixed
 
+- Council content-match grounding no longer counts a seat that merely echoes
+  agent-instruction boilerplate. `CLAUDE.md`, `AGENTS.md`, their `-OCTO.md`
+  twins, `GEMINI.md`, and similar files are injected into every seat's prompt
+  context, so a seat could quote their verbatim prose and score a false
+  content-match without reading any source. The scan already skipped hidden
+  paths (`.claude/…`); it now also skips these boilerplate basenames wherever
+  they appear, including the visible repo-root twins (sail-cruisey #2970). Real
+  source quotes still ground.
+
 - Deliver no longer runs the "Quality gate FAILED in tangle phase"
   retrospective after a tangle phase that passed or recorded no quality gate.
   The ceremony ran whenever a tangle results file existed, adding a failure
