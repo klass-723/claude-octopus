@@ -61,4 +61,41 @@ _run_guard "Decide whether to adopt feature flags for the rollout."
 unset OCTOPUS_COUNCIL_REQUIRE_CONTEXT
 if [[ $grc -eq 0 && -z "$gerr" ]]; then test_pass; else test_fail "rc=$grc err=$gerr"; fi
 
+test_case "strict mode rejects double-quoted, single-quoted, and backtick paths"
+COUNCIL_CONTEXT_FILES=(); OCTOPUS_COUNCIL_REQUIRE_CONTEXT=1
+quote_failures=""
+for task in 'Review "/tmp/plan.md"' "Review '/tmp/plan.md'" 'Review `/tmp/plan.md`'; do
+    _run_guard "$task"
+    if [[ $grc -ne 2 || "$gerr" != *context-file* ]]; then
+        quote_failures+=" [$task: rc=$grc]"
+    fi
+done
+unset OCTOPUS_COUNCIL_REQUIRE_CONTEXT
+if [[ -z "$quote_failures" ]]; then test_pass; else test_fail "$quote_failures"; fi
+
+test_case "strict dispatch exits 2 before the advice phase"
+advice_marker="$TEST_TMP_DIR/context-guard-advice"
+dispatch_rc=0
+dispatch_err="$(
+    # Exercise the real parser and run implementation; stub only setup I/O and
+    # provider work so a missing guard cannot make a live provider call.
+    council_create_run_dir() { COUNCIL_RUN_DIR="$TEST_TMP_DIR"; }
+    council_build_roster() { :; }
+    council_write_config_json() { :; }
+    council_write_research_artifact() { :; }
+    council_check_cost_cap() { return 0; }
+    council_run_advice_phase() { : > "$advice_marker"; COUNCIL_QUORUM_MET=false; }
+    council_append_corpus_artifacts() { :; }
+    council_write_summary_json() { :; }
+    council_print_run_warnings() { :; }
+    DRY_RUN=false
+    OCTOPUS_COUNCIL_REQUIRE_CONTEXT=1
+    _council_run_impl --goal plan --benchmark off 'Review /tmp/plan.md' 2>&1 >/dev/null
+)" || dispatch_rc=$?
+if [[ $dispatch_rc -eq 2 && ! -e "$advice_marker" && "$dispatch_err" == *context-file* ]]; then
+    test_pass
+else
+    test_fail "rc=$dispatch_rc advice=$([[ -e "$advice_marker" ]] && printf called || printf skipped) err=$dispatch_err"
+fi
+
 test_summary

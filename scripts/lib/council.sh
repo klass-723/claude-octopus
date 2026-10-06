@@ -4316,8 +4316,7 @@ council_print_run_warnings() {
     fi
 }
 
-# Body of the council run. Wrapped by council_run() below so that a summary.json
-# is ALWAYS emitted for a real run. Do not call this directly.
+# Warn or reject path-based tasks whose artifact bytes were not supplied.
 council_preflight_context_guard() {
     # Plan-mode seats (permissionMode "plan", the default) get NO file tools, so a
     # task that NAMES a path for the seat to open cannot be honored — the seat
@@ -4333,7 +4332,7 @@ council_preflight_context_guard() {
     # a source/doc extension. A bare word like "package.json" mentioned in prose has
     # no leading path and does not trip this; conductors name artifacts by real path.
     local ext='md|mdx|txt|diff|patch|json|jsonc|yaml|yml|toml|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|java|kt|swift|cs|cpp|cc|hpp|sh|bash|sql|htm|html|css|scss|vue|svelte|graphql|gql|proto'
-    local path_re="(^|[[:space:]([{=])[~.]*/[[:alnum:]_./@+-]*\.(${ext})([[:space:])}.,;:]|$)"
+    local path_re="(^|[[:space:]([{='\"\`])[~.]*/[[:alnum:]_./@+-]*\.(${ext})([[:space:])}.,;:'\"\`]|$)"
     # here-string + `grep -c … >/dev/null`, not `printf … | grep -q`, per the
     # repo's shell convention (a pipe into `grep -q` can SIGPIPE under pipefail).
     grep -ciE "$path_re" <<<"$COUNCIL_TASK" >/dev/null || return 0   # no path referenced
@@ -4347,6 +4346,8 @@ council_preflight_context_guard() {
     return 0
 }
 
+# Body of the council run. Wrapped by council_run() below so that a summary.json
+# is ALWAYS emitted for a real run. Do not call this directly.
 _council_run_impl() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         council_usage
