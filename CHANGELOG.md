@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- `council` now fails fast — or warns — when a task names a file path to read but
+  no `--context-file` was passed. Council seats default to `permissionMode "plan"`
+  (no file tools), so a plan-mode seat cannot open a referenced path and reviews
+  blind, round after round, until someone notices. The preflight detects a real
+  artifact path in the task with no `--context-file` and prints an actionable
+  warning naming the fix (pass `--context-file <path>` to inline the bytes). Set
+  `OCTOPUS_COUNCIL_REQUIRE_CONTEXT=1` to fail closed instead of warning. Bare
+  prose, a context file already supplied, or a filename mentioned without a path
+  pass silently.
+
 ### Fixed
 
 - Deliver no longer runs the "Quality gate FAILED in tangle phase"

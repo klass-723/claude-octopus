@@ -4318,6 +4318,35 @@ council_print_run_warnings() {
 
 # Body of the council run. Wrapped by council_run() below so that a summary.json
 # is ALWAYS emitted for a real run. Do not call this directly.
+council_preflight_context_guard() {
+    # Plan-mode seats (permissionMode "plan", the default) get NO file tools, so a
+    # task that NAMES a path for the seat to open cannot be honored — the seat
+    # reviews blind, round after round, until someone notices (sail-cruisey burned
+    # ~40 min of CP1 rounds exactly this way). The ONLY way a plan-mode seat sees an
+    # artifact is --context-file, which inlines its bytes into the prompt. Surface
+    # the mistake at dispatch instead of letting it fail silently: when no
+    # --context-file was given but the task references a real artifact PATH, warn
+    # (default) or fail closed under OCTOPUS_COUNCIL_REQUIRE_CONTEXT=1.
+    [[ ${#COUNCIL_CONTEXT_FILES[@]} -eq 0 ]] || return 0   # context already supplied
+
+    # A real filesystem path: a token starting with /, ~/, ./ (or ../) that ends in
+    # a source/doc extension. A bare word like "package.json" mentioned in prose has
+    # no leading path and does not trip this; conductors name artifacts by real path.
+    local ext='md|mdx|txt|diff|patch|json|jsonc|yaml|yml|toml|ts|tsx|js|jsx|mjs|cjs|py|go|rb|rs|java|kt|swift|cs|cpp|cc|hpp|sh|bash|sql|htm|html|css|scss|vue|svelte|graphql|gql|proto'
+    local path_re="(^|[[:space:]([{=])[~.]*/[[:alnum:]_./@+-]*\.(${ext})([[:space:])}.,;:]|$)"
+    # here-string + `grep -c … >/dev/null`, not `printf … | grep -q`, per the
+    # repo's shell convention (a pipe into `grep -q` can SIGPIPE under pipefail).
+    grep -ciE "$path_re" <<<"$COUNCIL_TASK" >/dev/null || return 0   # no path referenced
+
+    local msg="the task references a file path but no --context-file was passed. Council seats default to permissionMode \"plan\" (no file tools), so a plan-mode seat cannot open that path and will review BLIND. Pass --context-file <path> to inline the artifact's bytes into every seat's prompt."
+    if [[ "${OCTOPUS_COUNCIL_REQUIRE_CONTEXT:-}" == "1" ]]; then
+        council_error_usage "$msg"
+        return 2
+    fi
+    printf 'council: WARNING: %s\n' "$msg" >&2
+    return 0
+}
+
 _council_run_impl() {
     if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
         council_usage
@@ -4368,6 +4397,8 @@ _council_run_impl() {
         [[ "$COUNCIL_ABORTED_FOR_COST" == "true" ]] && return 0
         return 1
     fi
+
+    council_preflight_context_guard || return $?
 
     council_run_advice_phase
 
