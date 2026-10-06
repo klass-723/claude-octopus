@@ -23,6 +23,10 @@
 
 ### Fixed
 
+- Council proximity grounding continues its bounded scan when a duplicate quote
+  matches before the named source file, preserving valid evidence in either
+  traversal order.
+
 - Council's optional source-quote proximity check no longer stalls on large
   responses with repeated quotes and filenames within the response size limit.
 - Council source-evidence checks isolate Python imports so project files cannot

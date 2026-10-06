@@ -2283,7 +2283,9 @@ if sys.argv[3]:
         sys.exit(2)
 
 def exhausted():
-    return not remaining or scanned >= MAX_FILES or entries >= MAX_ENTRIES or total_bytes >= MAX_TOTAL_BYTES
+    # Proximity also needs named-file resolution after every quote has matched.
+    # Keep that traversal within the same fixed file, entry and byte budgets.
+    return (not remaining and not PROXIMITY_CHARS) or scanned >= MAX_FILES or entries >= MAX_ENTRIES or total_bytes >= MAX_TOTAL_BYTES
 
 def scan(directory, depth):
     global scanned, entries, total_bytes

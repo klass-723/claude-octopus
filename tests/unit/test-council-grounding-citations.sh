@@ -715,6 +715,9 @@ class Listing:
             replace()
         self.listing = original_scandir(path)
         self.iterator = iter(self.listing)
+        if mode in ("named-first", "named-second"):
+            self.iterator = iter(sorted(self.iterator, key=lambda entry: entry.name == target.name,
+                                        reverse=mode == "named-first"))
         self.repeated = None
         self.count = 0
     def __enter__(self):
@@ -765,6 +768,18 @@ _instrumented_count() (
     python3() { _grounding_python "$@"; }
     council_response_content_match_count "$BOUNDARY_RESPONSE" "$BOUNDARY_ROOT"
 )
+
+for order in named-first named-second; do
+    test_case "proximity grounding survives duplicate source content: $order"
+    cp "$OUTSIDE" "$BOUNDARY_ROOT/duplicate.ts"
+    cp "$OUTSIDE" "$BOUNDARY_ROOT/named.ts"
+    printf 'The function in named.ts contains `%s`.\n' "$FRAGMENT" > "$BOUNDARY_RESPONSE"
+    actual="$(OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=1500 _instrumented_count "$order" "$BOUNDARY_ROOT/named.ts")"
+    if [[ "$actual" == 1 ]]; then test_pass
+    else test_fail "valid named source quote scored $actual with $order traversal"; fi
+    rm "$BOUNDARY_ROOT/duplicate.ts" "$BOUNDARY_ROOT/named.ts"
+done
+printf 'The function contains `%s`.\n' "$FRAGMENT" > "$BOUNDARY_RESPONSE"
 
 test_case "a leaf replaced after metadata validation cannot supply evidence"
 printf 'const initialValue = unrelatedValue;\n' > "$BOUNDARY_ROOT/race.ts"
