@@ -51,11 +51,14 @@ both="$(mktemp "$TEST_TMP_DIR/both.XXXXXX")"
 printf 'Reviewed sailing-compare.ts — `export async function compareSailings(r, shipId, sailDate) {` is the entry. VERDICT: APPROVE\n' > "$both"
 if [[ "$(_score "$both")" -gt 0 ]]; then test_pass; else test_fail "source quote lost after boilerplate skip"; fi
 
-test_case "each excluded basename is individually inert (no grounding via any twin)"
+test_case "each excluded basename is individually inert (incl. nested path + mixed case)"
 fails=""
-for f in AGENTS-OCTO.md AGENTS.md CLAUDE.md CLAUDE-OCTO.md GEMINI.md; do
+# Cursorrules.md keeps mixed case to prove the match is case-insensitive; each
+# twin lives one directory deep to prove the exclusion is not root-only.
+for f in AGENTS-OCTO.md AGENTS.md CLAUDE.md CLAUDE-OCTO.md GEMINI.md cursor.md copilot-instructions.md Cursorrules.md; do
     solo="$(mktemp -d "$TEST_TMP_DIR/solo.XXXXXX")"
-    printf '%s\n' "$LAW" > "$solo/$f"
+    mkdir -p "$solo/docs"
+    printf '%s\n' "$LAW" > "$solo/docs/$f"
     r="$(mktemp "$TEST_TMP_DIR/soloresp.XXXXXX")"
     printf 'Quote: `%s` VERDICT: APPROVE\n' "$LAW" > "$r"
     [[ "$(council_response_content_match_count "$r" "$solo")" == "0" ]] || fails="$fails $f"

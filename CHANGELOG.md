@@ -13,6 +13,13 @@
   `OCTOPUS_COUNCIL_REQUIRE_CONTEXT=1` to fail closed instead of warning. Bare
   prose, a context file already supplied, or a filename mentioned without a path
   pass silently.
+- Optional named-file proximity for council content-match grounding, off by
+  default. `OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=N` requires a quoted
+  fragment to sit within `N` characters of a *resolving* named-file mention (a
+  basename the scan actually reached) before it counts as grounding. Unset or
+  `0` preserves the shipped quote-sufficiency behavior exactly. Lets a consumer
+  that wants the runner's `blind_seats` accounting to match a stricter grounding
+  gate opt in without changing the default (sail-cruisey #2970).
 
 ### Fixed
 
