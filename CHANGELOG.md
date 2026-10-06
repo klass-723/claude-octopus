@@ -23,6 +23,11 @@
 
 ### Fixed
 
+- Council's optional source-quote proximity check no longer stalls on large
+  responses with repeated quotes and filenames within the response size limit.
+- Council source-evidence checks isolate Python imports so project files cannot
+  execute as standard-library modules during grounding.
+
 - Council content-match grounding no longer counts a seat that merely echoes
   agent-instruction boilerplate. `CLAUDE.md`, `AGENTS.md`, their `-OCTO.md`
   twins, `GEMINI.md`, and similar files are injected into every seat's prompt

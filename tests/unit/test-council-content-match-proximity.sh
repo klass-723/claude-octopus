@@ -68,4 +68,64 @@ if [[ "$(OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=40 _score "$fenced")" == 
 test_case "ON: that same fenced block grounds under a window spanning the gap"
 if [[ "$(OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=1500 _score "$fenced")" -gt 0 ]]; then test_pass; else test_fail "fenced quote did not ground even within a generous window"; fi
 
+test_case "ON: the window includes its left boundary but not one character beyond"
+boundary="$(mktemp "$TEST_TMP_DIR/boundary.XXXXXX")"
+prefix='sailing-compare.ts `'
+printf '%s%s`\n' "$prefix" "$QUOTE" > "$boundary"
+distance=${#prefix}
+if [[ "$(OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=$distance _score "$boundary")" -gt 0 &&
+      "$(OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=$((distance - 1)) _score "$boundary")" == "0" ]]; then test_pass; else test_fail "left window boundary changed"; fi
+
+test_case "ON: the window includes a following filename at its right boundary"
+printf '`%s` sailing-compare.ts\n' "$QUOTE" > "$boundary"
+distance=$((${#QUOTE} + 2))
+if [[ "$(OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=$distance _score "$boundary")" -gt 0 &&
+      "$(OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=$((distance - 1)) _score "$boundary")" == "0" ]]; then test_pass; else test_fail "right window boundary changed"; fi
+
+test_case "ON: large repeated evidence and long non-filename tokens stay within the time budget"
+many="$(mktemp "$TEST_TMP_DIR/many.XXXXXX")"
+if bounded_score=$(python3 - "$PROJECT_ROOT/scripts/lib/council.sh" "$many" "$ROOT" "$QUOTE" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+library, response, root, quote = sys.argv[1:]
+command = ['bash', '-c', 'source "$1"; OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=1 council_response_content_match_count "$2" "$3"', '_', library, response, root]
+for label, payload in [
+    ('repeated evidence', (f"`{quote}`\n" * 8000) + ("sailing-compare.ts " * 20000)),
+    ('long non-filename token', f"`{quote}`\n" + ('x' * 100000)),
+]:
+    assert len(payload.encode()) < 1_048_576
+    Path(response).write_text(payload)
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise SystemExit(f"matching {label} exceeded five seconds")
+    if process.returncode or stdout.strip() != '0':
+        raise SystemExit(stderr or f"matching {label} returned an unexpected score")
+print('0')
+PY
+); then
+    if [[ "$bounded_score" == "0" ]]; then test_pass; else test_fail "distant repeated quotes unexpectedly grounded: $bounded_score"; fi
+else
+    test_fail "matching repeated evidence did not finish within its time budget"
+fi
+
+test_case "project modules cannot shadow the matcher's standard-library imports"
+cat > "$ROOT/bisect.py" <<'PYTHON'
+raise RuntimeError("project module imported by matcher")
+PYTHON
+if isolated_score=$(cd "$ROOT" && OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=1500 _score "$named") &&
+   [[ "$isolated_score" =~ ^[0-9]+$ && "$isolated_score" -gt 0 ]]; then
+    test_pass
+else
+    test_fail "matcher imported a project module or stopped grounding valid evidence"
+fi
+
 test_summary

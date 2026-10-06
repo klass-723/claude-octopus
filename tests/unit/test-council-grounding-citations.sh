@@ -748,10 +748,21 @@ sys.argv = sys.argv[1:]
 exec(compile(sys.stdin.read(), "council-content-match", "exec"))
 PYTEST
 
+# Keep the helper's isolated-mode flag on the real interpreter, before the
+# instrument script, so its positional response/root arguments stay unchanged.
+_grounding_python() {
+    if [[ "${1:-}" == -I ]]; then
+        shift
+        command python3 -I "$INSTRUMENT" "$@"
+    else
+        command python3 "$INSTRUMENT" "$@"
+    fi
+}
+
 _instrumented_count() (
     export GROUNDING_TEST_MODE="$1" GROUNDING_TEST_TARGET="$2" GROUNDING_TEST_OUTSIDE="${3:-$OUTSIDE}"
     export GROUNDING_TEST_METRICS="$TEST_TMP_DIR/grounding-metrics.json"
-    python3() { command python3 "$INSTRUMENT" "$@"; }
+    python3() { _grounding_python "$@"; }
     council_response_content_match_count "$BOUNDARY_RESPONSE" "$BOUNDARY_ROOT"
 )
 
@@ -795,7 +806,7 @@ rm "$BOUNDARY_ROOT/ignored.txt"
 test_case "entry-budget exhaustion cannot admit an unverified approval"
 printf 'unrelated\n' > "$BOUNDARY_ROOT/ignored.txt"
 if ( export GROUNDING_TEST_MODE=entries GROUNDING_TEST_TARGET="$BOUNDARY_ROOT/ignored.txt" GROUNDING_TEST_OUTSIDE="$OUTSIDE" GROUNDING_TEST_METRICS="$TEST_TMP_DIR/grounding-metrics.json"
-     python3() { command python3 "$INSTRUMENT" "$@"; }
+     python3() { _grounding_python "$@"; }
      ! council_response_has_grounding "$ACTIVE_VOTE" "$BOUNDARY_ROOT" &&
      council_response_is_blind "$ACTIVE_VOTE" "$BOUNDARY_ROOT" &&
      ! council_response_is_substantive "$ACTIVE_VOTE" "$BOUNDARY_ROOT" ) &&
@@ -944,7 +955,7 @@ else test_fail "validated path/line semantics changed: $citations"; fi
 
 test_case "unsupported descriptor APIs retain the prose fallback without scanning"
 if ( export GROUNDING_TEST_MODE=unsupported GROUNDING_TEST_TARGET="$ROOT/functions-v2/sailing-compare.ts" GROUNDING_TEST_OUTSIDE="$OUTSIDE" GROUNDING_TEST_METRICS="$TEST_TMP_DIR/grounding-metrics.json"
-     python3() { command python3 "$INSTRUMENT" "$@"; }
+     python3() { _grounding_python "$@"; }
      OCTOPUS_COUNCIL_GROUNDING_MIN_CHARS=1 council_response_is_substantive "$A4" "$ROOT" ) &&
    jq -e '.source_bytes == 0 and .source_opens == 0 and .entries == 0' "$TEST_TMP_DIR/grounding-metrics.json" >/dev/null; then test_pass
 else test_fail "unsupported confinement read sources or created a false blind vote"; fi

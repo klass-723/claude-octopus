@@ -2106,11 +2106,13 @@ council_response_content_match_count() {
     # match a stricter grounding gate. Only ever tightens; never widens a budget.
     local proximity_chars="${OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS:-0}"
     [[ "$proximity_chars" =~ ^[0-9]+$ ]] || proximity_chars=0
-    python3 - "$response_path" "$evidence_root" "$run_dir" "$proximity_chars" <<'PY'
+    # Source evidence is data; never import project-local Python modules.
+    python3 -I - "$response_path" "$evidence_root" "$run_dir" "$proximity_chars" <<'PY'
 import os
 import re
 import stat
 import sys
+from bisect import bisect_left
 from itertools import chain
 from pathlib import Path
 
@@ -2235,7 +2237,9 @@ PRIVATE_NAME = re.compile(r"(^|[._-])(credentials?|secrets?|private|service[-_]a
 file_mentions = []
 seen_basenames = set()
 if PROXIMITY_CHARS:
-    FILE_MENTION = re.compile(r"[A-Za-z0-9_./@+-]*[A-Za-z0-9_@+-]\.(" +
+    # Attempt a filename once per token, not once per character of a long token
+    # with no source extension. The latter makes regex backtracking quadratic.
+    FILE_MENTION = re.compile(r"(?<![A-Za-z0-9_./@+-])[A-Za-z0-9_./@+-]*[A-Za-z0-9_@+-]\.(" +
                               "|".join(sorted((ext[1:] for ext in SRC_EXT), key=len, reverse=True)) + r")\b")
     file_mentions = [(os.path.basename(m.group(0)).lower(), m.start()) for m in FILE_MENTION.finditer(resp)]
 remaining = set(cands)
@@ -2355,12 +2359,18 @@ matched = cands - remaining
 if PROXIMITY_CHARS:
     # A matched fragment counts only if one of its occurrences sits within the
     # window of a named-file mention whose basename the scan actually resolved.
-    resolving = [offset for basename, offset in file_mentions if basename in seen_basenames]
+    resolving = sorted(offset for basename, offset in file_mentions if basename in seen_basenames)
     grounded = 0
     for candidate in matched:
         offsets = cand_offsets.get(candidate, ())
-        if any(abs(c - r) <= PROXIMITY_CHARS for c in offsets for r in resolving):
-            grounded += 1
+        # Check the first mention in each window rather than the Cartesian
+        # product: repeated quotes and filenames can otherwise cost billions
+        # of comparisons inside the fixed response-size budget.
+        for offset in offsets:
+            first = bisect_left(resolving, offset - PROXIMITY_CHARS)
+            if first < len(resolving) and resolving[first] <= offset + PROXIMITY_CHARS:
+                grounded += 1
+                break
     print(grounded)
 else:
     print(len(matched))
