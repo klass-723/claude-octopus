@@ -3637,6 +3637,203 @@ test_council_seats_array_makes_quorum_inspectable() {
     fi
 }
 
+# The real sail-cruisey #2996 roster: two Claude chair-label personas + a Claude
+# verifier + agy + codex. Three Claude seats were dispatched for one Claude vote.
+_COUNCIL_2996_ROSTER='[
+  {"persona":"strategy-analyst","seat":"chair","provider":"claude","provider_org":"anthropic","model_family":"anthropic","score":"0.62"},
+  {"persona":"backend-architect","seat":"advisor","provider":"agy","provider_org":"google","model_family":"google","score":"0.71"},
+  {"persona":"security-auditor","seat":"skeptic","provider":"codex","provider_org":"openai","model_family":"openai","score":"0.64"},
+  {"persona":"research-synthesizer","seat":"chair","provider":"claude","provider_org":"anthropic","model_family":"anthropic","score":"0.53"},
+  {"persona":"code-reviewer","seat":"verifier","provider":"claude","provider_org":"anthropic","model_family":"anthropic","score":"0.56"}
+]'
+
+test_council_one_vote_per_vendor_seats_one_seat_per_vendor() {
+    test_case "OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1 seats one seat per vendor: extra chairs dropped, chair folded into the vendor's synthesis-capable voter (sail-cruisey #2996)"
+    load_council_lib || return 1
+    local saved_ovpv="${OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR-__unset__}" saved_spv="${OCTOPUS_COUNCIL_SEATS_PER_VENDOR-__unset__}"
+    unset OCTOPUS_COUNCIL_SEATS_PER_VENDOR
+
+    # Default N=1: exactly one seat per model family; the Claude chair is folded
+    # into the Claude verifier, which keeps its verifier label and votes.
+    export OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1
+    COUNCIL_ROSTER_JSON="$_COUNCIL_2996_ROSTER"
+    council_dedup_vendor_seats
+    local n1="$COUNCIL_ROSTER_JSON" n1_folded="$COUNCIL_SEATING_CHAIR_FOLDED_INTO" n1_dropped="$COUNCIL_SEATING_DROPPED_SEATS"
+    local n1_chair; n1_chair="$(council_chair_member_json | jq -r '.persona')"
+
+    # Explicit opt-in N=2: chair kept (first chair only), plus the verifier.
+    COUNCIL_ROSTER_JSON="$_COUNCIL_2996_ROSTER"
+    OCTOPUS_COUNCIL_SEATS_PER_VENDOR=2 council_dedup_vendor_seats
+    local n2="$COUNCIL_ROSTER_JSON" n2_folded="$COUNCIL_SEATING_CHAIR_FOLDED_INTO"
+
+    # Invalid N falls back to 1.
+    COUNCIL_ROSTER_JSON="$_COUNCIL_2996_ROSTER"
+    OCTOPUS_COUNCIL_SEATS_PER_VENDOR=zero council_dedup_vendor_seats
+    local nbad="$COUNCIL_ROSTER_JSON"
+
+    # The chair's vendor has no synthesis-capable voter: the chair is kept so the
+    # synthesis contract still holds (documented exception to the seat cap).
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_ROSTER_JSON='[
+      {"persona":"strategy-analyst","seat":"chair","provider":"claude","model_family":"anthropic","score":"0.6"},
+      {"persona":"backend-architect","seat":"advisor","provider":"agy","model_family":"google","score":"0.7"},
+      {"persona":"test-automator","seat":"verifier","provider":"claude","model_family":"anthropic","score":"0.5"}
+    ]'
+    council_synthesis_capable_persona() { [[ "$1" != "test-automator" ]]; }
+    council_dedup_vendor_seats
+    local nocap="$COUNCIL_ROSTER_JSON" nocap_folded="$COUNCIL_SEATING_CHAIR_FOLDED_INTO"
+
+    # Policy off: roster untouched.
+    unset OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR
+    COUNCIL_ROSTER_JSON="$_COUNCIL_2996_ROSTER"
+    council_dedup_vendor_seats
+    local off="$COUNCIL_ROSTER_JSON"
+
+    [[ "$saved_ovpv" == "__unset__" ]] || export OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR="$saved_ovpv"
+    [[ "$saved_spv" == "__unset__" ]] || export OCTOPUS_COUNCIL_SEATS_PER_VENDOR="$saved_spv"
+
+    local ok=y why=""
+    jq -e '
+        ([.[].persona] == ["backend-architect","security-auditor","code-reviewer"])
+        and ([.[] | select(.model_family == "anthropic")] | length == 1)
+        and ([.[] | select(.seat == "chair")] | length == 0)
+        and (.[2].seat == "verifier" and .[2].synthesizer == true)
+    ' <<< "$n1" >/dev/null || { ok=n; why+=" n1=$n1"; }
+    [[ "$n1_folded" == "code-reviewer" && "$n1_dropped" == "2" && "$n1_chair" == "code-reviewer" ]] \
+        || { ok=n; why+=" n1_folded=$n1_folded dropped=$n1_dropped chair=$n1_chair"; }
+    jq -e '
+        ([.[].persona] == ["strategy-analyst","backend-architect","security-auditor","code-reviewer"])
+        and ([.[] | select(.seat == "chair")] | length == 1)
+        and (all(.[]; has("synthesizer") | not))
+    ' <<< "$n2" >/dev/null || { ok=n; why+=" n2=$n2"; }
+    [[ -z "$n2_folded" ]] || { ok=n; why+=" n2_folded=$n2_folded"; }
+    [[ "$(jq -c . <<< "$nbad")" == "$(jq -c . <<< "$n1")" ]] || { ok=n; why+=" nbad=$nbad"; }
+    jq -e '[.[].persona] == ["strategy-analyst","backend-architect","test-automator"]' <<< "$nocap" >/dev/null \
+        && [[ -z "$nocap_folded" ]] || { ok=n; why+=" nocap=$nocap folded=$nocap_folded"; }
+    [[ "$(jq -Sc . <<< "$off")" == "$(jq -Sc . <<< "$_COUNCIL_2996_ROSTER")" ]] || { ok=n; why+=" off=$off"; }
+
+    if [[ "$ok" == y ]]; then
+        test_pass
+    else
+        test_fail "one-seat-per-vendor seating wrong:$why"
+        return 1
+    fi
+}
+
+_council_run_advice_with_verdicts() {
+    # Drive the real advice-phase tally with per-persona verdicts. A verdict of
+    # "DEGENERATE" writes a host self-dispatch stub (non-substantive); "NONE"
+    # writes a substantive review with no VERDICT line.
+    local roster="$1" verdict_map="$2"
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/ovpv-tally.XXXXXX")"; mkdir -p "$d/responses"
+    COUNCIL_RUN_DIR="$d"; COUNCIL_DEPTH="standard"; COUNCIL_FIXTURE=""; COUNCIL_EXECUTION_MODE=""
+    COUNCIL_TASK="x"; COUNCIL_GOAL="review"; COUNCIL_DOMAIN="auto"; COUNCIL_STYLE="balanced"
+    COUNCIL_CHAIR_FALLBACK_USED="false"; COUNCIL_CHAIR_FALLBACK_PERSONA=""
+    COUNCIL_ROSTER_JSON="$roster"
+    _OVPV_VERDICTS="$verdict_map"
+    _OVPV_FALLBACK_CALLED="false"
+    council_prompt_for_member() { echo "prompt"; }
+    council_persona_should_fail() { return 1; }
+    council_run_chair_fallback() { _OVPV_FALLBACK_CALLED="true"; }
+    council_dispatch_member_detached() {
+        local member="$1" out="$3" persona v
+        persona="$(jq -r '.persona' <<< "$member")"
+        v="$(jq -r --arg p "$persona" '.[$p] // "APPROVE"' <<< "$_OVPV_VERDICTS")"
+        if [[ "$v" == "DEGENERATE" ]]; then
+            printf '## UNVERIFIED CONSULTATIVE OUTPUT\n\n*This council member is the active host runtime (claude CLI). Subprocess dispatch is unavailable when the host and council member are the same CLI.*\n' > "$out"
+            return 0
+        fi
+        {
+            echo "### Review"
+            echo "The change is correct: the new branch is handled and the added test exercises it. I found no missed requirements in the reconciled total and the stale caption guard."
+            [[ "$v" == "NONE" ]] || echo "VERDICT: $v"
+        } > "$out"
+        return 0
+    }
+    council_run_advice_phase >/dev/null 2>&1 || true
+    unset -f council_dispatch_member_detached council_prompt_for_member council_persona_should_fail council_run_chair_fallback
+}
+
+test_council_one_vote_per_vendor_split_vendor_fails_safe() {
+    test_case "OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1: a vendor approves only if ALL its counted seats approve; a chair's explicit REVISE splits its vendor (sail-cruisey #2996)"
+    load_council_lib || return 1
+    local saved_ovpv="${OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR-__unset__}"
+    # The exact #2996 CP2 round-2 verdicts: both Claude chairs REVISE, Claude
+    # verifier APPROVE, agy APPROVE, codex returned nothing usable.
+    local verdicts='{"strategy-analyst":"REVISE","research-synthesizer":"REVISE","code-reviewer":"APPROVE","backend-architect":"APPROVE","security-auditor":"DEGENERATE"}'
+
+    # Policy ON: anthropic is a split -> NOT_APPROVE; only google approves -> met=false.
+    export OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1
+    _council_run_advice_with_verdicts "$_COUNCIL_2996_ROSTER" "$verdicts"
+    local on_met="$COUNCIL_QUORUM_MET" on_families="$COUNCIL_APPROVING_MODEL_FAMILIES"
+    local on_votes="$COUNCIL_VENDOR_VOTES_JSON" on_seats="$COUNCIL_SEAT_RECORDS_JSON"
+
+    # Policy OFF: legacy behaviour preserved (chairs excluded from the tally).
+    unset OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR
+    _council_run_advice_with_verdicts "$_COUNCIL_2996_ROSTER" "$verdicts"
+    local off_met="$COUNCIL_QUORUM_MET" off_families="$COUNCIL_APPROVING_MODEL_FAMILIES"
+    local off_votes="$COUNCIL_VENDOR_VOTES_JSON"
+
+    # Policy ON, chair APPROVE with no other seat of its vendor: a chair never ADDS
+    # an approval (#670), and a chair with NO verdict line counts neither way.
+    export OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1
+    _council_run_advice_with_verdicts '[
+      {"persona":"strategy-analyst","seat":"chair","provider":"agy","model_family":"google"},
+      {"persona":"code-reviewer","seat":"verifier","provider":"codex","model_family":"openai"},
+      {"persona":"backend-architect","seat":"advisor","provider":"claude","model_family":"anthropic"}
+    ]' '{"strategy-analyst":"APPROVE","code-reviewer":"APPROVE","backend-architect":"APPROVE"}'
+    local chair_only_families="$COUNCIL_APPROVING_MODEL_FAMILIES" chair_only_votes="$COUNCIL_VENDOR_VOTES_JSON"
+    _council_run_advice_with_verdicts "$_COUNCIL_2996_ROSTER" \
+        '{"strategy-analyst":"NONE","research-synthesizer":"NONE","code-reviewer":"APPROVE","backend-architect":"APPROVE","security-auditor":"DEGENERATE"}'
+    local noverdict_met="$COUNCIL_QUORUM_MET"
+
+    # Policy ON with folded seating: the synthesizer voter satisfies the chair
+    # contract (no fallback dispatch) and still votes.
+    COUNCIL_ROSTER_JSON="$_COUNCIL_2996_ROSTER"
+    council_dedup_vendor_seats
+    _council_run_advice_with_verdicts "$COUNCIL_ROSTER_JSON" '{"code-reviewer":"APPROVE","backend-architect":"APPROVE","security-auditor":"APPROVE"}'
+    local folded_met="$COUNCIL_QUORUM_MET" folded_chair="$COUNCIL_CHAIR_RESPONSE_RECEIVED" folded_fallback="$_OVPV_FALLBACK_CALLED"
+    local folded_seats="$COUNCIL_SEAT_RECORDS_JSON"
+
+    if [[ "$saved_ovpv" == "__unset__" ]]; then unset OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR; else export OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR="$saved_ovpv"; fi
+
+    local ok=y why=""
+    [[ "$on_met" == "false" && " $on_families " == *" google "* && " $on_families " != *" anthropic "* ]] \
+        || { ok=n; why+=" on_met=$on_met on_families=[$on_families]"; }
+    jq -e '
+        (map(select(.model_family == "anthropic"))[0]
+            | .vote == "NOT_APPROVE" and .split == true and (.reason | test("split"))
+              and ([.seats[] | select(.counted)] | length == 3))
+        and (map(select(.model_family == "google"))[0].vote == "APPROVE")
+        and (map(select(.model_family == "openai"))[0].vote == "NO_VOTE")
+    ' <<< "$on_votes" >/dev/null || { ok=n; why+=" on_votes=$on_votes"; }
+    jq -e '
+        (map(select(.persona == "code-reviewer"))[0] | .counted_in_vote == true and .counted_as_approver == false)
+        and (map(select(.seat == "chair")) | all(.counted_in_vote == true and .verdict_explicit == true))
+    ' <<< "$on_seats" >/dev/null || { ok=n; why+=" on_seats=$on_seats"; }
+    [[ "$off_met" == "true" && " $off_families " == *" anthropic "* ]] \
+        || { ok=n; why+=" off_met=$off_met off_families=[$off_families]"; }
+    jq -e 'map(select(.model_family == "anthropic"))[0] | .vote == "APPROVE" and .split == false' <<< "$off_votes" >/dev/null \
+        || { ok=n; why+=" off_votes=$off_votes"; }
+    [[ " $chair_only_families " != *" google "* ]] || { ok=n; why+=" chair_only_families=[$chair_only_families]"; }
+    jq -e 'map(select(.model_family == "google"))[0].vote == "NO_VOTE"' <<< "$chair_only_votes" >/dev/null \
+        || { ok=n; why+=" chair_only_votes=$chair_only_votes"; }
+    [[ "$noverdict_met" == "true" ]] || { ok=n; why+=" noverdict_met=$noverdict_met"; }
+    [[ "$folded_met" == "true" && "$folded_chair" == "true" && "$folded_fallback" == "false" ]] \
+        || { ok=n; why+=" folded_met=$folded_met chair=$folded_chair fallback=$folded_fallback"; }
+    jq -e 'map(select(.persona == "code-reviewer"))[0] | .synthesizer == true and .counted_as_approver == true' <<< "$folded_seats" >/dev/null \
+        || { ok=n; why+=" folded_seats=$folded_seats"; }
+
+    if [[ "$ok" == y ]]; then
+        test_pass
+    else
+        test_fail "one-vote-per-vendor tally wrong:$why"
+        return 1
+    fi
+}
+
+test_council_one_vote_per_vendor_seats_one_seat_per_vendor
+test_council_one_vote_per_vendor_split_vendor_fails_safe
 test_council_host_native_detection
 test_council_live_response_host_native_skips_subprocess
 test_council_live_response_host_native_fails_for_synthesis
