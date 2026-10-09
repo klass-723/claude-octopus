@@ -53,6 +53,10 @@ A provider is used only when its CLI is installed AND its auth check passes. If 
 
 **Empty results from a dispatch that "succeeded"** — check `~/.claude-octopus/results/` for the raw artifact and `~/.claude-octopus/logs/` for the dispatch log. `--verbose` on the next run shows the constructed command.
 
+**Waiting on `orchestrate.sh spawn` fires too early** — the result file echoes the prompt before the provider answers, so polling it for `VERDICT` (or any word the prompt contains) matches the prompt itself. A background spawn prints `TASK_ID=`, `RESULT_FILE=`, `DONE_FILE=` and `RESULT_END_SENTINEL=` lines before its final PID line (the PID stays the last line). Wait for the `.done` marker to exist (it holds the worker's exit code), or for the result file's final line to be exactly `=== OCTOPUS-RESULT-END <task-id> rc=<n> ===`. Only then read the verdict. `agy` spawns run synchronously and print the answer on stdout, so they write no result file.
+
+**A council seat with `path:line` citations is marked `blind` / `invalid-ungrounded`** — when a seat quotes code (a backtick span or fenced block of at least 3 tokens and 20 characters) within about 1500 characters of a citation that resolves, the quote must appear, whitespace-normalized, in a cited file. If none of those quotes appear in a cited file, the seat is not counted. `summary.json` records per-seat counts under `seats[].grounding` (`quotes_checked`, `quotes_verified`, `quotes_near_line`, `quotes_unverified`, `quotes_unverifiable`, and `unverified_samples`). Quotes in files the runner cannot read count as unverifiable, never as fabricated. Set `OCTOPUS_COUNCIL_QUOTE_VERIFY=0` to turn the check off.
+
 ## Uninstall the plugin and keep local data
 
 Run this from a terminal:

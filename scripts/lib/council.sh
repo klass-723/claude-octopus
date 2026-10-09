@@ -2497,6 +2497,16 @@ council_response_is_blind() {
         return 0
     fi
 
+    # Fabricated grounding (sail-cruisey #2997): the seat pairs real path:line
+    # citations with quoted "source" that appears in none of the cited files. A
+    # real citation token is not evidence of reading when the code it quotes is
+    # invented, so this overrides the citation exemptions below. Seats that quote
+    # nothing beside their citations, or whose cited files are unreadable, are
+    # unaffected.
+    if council_response_quotes_fabricated "$f" "$evidence_root"; then
+        return 0
+    fi
+
     # A softer evasion: the seat never admits an access failure, but its verdict
     # rests entirely on the task summary / prior rounds / a clean test suite
     # rather than on reading the artifact, and it cites no real source location.
@@ -2807,6 +2817,239 @@ print(json.dumps(validated, separators=(",", ":")))
 PY
 }
 
+council_response_quote_verification_json() {
+    # Verify the code a seat QUOTES next to its `path:line` citations (sail-cruisey
+    # #2997). council_response_evidence_paths_json only proves a cited file exists
+    # and has that many lines; a seat that invents the "source" it quotes beside a
+    # real path:line still passed as valid-grounded. Here every backtick span or
+    # fenced block within QUOTE_PROXIMITY chars of a resolving citation, and long
+    # enough to be specific (the sail-cruisey hook's floor: >=3 tokens and >=20
+    # normalized chars), must appear whitespace-normalized in a cited file. A match
+    # within NEAR_LINES of the cited line is also reported. A quote whose candidate
+    # files cannot be read is unverifiable, never failed. Prints one JSON object;
+    # "fabricated" is true only when at least one quote was checked, none verified,
+    # and at least one definitively failed.
+    local response_path="$1" evidence_root="$2"
+    local empty='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_unverified":0,"quotes_unverifiable":0,"fabricated":false,"unverified_samples":[]}'
+    [[ -f "$response_path" && -n "$evidence_root" && -d "$evidence_root" ]] || { printf '%s\n' "$empty"; return 0; }
+    command -v python3 >/dev/null 2>&1 || { printf '%s\n' "$empty"; return 0; }
+    # Source evidence is data; never import project-local Python modules.
+    python3 -I - "$response_path" "$evidence_root" <<'PY' 2>/dev/null || printf '%s\n' "$empty"
+import json
+import re
+import sys
+from bisect import bisect_right
+from pathlib import Path
+
+MAX_RESPONSE_BYTES = 1_048_576
+MAX_FILE_BYTES = 1_500_000
+MAX_UNITS = 256
+QUOTE_PROXIMITY = 1500
+NEAR_LINES = 40
+MIN_TOKENS = 3
+MIN_CHARS = 20
+
+result = {"citations": 0, "quotes_checked": 0, "quotes_verified": 0, "quotes_near_line": 0,
+          "quotes_unverified": 0, "quotes_unverifiable": 0, "fabricated": False,
+          "unverified_samples": []}
+
+def emit():
+    print(json.dumps(result, separators=(",", ":")))
+    sys.exit(0)
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        raw = handle.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        emit()
+    resp = raw.decode("utf-8", "replace")
+    root = Path(sys.argv[2]).resolve(strict=True)
+except (OSError, RuntimeError, ValueError):
+    emit()
+
+def norm(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+def specific(text):
+    text = norm(text)
+    return len(text) >= MIN_CHARS and len(text.split(" ")) >= MIN_TOKENS
+
+# Same citation grammar as council_response_evidence_paths_json, plus offsets.
+CITATION = re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.[A-Za-z][A-Za-z0-9]*)\s*:\s*([0-9]+)(?:-([0-9]+))?(?![A-Za-z0-9_/-]|\.(?:[A-Za-z0-9_/-]|\.))")
+citations = []
+for match in CITATION.finditer(resp):
+    relative = Path(match.group(1).strip())
+    if relative.is_absolute() or ".." in relative.parts:
+        continue
+    try:
+        candidate = (root / relative).resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        continue
+    if not candidate.is_file():
+        continue
+    citations.append((match.start(), match.end(), candidate, int(match.group(2))))
+result["citations"] = len(citations)
+if not citations:
+    emit()
+
+# Quote units: fenced blocks (whole block, plus each line, as alternatives) and
+# inline backtick spans outside fences. Markdown fences/backticks are stripped by
+# construction; diff-shaped fences drop removed lines (absent from the working
+# tree) and the leading "+" of added lines; a "12: "/"12 | " line-number gutter
+# is tried with and without.
+units = []
+fence_ranges = []
+GUTTER = re.compile(r"^\s*\d+\s*[:|]\s?")
+for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
+    fence_ranges.append((match.start(), match.end()))
+    info = match.group(1).strip().lower()
+    lines = match.group(2).split("\n")
+    diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
+    kept = []
+    for line in lines:
+        if diff_like:
+            if line.startswith(("-", "@@", "+++ ", "--- ")):
+                continue
+            if line.startswith("+"):
+                line = line[1:]
+        if line.strip():
+            kept.append(line)
+    variants = []
+    whole = " ".join(l.strip() for l in kept)
+    if whole:
+        variants.append(whole)
+        unguttered = " ".join(GUTTER.sub("", l).strip() for l in kept)
+        if unguttered != whole:
+            variants.append(unguttered)
+    for line in kept:
+        variants.append(line.strip())
+        stripped = GUTTER.sub("", line).strip()
+        if stripped != line.strip():
+            variants.append(stripped)
+    units.append((match.start(), match.end(), variants))
+for match in re.finditer(r"`([^`\n]+)`", resp):
+    if any(match.start() < end and match.end() > start for start, end in fence_ranges):
+        continue
+    units.append((match.start(), match.end(), [match.group(1).strip()]))
+
+def checkable(text):
+    # A quoted citation or a bare path is not a code quote.
+    if CITATION.search(text):
+        return False
+    if " " not in norm(text) and "/" in text:
+        return False
+    return specific(text)
+
+file_cache = {}
+def load(path):
+    if path in file_cache:
+        return file_cache[path]
+    entry = None
+    try:
+        if path.stat().st_size <= MAX_FILE_BYTES:
+            data = path.read_bytes().decode("utf-8", "replace")
+            starts, parts, pos = [], [], 0
+            for line in data.split("\n"):
+                piece = norm(line)
+                if not piece:
+                    continue
+                starts.append(pos)
+                parts.append(piece)
+                pos += len(piece) + 1
+            entry = (" ".join(parts), starts, [i for i, l in enumerate(data.split("\n"), 1) if norm(l)])
+    except (OSError, ValueError):
+        entry = None
+    file_cache[path] = entry
+    return entry
+
+ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
+def find_lines(hay, starts, line_numbers, needle, limit=50):
+    found, at = [], hay.find(needle)
+    while at >= 0 and len(found) < limit:
+        found.append(line_numbers[bisect_right(starts, at) - 1] if starts else 1)
+        at = hay.find(needle, at + 1)
+    return found
+
+def match_variant(text, entry):
+    hay, starts, line_numbers = entry
+    needle = norm(text)
+    lines = find_lines(hay, starts, line_numbers, needle)
+    if lines:
+        return lines
+    # An elided quote ("a(...) ... b") verifies when every specific piece does.
+    pieces = [p for p in ELLIPSIS.split(needle) if specific(p)]
+    if len(pieces) > 1 or (pieces and pieces[0] != needle):
+        piece_lines = [find_lines(hay, starts, line_numbers, p) for p in pieces]
+        if all(piece_lines):
+            return piece_lines[0]
+    return []
+
+all_cited = []
+for _, _, path, _ in citations:
+    if path not in all_cited:
+        all_cited.append(path)
+
+for start, end, variants in units[:MAX_UNITS]:
+    variants = [v for v in variants if checkable(v)]
+    if not variants:
+        continue
+    bound = [(path, line) for c_start, c_end, path, line in citations
+             if c_start <= end + QUOTE_PROXIMITY and c_end >= start - QUOTE_PROXIMITY]
+    if not bound:
+        continue
+    result["quotes_checked"] += 1
+    bound_paths = []
+    for path, _ in bound:
+        if path not in bound_paths:
+            bound_paths.append(path)
+    readable = False
+    verified = near = False
+    for path in bound_paths + [p for p in all_cited if p not in bound_paths]:
+        entry = load(path)
+        if entry is None:
+            continue
+        readable = True
+        for variant in variants:
+            lines = match_variant(variant, entry)
+            if not lines:
+                continue
+            verified = True
+            cited_lines = [line for p, line in bound if p == path]
+            if any(abs(found - cited) <= NEAR_LINES for found in lines for cited in cited_lines):
+                near = True
+                break
+        if verified:
+            break
+    if verified:
+        result["quotes_verified"] += 1
+        if near:
+            result["quotes_near_line"] += 1
+    elif readable:
+        result["quotes_unverified"] += 1
+        if len(result["unverified_samples"]) < 3:
+            result["unverified_samples"].append(norm(variants[0])[:120])
+    else:
+        result["quotes_unverifiable"] += 1
+
+result["fabricated"] = (result["quotes_unverified"] > 0 and result["quotes_verified"] == 0)
+emit()
+PY
+}
+
+council_response_quotes_fabricated() {
+    # True when a seat quotes code beside its path:line citations and NONE of those
+    # quotes appear in the cited files (council_response_quote_verification_json).
+    # Opt out with OCTOPUS_COUNCIL_QUOTE_VERIFY=0. A precomputed JSON may be passed
+    # as $3 to avoid re-scanning.
+    local f="$1" evidence_root="${2:-}" precomputed="${3:-}"
+    [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]] || return 1
+    [[ -f "$f" && -n "$evidence_root" && -d "$evidence_root" ]] || return 1
+    local report="$precomputed"
+    [[ -n "$report" ]] || report="$(council_response_quote_verification_json "$f" "$evidence_root")"
+    jq -e '.fabricated == true' <<< "$report" >/dev/null 2>&1
+}
+
 council_artifact_digest() {
     local evidence_root="$1" task="${2:-${COUNCIL_TASK:-}}"
     [[ -d "$evidence_root" ]] || return 1
@@ -2885,9 +3128,20 @@ council_contribution_record_json() {
     local response_path="$1" evidence_root="$2" artifact_digest="$3"
     local workspace_digest="$artifact_digest"
     local verdict="" evidence='[]' access_state="unverified" validation_result="invalid-empty"
+    local grounding='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_unverified":0,"quotes_unverifiable":0,"fabricated":false,"unverified_samples":[]}'
     if council_response_nonempty "$response_path"; then
         verdict="$(council_response_verdict "$response_path")"
-        if council_response_is_blind "$response_path" "$evidence_root"; then
+        if [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]]; then
+            grounding="$(council_response_quote_verification_json "$response_path" "$evidence_root")"
+            jq -e 'type == "object"' <<< "$grounding" >/dev/null 2>&1 \
+                || grounding='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_unverified":0,"quotes_unverifiable":0,"fabricated":false,"unverified_samples":[]}'
+        fi
+        if council_response_quotes_fabricated "$response_path" "$evidence_root" "$grounding"; then
+            # Distinct from invalid-access: the seat did not report an access
+            # failure, its quoted source simply is not in the files it cited.
+            access_state="evidence-rejected"
+            validation_result="invalid-ungrounded"
+        elif council_response_is_blind "$response_path" "$evidence_root"; then
             access_state="failed"
             validation_result="invalid-access"
         elif ! council_response_has_verdict "$response_path"; then
@@ -2917,10 +3171,11 @@ PY
     fi
     jq -cn --arg artifact_digest "$artifact_digest" --arg workspace_digest "$workspace_digest" --arg access_state "$access_state" \
         --arg validation_result "$validation_result" --arg verdict "$verdict" \
-        --argjson evidence_paths "$evidence" \
+        --argjson evidence_paths "$evidence" --argjson grounding "$grounding" \
         '{artifact_digest:$artifact_digest, workspace_digest:$workspace_digest, access_state:$access_state,
           evidence_paths:$evidence_paths, validation_result:$validation_result,
           verdict:(if $verdict=="" then null else $verdict end),
+          grounding:$grounding,
           comprehension_verified:false}'
 }
 
@@ -3358,6 +3613,7 @@ council_run_advice_phase() {
               verdict_explicit:($verdict_explicit == "true"),
               status:$status,
               contribution:$contribution,
+              grounding:($contribution.grounding // null),
               timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
               counted_as_approver:false}')"
         [[ "$seat_synthesizer" == "true" ]] && seat_rec="$(jq -c '.synthesizer = true' <<< "$seat_rec")"
