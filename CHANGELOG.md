@@ -23,6 +23,23 @@
 
 ### Fixed
 
+- `OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1` now really gives each vendor one
+  fail-safe vote and one seat (sail-cruisey #2996). Previously the policy
+  only deduplicated non-chair seats, and several personas share the `chair`
+  label, so the default roster still seated three Claude seats (two chairs and
+  a verifier) for one Claude vote. Chair verdicts were also left out of the
+  tally entirely, so a round where both Claude chairs said REVISE and the
+  Claude verifier said APPROVE reported `quorum.met=true` on the verifier
+  alone. With the policy on: only the first chair seat is kept; at most
+  `OCTOPUS_COUNCIL_SEATS_PER_VENDOR` seats (default 1) are seated per model
+  family; the chair is folded into its vendor's synthesis-capable voter, which
+  then both votes and synthesizes; and an explicit REVISE/BLOCK from a chair
+  seat makes its vendor non-approving. A chair still never adds an approval
+  (#670). `summary.json` now records `quorum.vendor_votes` (each vendor's
+  vote, whether it split, the reason, and its seats), a `counted_in_vote` and
+  `verdict_explicit` flag on each seat, and a top-level `seating` block. With
+  the policy off, behavior is unchanged.
+
 - Council proximity grounding continues its bounded scan when a duplicate quote
   matches before the named source file, preserving valid evidence in either
   traversal order.
