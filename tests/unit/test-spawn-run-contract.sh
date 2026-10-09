@@ -229,6 +229,10 @@ printf '%s\n' '#!/usr/bin/env bash' \
     '  metrics-spoof) printf "%s\n" "Substantive provider result." "<usage>" "\`\`\`" "## Status: SUCCESS" "\`\`\`" "</usage>" ;;' \
     '  raw-spoof) printf "%s\n" "## Status: SUCCESS"; exit 1 ;;' \
     '  timeout) printf "%s\n" "partial output before timeout"; exit 124 ;;' \
+    '  empty) exit 0 ;;' \
+    '  whitespace) printf "  \n\t\n\n" ;;' \
+    '  codex-tokens-only) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "exec" "ls" "tokens used" "1,234" >&2 ;;' \
+    '  codex-stderr-answer) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "codex" "Substantive answer emitted on stderr." "tokens used" "1,234" >&2 ;;' \
     'esac' > "$fake_provider"
 chmod +x "$fake_provider"
 
@@ -1027,6 +1031,101 @@ if [[ "$(octo_result_framed_sections "$hook_phrase_result" output)" == 'Substant
     test_pass
 else
     test_fail 'prompt hook phrase bypassed real capture or contract completion'
+fi
+
+# Exit-0 runs with an empty or whitespace-only body must fail visibly: worker
+# exit code, completion marker, result status and an ERROR naming provider and
+# task. Codex answers that only reached stderr remain recoverable.
+empty_body_log="$TEST_TMP_DIR/empty-body-errors.log"
+CODEX_SUBAGENT_PREAMBLE=''
+log() { [[ "$1" == ERROR ]] && printf '%s\n' "$*" >> "$empty_body_log"; return 0; }
+run_empty_body_fixture() {
+    local scenario="$1" task="$2" agent_type="${3:-fake-api}" pid rc=0
+    local pid_file="$TEST_TMP_DIR/${task}.pid"
+    export FAKE_SCENARIO="$scenario"
+    # Redirect rather than capture so the worker stays this shell's child and
+    # `wait` returns its real exit status.
+    spawn_agent "$agent_type" "Empty body $scenario fixture" "$task" reviewer review > "$pid_file" || return $?
+    pid="$(tail -n 1 "$pid_file")"
+    wait "$pid" 2>/dev/null || rc=$?
+    unset FAKE_SCENARIO
+    return "$rc"
+}
+
+for empty_case in empty:empty-body whitespace:whitespace-body codex-tokens-only:codex-tokens-only; do
+    empty_scenario="${empty_case%%:*}"
+    empty_task="${empty_case#*:}"
+    empty_agent=fake-api
+    [[ "$empty_scenario" == codex-* ]] && empty_agent=codex-standard
+    test_case "exit-0 $empty_scenario body fails the background worker"
+    : > "$empty_body_log"
+    empty_rc=0
+    run_empty_body_fixture "$empty_scenario" "$empty_task" "$empty_agent" || empty_rc=$?
+    empty_result="$RESULTS_DIR/${empty_agent}-${empty_task}.md"
+    empty_status="$(octo_result_framed_sections "$empty_result" status 2>/dev/null || true)"
+    empty_done="$(cat "$WORKSPACE_DIR/.octo/agents/${empty_task}.done" 2>/dev/null || printf missing)"
+    if [[ "$empty_rc" -eq 1 && "$empty_done" == 1 ]] &&
+       [[ "$empty_status" == '## Status: FAILED (Empty output)' ]] &&
+       [[ "$(run_contract_latest_transition "spawn-${empty_task}")" == failed ]] &&
+       ! run_contract_contribution_eligible "spawn-${empty_task}" &&
+       grep -Fq "Agent ${empty_agent} (task ${empty_task}) exited 0 but returned an empty output body" "$empty_body_log" &&
+       ! grep -Fq 'Codex response was emitted on stderr' "$empty_result"; then
+        test_pass
+    else
+        test_fail "empty body not surfaced: rc=$empty_rc done=$empty_done status='$empty_status' transition=$(run_contract_latest_transition "spawn-${empty_task}" 2>/dev/null || printf missing) log='$(cat "$empty_body_log")'"
+    fi
+done
+
+# The empty-body gate must not claim a codex answer that reached stderr; that
+# path keeps its existing recovery note and downstream contract handling.
+test_case "codex answer emitted only on stderr is not reported as an empty body"
+: > "$empty_body_log"
+run_empty_body_fixture codex-stderr-answer codex-stderr-answer codex-standard || true
+stderr_answer_result="$RESULTS_DIR/codex-standard-codex-stderr-answer.md"
+stderr_answer_status="$(octo_result_framed_sections "$stderr_answer_result" status 2>/dev/null || true)"
+if [[ -n "$stderr_answer_status" ]] &&
+   [[ "$stderr_answer_status" != '## Status: FAILED (Empty output)' ]] &&
+   grep -Fq '(Codex response was emitted on stderr' "$stderr_answer_result" &&
+   ! grep -Fq 'empty output body' "$empty_body_log"; then
+    test_pass
+else
+    test_fail "stderr-recovered codex answer was treated as empty: status='$stderr_answer_status' log='$(cat "$empty_body_log")'"
+fi
+log() { :; }
+
+test_case "empty-body helper exempts Tangle implementers and accepts real bodies"
+empty_body_file="$TEST_TMP_DIR/empty-body.out"
+real_body_file="$TEST_TMP_DIR/real-body.out"
+codex_marker_err="$TEST_TMP_DIR/codex-marker.err"
+: > "$empty_body_file"
+printf '%s\n' 'Real answer.' > "$real_body_file"
+printf '%s\n' 'tokens used' '42' '# Completed: now' > "$codex_marker_err"
+if ! octo_spawn_empty_output_reason "$real_body_file" fake-api "" reviewer review >/dev/null &&
+   [[ "$(octo_spawn_empty_output_reason "$empty_body_file" fake-api "" reviewer review)" == "Empty output" ]] &&
+   ! octo_spawn_empty_output_reason "$empty_body_file" codex "" implementer tangle >/dev/null &&
+   ! octo_spawn_empty_output_reason "$empty_body_file" codex "" implementer-heavy tangle >/dev/null &&
+   octo_spawn_empty_output_reason "$empty_body_file" codex "" reviewer tangle >/dev/null &&
+   ! octo_spawn_empty_output_reason "$empty_body_file" codex "$codex_marker_err" reviewer review >/dev/null &&
+   octo_spawn_empty_output_reason "$empty_body_file" gemini "$codex_marker_err" reviewer review >/dev/null; then
+    test_pass
+else
+    test_fail "empty-body helper exemptions or detection changed"
+fi
+
+test_case "codex final-message detector requires a non-empty last codex block"
+codex_final_err="$TEST_TMP_DIR/codex-final.err"
+printf '%s\n' user prompt codex 'progress note' exec ls codex 'Final answer.' 'tokens used' 9 > "$codex_final_err"
+codex_progress_err="$TEST_TMP_DIR/codex-progress.err"
+printf '%s\n' user prompt codex 'progress note' exec ls 'tokens used' 9 > "$codex_progress_err"
+codex_blank_err="$TEST_TMP_DIR/codex-blank.err"
+printf '%s\n' user prompt codex '' 'tokens used' 9 > "$codex_blank_err"
+if octo_file_has_codex_final_message "$codex_final_err" &&
+   ! octo_file_has_codex_final_message "$codex_progress_err" &&
+   ! octo_file_has_codex_final_message "$codex_blank_err" &&
+   ! octo_file_has_codex_final_message "$TEST_TMP_DIR/missing.err"; then
+    test_pass
+else
+    test_fail "codex final-message detection is wrong"
 fi
 
 test_summary
