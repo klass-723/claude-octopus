@@ -275,6 +275,22 @@ octo_file_has_codex_recoverable_stderr() {
     grep -qE '^# Completed:|^## Worktree Changes$|^## Integration Evidence$|^## Verification$|^tokens used$' "$stderr_file" 2>/dev/null
 }
 
+# True when a codex exec stderr transcript ends with a non-empty agent message.
+# The transcript is a series of blocks headed by bare "user", "thinking",
+# "exec" or "codex" lines, closed by "tokens used". Codex prints "tokens used"
+# even when the run produced no answer, so that marker alone does not prove a
+# response exists; the final block must be a "codex" message with content.
+octo_file_has_codex_final_message() {
+    local stderr_file="${1:-}"
+    [[ -n "$stderr_file" && -s "$stderr_file" ]] || return 1
+    awk '
+        /^(user|thinking|exec|codex)$/ { last = $0; has = 0; next }
+        /^tokens used$/ { closed = 1; next }
+        !closed && last == "codex" && /[[:alnum:]]/ { has = 1 }
+        END { exit((last == "codex" && has) ? 0 : 1) }
+    ' "$stderr_file" 2>/dev/null
+}
+
 octo_failure_reason() {
     local exit_code="$1" dispatched_prompt="$2" file detail=""
     shift 2
