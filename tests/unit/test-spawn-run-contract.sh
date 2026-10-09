@@ -1128,4 +1128,81 @@ else
     test_fail "codex final-message detection is wrong"
 fi
 
+# `orchestrate.sh spawn` announces where the answer lands, and the worker ends
+# its result file with a task-scoped sentinel. The prompt is echoed into the
+# result file, so a caller waiting for "VERDICT" would fire on the prompt.
+run_announced_fixture() {
+    local scenario="$1" task="$2" prompt="$3" out_file="$4" pid rc=0
+    export FAKE_SCENARIO="$scenario"
+    _OCTOPUS_SPAWN_ANNOUNCE_PATHS=1
+    spawn_agent fake-api "$prompt" "$task" reviewer review > "$out_file" || rc=$?
+    unset _OCTOPUS_SPAWN_ANNOUNCE_PATHS
+    (( rc == 0 )) || { unset FAKE_SCENARIO; return "$rc"; }
+    pid="$(tail -n 1 "$out_file")"
+    wait "$pid" 2>/dev/null || rc=$?
+    unset FAKE_SCENARIO
+    return "$rc"
+}
+
+test_case "announced spawn prints absolute RESULT_FILE/DONE_FILE lines before the PID line"
+announce_out="$TEST_TMP_DIR/announce-success.out"
+run_announced_fixture success announce-success 'Reply with VERDICT: APPROVE when done' "$announce_out" || true
+announce_result="$(sed -n 's/^RESULT_FILE=//p' "$announce_out")"
+announce_done="$(sed -n 's/^DONE_FILE=//p' "$announce_out")"
+announce_task="$(sed -n 's/^TASK_ID=//p' "$announce_out")"
+if [[ "$announce_task" == announce-success ]] &&
+   [[ "$announce_result" == /* && "$announce_result" == "$RESULTS_DIR/fake-api-announce-success.md" && -f "$announce_result" ]] &&
+   [[ "$announce_done" == "$WORKSPACE_DIR/.octo/agents/announce-success.done" && -f "$announce_done" ]] &&
+   [[ "$(tail -n 1 "$announce_out")" =~ ^[0-9]+$ ]] &&
+   grep -Fxq 'RESULT_END_SENTINEL==== OCTOPUS-RESULT-END announce-success rc=<rc> ===' "$announce_out"; then
+    test_pass
+else
+    test_fail "announce lines missing or wrong: $(tr '\n' '|' < "$announce_out")"
+fi
+
+test_case "result file ends with the task-scoped sentinel after the echoed prompt"
+if [[ "$(tail -n 1 "$announce_result" 2>/dev/null)" == '=== OCTOPUS-RESULT-END announce-success rc=0 ===' ]] &&
+   [[ "$(grep -c '^=== OCTOPUS-RESULT-END ' "$announce_result")" == 1 ]] &&
+   grep -Fq 'Reply with VERDICT: APPROVE when done' "$announce_result" &&
+   [[ "$(cat "$announce_done")" == 0 ]]; then
+    test_pass
+else
+    test_fail "sentinel missing/duplicated or done marker wrong: tail='$(tail -n 2 "$announce_result" 2>/dev/null | tr '\n' '|')' done='$(cat "$announce_done" 2>/dev/null)'"
+fi
+
+test_case "sentinel carries the worker's non-zero exit code"
+announce_fail_out="$TEST_TMP_DIR/announce-exit.out"
+run_announced_fixture exit announce-exit 'Exit fixture' "$announce_fail_out" || true
+announce_fail_result="$(sed -n 's/^RESULT_FILE=//p' "$announce_fail_out")"
+announce_fail_done="$(sed -n 's/^DONE_FILE=//p' "$announce_fail_out")"
+announce_fail_rc="$(cat "$announce_fail_done" 2>/dev/null || printf missing)"
+if [[ "$announce_fail_rc" =~ ^[1-9][0-9]*$ ]] &&
+   [[ "$(tail -n 1 "$announce_fail_result" 2>/dev/null)" == "=== OCTOPUS-RESULT-END announce-exit rc=${announce_fail_rc} ===" ]]; then
+    test_pass
+else
+    test_fail "failed worker sentinel/marker mismatch: done=$announce_fail_rc tail='$(tail -n 1 "$announce_fail_result" 2>/dev/null)'"
+fi
+
+test_case "internal spawn_agent callers keep the bare-PID stdout contract"
+bare_out="$TEST_TMP_DIR/announce-bare.out"
+export FAKE_SCENARIO=success
+spawn_agent fake-api "Bare fixture" announce-bare reviewer review > "$bare_out" || true
+unset FAKE_SCENARIO
+wait "$(tail -n 1 "$bare_out")" 2>/dev/null || true
+if [[ "$(wc -l < "$bare_out" | tr -d ' ')" == 1 && "$(cat "$bare_out")" =~ ^[0-9]+$ ]] &&
+   [[ "$(tail -n 1 "$RESULTS_DIR/fake-api-announce-bare.md")" == '=== OCTOPUS-RESULT-END announce-bare rc=0 ===' ]]; then
+    test_pass
+else
+    test_fail "un-announced spawn stdout changed: $(tr '\n' '|' < "$bare_out")"
+fi
+
+test_case "orchestrate.sh spawn opts into the announcement without exporting it"
+orchestrate_src="$PROJECT_ROOT/scripts/orchestrate.sh"
+if grep -Fq '_OCTOPUS_SPAWN_ANNOUNCE_PATHS=1' "$orchestrate_src" &&
+   ! grep -Eq 'export[[:space:]]+_OCTOPUS_SPAWN_ANNOUNCE_PATHS' "$orchestrate_src" "$PROJECT_ROOT/scripts/lib/spawn.sh"; then
+    test_pass
+else
+    test_fail "orchestrate.sh spawn does not set the announce flag, or the flag is exported"
+fi
+
 test_summary
