@@ -39,7 +39,22 @@
   vote, whether it split, the reason, and its seats), a `counted_in_vote` and
   `verdict_explicit` flag on each seat, and a top-level `seating` block. With
   the policy off, behavior is unchanged.
-
+- Council seats no longer review a silently truncated prompt. When a council
+  prompt exceeds the seat's context budget and the summarizer is unavailable,
+  dispatch now fails with exit 78 and an ERROR telling the lead to split the
+  diff per file (`git diff -- <paths>` chunks) and re-dispatch, instead of
+  cutting the artifact's tail while seats still vote. Set
+  `OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1` to restore the old fallback. Successful
+  summarization, explicit `OCTOPUS_OVERSIZE_STRATEGY=truncate`, and non-council
+  phases are unchanged.
+- A background `spawn` worker whose provider exits 0 with an empty or
+  whitespace-only output body now exits 1, writes `1` to its completion marker,
+  records `## Status: FAILED (Empty output)`, and logs an ERROR naming the
+  provider and task id. Previously the result said FAILED while the worker and
+  marker reported success. A Codex answer that reached stderr is still recovered
+  only when the transcript ends in a non-empty `codex` message; the bare
+  `tokens used` trailer Codex always prints no longer counts. Tangle implementers,
+  which deliver through the worktree, keep their existing handling.
 - Council proximity grounding continues its bounded scan when a duplicate quote
   matches before the named source file, preserving valid evidence in either
   traversal order.
