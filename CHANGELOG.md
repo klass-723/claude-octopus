@@ -42,9 +42,16 @@
   `...` elisions are handled. When none of a seat's quotes verify, the seat is
   `blind` (not counted) and its contribution is `invalid-ungrounded`.
   Unreadable or oversized cited files make a quote unverifiable, never
+  fabricated. Quotes of deleted code are checked against the removed side
+  (and then the added side) of the reviewed diff. The diff comes from any
+  `--context-file` that is a unified diff, plus `git diff
+  ${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}` in the evidence root. With no diff
+  available, a quote the seat says was removed is unverifiable, not
   fabricated. Each seat in `summary.json` records the result under `grounding`
-  (`quotes_checked`, `quotes_verified`, `quotes_near_line`, `quotes_unverified`,
-  `quotes_unverifiable`, `unverified_samples`). Set
+  (`quotes_checked`, `quotes_verified`, `quotes_near_line`,
+  `quotes_verified_in_diff_removed`, `quotes_verified_in_diff_added`,
+  `quotes_unverified`, `quotes_unverifiable`,
+  `quotes_unverifiable_claimed_removed`, `diff_sources`, `unverified_samples`). Set
   `OCTOPUS_COUNCIL_QUOTE_VERIFY=0` to turn the check off.
 
 - `OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1` now really gives each vendor one
