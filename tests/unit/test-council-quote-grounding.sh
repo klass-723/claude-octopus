@@ -168,4 +168,90 @@ else
     test_fail "report: $r"
 fi
 
+# ── Removed-code quotes (reviewers quote deleted lines: "this guard was removed").
+# That code exists in no working-tree file, so it is checked against the removed
+# (and added) side of the reviewed diff before being called fabricated.
+GROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-git.XXXXXX")"
+mkdir -p "$GROOT/src"
+GUARD='if (!sailing.isBookable) throw new BookingClosedError(sailing.id);'
+printf 'export function book(sailing, cabin) {\n  %s\n  return reserve(sailing, cabin);\n}\n' "$GUARD" > "$GROOT/src/book.ts"
+git -C "$GROOT" init -q
+git -C "$GROOT" add src/book.ts
+git -C "$GROOT" -c user.email=t@example.invalid -c user.name=t commit -q -m base
+printf 'export function book(sailing, cabin) {\n  return reserve(sailing, cabin);\n}\n' > "$GROOT/src/book.ts"
+_greport() { council_response_quote_verification_json "$1" "$GROOT"; }
+
+test_case "removed-line quote (git diff HEAD) verifies via the diff's removed side and is not blind"
+removed_only="$(_resp "At src/book.ts:2 the guard \`$GUARD\` was removed, so closed sailings can be booked.
+VERDICT: REVISE")"
+r="$(_greport "$removed_only")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_verified_in_diff_removed == 1 and .fabricated == false
+          and (.diff_sources | index("git-diff:HEAD"))' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$removed_only" "$GROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "fabricated quote in the same diff-bearing repo is still blind"
+git_fab="$(_resp "At src/book.ts:2 the code \`if (sailing.status === 'closed') return refundAll(cabin);\` handles closures.
+VERDICT: APPROVE")"
+r="$(_greport "$git_fab")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null &&
+   council_response_is_blind "$git_fab" "$GROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "mixed: a removed-line quote plus a fabricated quote keeps the seat grounded"
+git_mixed="$(_resp "src/book.ts:2 dropped \`$GUARD\` and now calls \`if (sailing.status === 'closed') return refundAll(cabin);\`.
+VERDICT: REVISE")"
+r="$(_greport "$git_mixed")"
+if jq -e '.quotes_checked == 2 and .quotes_verified_in_diff_removed == 1 and .quotes_unverified == 1 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$git_mixed" "$GROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "OCTOPUS_COUNCIL_DIFF_BASE selects a committed base (removal already committed)"
+git -C "$GROOT" -c user.email=t@example.invalid -c user.name=t commit -q -am remove-guard
+r_head="$(_greport "$removed_only")"
+r_base="$(OCTOPUS_COUNCIL_DIFF_BASE=HEAD~1 _greport "$removed_only")"
+if jq -e '.quotes_verified == 0' <<< "$r_head" >/dev/null &&
+   jq -e '.quotes_verified_in_diff_removed == 1 and .fabricated == false and (.diff_sources | index("git-diff:HEAD~1"))' <<< "$r_base" >/dev/null; then
+    test_pass
+else
+    test_fail "head: $r_head base: $r_base"
+fi
+
+test_case "a --context-file diff supplies the removed side (non-git root, fenced '-' lines)"
+ctx_diff="$TEST_TMP_DIR/reviewed.diff"
+printf 'diff --git a/src/pricing.ts b/src/pricing.ts\n--- a/src/pricing.ts\n+++ b/src/pricing.ts\n@@ -2,2 +2,1 @@\n-  if (cabin.soldOut) return { price: null, reason: "sold-out" };\n+  const base = cabin.basePrice ?? sailing.defaultPrice;\n' > "$ctx_diff"
+ctx_resp="$(_resp "src/pricing.ts:2 lost its sold-out guard:
+\`\`\`diff
+-  if (cabin.soldOut) return { price: null, reason: \"sold-out\" };
+\`\`\`
+VERDICT: REVISE")"
+r="$(COUNCIL_CONTEXT_FILES=("$ctx_diff"); _report "$ctx_resp")"
+if jq -e '.quotes_checked == 1 and .quotes_verified_in_diff_removed == 1 and .fabricated == false and (.diff_sources | index("context-file"))' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "report: $r"
+fi
+
+test_case "a quote found only on the diff's added side verifies (working tree vs cited file timing)"
+printf 'diff --git a/src/pricing.ts b/src/pricing.ts\n@@ -4,1 +4,1 @@\n-  return applyTaxes(base, sailing.portFees);\n+  return applyTaxes(base, sailing.portFees, sailing.region);\n' > "$ctx_diff"
+added_resp="$(_resp "src/pricing.ts:4 now does \`return applyTaxes(base, sailing.portFees, sailing.region);\` correctly.
+VERDICT: APPROVE")"
+r="$(COUNCIL_CONTEXT_FILES=("$ctx_diff"); _report "$added_resp")"
+if jq -e '.quotes_verified == 1 and .quotes_verified_in_diff_added == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "a non-diff context file's '- ' bullets are not treated as removed code"
+ctx_plan="$TEST_TMP_DIR/plan.md"
+printf '# Plan\n\n- const base = await fetchCabinPrice(cabin.id, { cache: true });\n' > "$ctx_plan"
+r="$(COUNCIL_CONTEXT_FILES=("$ctx_plan"); _report "$fab")"
+if jq -e '.fabricated == true and .diff_sources == []' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
+claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
+VERDICT: REVISE")"
+r="$(_report "$claimed")"
+if jq -e '.quotes_unverifiable == 1 and .quotes_unverifiable_claimed_removed == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$claimed" "$ROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "summary grounding carries the new diff counters"
+record="$(council_contribution_record_json "$removed_only" "$GROOT" sha256:t)"
+if jq -e '.grounding | has("quotes_verified_in_diff_removed") and has("quotes_verified_in_diff_added") and has("quotes_unverifiable_claimed_removed") and has("diff_sources")' <<< "$record" >/dev/null &&
+   jq -e 'has("quotes_verified_in_diff_removed")' <<< "$COUNCIL_EMPTY_GROUNDING_JSON" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+
 test_summary

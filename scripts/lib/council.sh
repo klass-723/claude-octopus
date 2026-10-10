@@ -2817,6 +2817,8 @@ print(json.dumps(validated, separators=(",", ":")))
 PY
 }
 
+COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"diff_sources":[],"fabricated":false,"unverified_samples":[]}'
+
 council_response_quote_verification_json() {
     # Verify the code a seat QUOTES next to its `path:line` citations (sail-cruisey
     # #2997). council_response_evidence_paths_json only proves a cited file exists
@@ -2830,28 +2832,44 @@ council_response_quote_verification_json() {
     # "fabricated" is true only when at least one quote was checked, none verified,
     # and at least one definitively failed.
     local response_path="$1" evidence_root="$2"
-    local empty='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_unverified":0,"quotes_unverifiable":0,"fabricated":false,"unverified_samples":[]}'
+    local empty="$COUNCIL_EMPTY_GROUNDING_JSON"
     [[ -f "$response_path" && -n "$evidence_root" && -d "$evidence_root" ]] || { printf '%s\n' "$empty"; return 0; }
     command -v python3 >/dev/null 2>&1 || { printf '%s\n' "$empty"; return 0; }
+    # Diff sources for quotes of REMOVED (or not-yet-on-disk added) code: every
+    # --context-file that looks like a unified diff, plus `git diff` of the
+    # evidence root against OCTOPUS_COUNCIL_DIFF_BASE (default HEAD, i.e. the
+    # uncommitted working-tree change). Passed as trailing argv entries.
+    local -a diff_context_files=()
+    local ctx
+    for ctx in ${COUNCIL_CONTEXT_FILES[@]+"${COUNCIL_CONTEXT_FILES[@]}"}; do
+        [[ -f "$ctx" && -r "$ctx" ]] && diff_context_files+=("$ctx")
+    done
     # Source evidence is data; never import project-local Python modules.
-    python3 -I - "$response_path" "$evidence_root" <<'PY' 2>/dev/null || printf '%s\n' "$empty"
+    OCTOPUS_COUNCIL_DIFF_BASE="${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}" \
+    python3 -I - "$response_path" "$evidence_root" ${diff_context_files[@]+"${diff_context_files[@]}"} <<'PY' 2>/dev/null || printf '%s\n' "$empty"
 import json
+import os
 import re
+import subprocess
 import sys
 from bisect import bisect_right
 from pathlib import Path
 
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_FILE_BYTES = 1_500_000
+MAX_DIFF_BYTES = 8_388_608
 MAX_UNITS = 256
 QUOTE_PROXIMITY = 1500
+REMOVAL_WINDOW = 200
 NEAR_LINES = 40
 MIN_TOKENS = 3
 MIN_CHARS = 20
 
 result = {"citations": 0, "quotes_checked": 0, "quotes_verified": 0, "quotes_near_line": 0,
-          "quotes_unverified": 0, "quotes_unverifiable": 0, "fabricated": False,
-          "unverified_samples": []}
+          "quotes_verified_in_diff_removed": 0, "quotes_verified_in_diff_added": 0,
+          "quotes_unverified": 0, "quotes_unverifiable": 0,
+          "quotes_unverifiable_claimed_removed": 0, "diff_sources": [],
+          "fabricated": False, "unverified_samples": []}
 
 def emit():
     print(json.dumps(result, separators=(",", ":")))
@@ -2906,32 +2924,39 @@ for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
     info = match.group(1).strip().lower()
     lines = match.group(2).split("\n")
     diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
-    kept = []
+    kept, removed_kept = [], []
     for line in lines:
         if diff_like:
-            if line.startswith(("-", "@@", "+++ ", "--- ")):
+            if line.startswith(("@@", "+++ ", "--- ")):
+                continue
+            if line.startswith("-"):
+                # Removed code: verifiable only against the diff's removed side.
+                if line[1:].strip():
+                    removed_kept.append(line[1:])
                 continue
             if line.startswith("+"):
                 line = line[1:]
         if line.strip():
             kept.append(line)
-    variants = []
-    whole = " ".join(l.strip() for l in kept)
-    if whole:
-        variants.append(whole)
-        unguttered = " ".join(GUTTER.sub("", l).strip() for l in kept)
-        if unguttered != whole:
-            variants.append(unguttered)
-    for line in kept:
-        variants.append(line.strip())
-        stripped = GUTTER.sub("", line).strip()
-        if stripped != line.strip():
-            variants.append(stripped)
-    units.append((match.start(), match.end(), variants))
+    def expand(block):
+        out = []
+        whole = " ".join(l.strip() for l in block)
+        if whole:
+            out.append(whole)
+            unguttered = " ".join(GUTTER.sub("", l).strip() for l in block)
+            if unguttered != whole:
+                out.append(unguttered)
+        for line in block:
+            out.append(line.strip())
+            stripped = GUTTER.sub("", line).strip()
+            if stripped != line.strip():
+                out.append(stripped)
+        return out
+    units.append((match.start(), match.end(), expand(kept), expand(removed_kept)))
 for match in re.finditer(r"`([^`\n]+)`", resp):
     if any(match.start() < end and match.end() > start for start, end in fence_ranges):
         continue
-    units.append((match.start(), match.end(), [match.group(1).strip()]))
+    units.append((match.start(), match.end(), [match.group(1).strip()], []))
 
 def checkable(text):
     # A quoted citation or a bare path is not a code quote.
@@ -2990,9 +3015,78 @@ for _, _, path, _ in citations:
     if path not in all_cited:
         all_cited.append(path)
 
-for start, end, variants in units[:MAX_UNITS]:
+# Removed/added sides of the reviewed diff. Reviewers routinely quote deleted
+# code ("this guard was removed"); that code is in no working-tree file, so it
+# is checked here instead of being reported as fabricated. Loaded lazily, only
+# when a quote fails against the cited files.
+DIFF_HEADER = re.compile(r"^(@@ |diff --git |\+\+\+ |--- )", re.M)
+diff_sides = None
+def split_diff(text):
+    removed, added = [], []
+    for line in text.split("\n"):
+        if line.startswith(("+++ ", "--- ")):
+            continue
+        if line.startswith("-"):
+            piece = norm(line[1:])
+            if piece:
+                removed.append(piece)
+        elif line.startswith("+"):
+            piece = norm(line[1:])
+            if piece:
+                added.append(piece)
+    return removed, added
+
+def load_diff_sides():
+    removed, added = [], []
+    for name in sys.argv[3:]:
+        try:
+            with open(name, "rb") as handle:
+                data = handle.read(MAX_DIFF_BYTES).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not DIFF_HEADER.search(data):
+            continue  # a plan or prose artifact; its "- " bullets are not removed code
+        r, a = split_diff(data)
+        removed += r
+        added += a
+        result["diff_sources"].append("context-file")
+    base = os.environ.get("OCTOPUS_COUNCIL_DIFF_BASE", "HEAD") or "HEAD"
+    if re.fullmatch(r"[A-Za-z0-9._/@^~-]{1,200}", base) and not base.startswith("-"):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0")
+        try:
+            proc = subprocess.run(["git", "-C", str(root), "diff", "--no-color", "--no-ext-diff",
+                                   "--unified=0", base, "--"],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
+            if proc.returncode == 0 and proc.stdout:
+                r, a = split_diff(proc.stdout[:MAX_DIFF_BYTES].decode("utf-8", "replace"))
+                if r or a:
+                    removed += r
+                    added += a
+                    result["diff_sources"].append("git-diff:" + base)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Joined so a multi-line quote of consecutive diff lines still matches.
+    return (" ".join(removed), " ".join(added))
+
+def in_diff_side(variants, side):
+    if not side:
+        return False
+    for variant in variants:
+        needle = norm(variant)
+        if needle in side:
+            return True
+        pieces = [p for p in ELLIPSIS.split(needle) if specific(p)]
+        if (len(pieces) > 1 or (pieces and pieces[0] != needle)) and all(p in side for p in pieces):
+            return True
+    return False
+
+REMOVAL_WORDS = re.compile(r"\b(remov(?:e|ed|es|ing|al)|delet(?:e|ed|es|ing|ion)|drop(?:ped|s)?|no longer|was gone|got rid of)\b", re.I)
+
+for start, end, variants, removed_variants in units[:MAX_UNITS]:
     variants = [v for v in variants if checkable(v)]
-    if not variants:
+    removed_variants = [v for v in removed_variants if checkable(v)]
+    if not variants and not removed_variants:
         continue
     bound = [(path, line) for c_start, c_end, path, line in citations
              if c_start <= end + QUOTE_PROXIMITY and c_end >= start - QUOTE_PROXIMITY]
@@ -3021,14 +3115,31 @@ for start, end, variants in units[:MAX_UNITS]:
                 break
         if verified:
             break
+    diff_side_hit = None
+    if not verified:
+        if diff_sides is None:
+            diff_sides = load_diff_sides()
+        removed_side, added_side = diff_sides
+        if in_diff_side(variants + removed_variants, removed_side):
+            diff_side_hit = "removed"
+        elif in_diff_side(variants, added_side):
+            diff_side_hit = "added"
     if verified:
         result["quotes_verified"] += 1
         if near:
             result["quotes_near_line"] += 1
+    elif diff_side_hit:
+        result["quotes_verified"] += 1
+        result["quotes_verified_in_diff_" + diff_side_hit] += 1
+    elif not diff_sides[0] and not diff_sides[1] and (
+            removed_variants or REMOVAL_WORDS.search(resp[max(0, start - REMOVAL_WINDOW):end + REMOVAL_WINDOW])):
+        # No diff to check a claimed removal against: unverifiable, not fabricated.
+        result["quotes_unverifiable"] += 1
+        result["quotes_unverifiable_claimed_removed"] += 1
     elif readable:
         result["quotes_unverified"] += 1
         if len(result["unverified_samples"]) < 3:
-            result["unverified_samples"].append(norm(variants[0])[:120])
+            result["unverified_samples"].append(norm((variants or removed_variants)[0])[:120])
     else:
         result["quotes_unverifiable"] += 1
 
@@ -3128,13 +3239,13 @@ council_contribution_record_json() {
     local response_path="$1" evidence_root="$2" artifact_digest="$3"
     local workspace_digest="$artifact_digest"
     local verdict="" evidence='[]' access_state="unverified" validation_result="invalid-empty"
-    local grounding='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_unverified":0,"quotes_unverifiable":0,"fabricated":false,"unverified_samples":[]}'
+    local grounding="$COUNCIL_EMPTY_GROUNDING_JSON"
     if council_response_nonempty "$response_path"; then
         verdict="$(council_response_verdict "$response_path")"
         if [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]]; then
             grounding="$(council_response_quote_verification_json "$response_path" "$evidence_root")"
             jq -e 'type == "object"' <<< "$grounding" >/dev/null 2>&1 \
-                || grounding='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_unverified":0,"quotes_unverifiable":0,"fabricated":false,"unverified_samples":[]}'
+                || grounding="$COUNCIL_EMPTY_GROUNDING_JSON"
         fi
         if council_response_quotes_fabricated "$response_path" "$evidence_root" "$grounding"; then
             # Distinct from invalid-access: the seat did not report an access
