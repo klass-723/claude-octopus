@@ -117,4 +117,89 @@ else
     test_fail "invalid budgets reached prompt processing: $invalid_budget_failures"
 fi
 
+# Summarizer-unavailable fallback for council seats. A truncated diff still
+# yields confident verdicts, so council dispatch must fail closed unless the
+# caller sets OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1.
+export OCTOPUS_PROVIDERS_CONFIG="$SUMMARIZER_CFG"
+run_agent_sync() { return 1; }
+log() { [[ "$1" == "ERROR" ]] && printf '%s\n' "$*" >> "$TEST_TMP_DIR/oversize-error.log"; return 0; }
+OCTOPUS_CONTEXT_BUDGET=40
+OCTOPUS_OVERSIZE_STRATEGY=summarize
+
+test_case "council summarizer-unavailable fallback refuses to truncate"
+rm -f "$TEST_TMP_DIR/oversize-event.args" "$TEST_TMP_DIR/oversize-notice" "$TEST_TMP_DIR/oversize-error.log"
+unset OCTOPUS_COUNCIL_ALLOW_TRUNCATION
+set +e
+enforce_context_budget "$long_prompt" "reviewer" "codex" "council" >"$TEST_TMP_DIR/council-refuse.out"
+rc=$?
+set -e
+event_args="$(cat "$TEST_TMP_DIR/oversize-event.args" 2>/dev/null || true)"
+error_log="$(cat "$TEST_TMP_DIR/oversize-error.log" 2>/dev/null || true)"
+if [[ $rc -eq 78 ]] && [[ ! -s "$TEST_TMP_DIR/council-refuse.out" ]] &&
+   [[ ! -e "$TEST_TMP_DIR/oversize-notice" ]] &&
+   [[ "$event_args" == "codex ${#long_prompt} ${#long_prompt} failed reviewer council 16" ]] &&
+   [[ "$error_log" == *"Refusing to truncate"* ]] &&
+   [[ "$error_log" == *"git diff -- <paths>"* ]] &&
+   [[ "$error_log" == *"OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1"* ]]; then
+    test_pass
+else
+    test_fail "expected fail-closed exit 78, got rc=$rc out_chars=$(wc -c < "$TEST_TMP_DIR/council-refuse.out") event='$event_args' error='$error_log'"
+fi
+
+test_case "OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1 restores the council truncation fallback"
+rm -f "$TEST_TMP_DIR/oversize-event.args" "$TEST_TMP_DIR/oversize-notice" "$TEST_TMP_DIR/oversize-error.log"
+set +e
+output="$(OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1 enforce_context_budget "$long_prompt" "reviewer" "codex" "council")"
+rc=$?
+set -e
+event_args="$(cat "$TEST_TMP_DIR/oversize-event.args" 2>/dev/null || true)"
+notice="$(cat "$TEST_TMP_DIR/oversize-notice" 2>/dev/null || true)"
+if [[ $rc -eq 0 ]] && [[ "${#output}" -eq 64 ]] &&
+   [[ "$output" == *"truncated to fit context budget"* ]] &&
+   [[ "$event_args" == "codex ${#long_prompt} 64 truncated reviewer council 16" ]] &&
+   [[ "$notice" == "Context budget: summarizer unavailable; truncated codex role=reviewer phase=council"* ]]; then
+    test_pass
+else
+    test_fail "opt-in did not truncate: rc=$rc output_chars=${#output} event='$event_args' notice='$notice'"
+fi
+
+test_case "non-council summarizer-unavailable fallback still truncates"
+rm -f "$TEST_TMP_DIR/oversize-event.args" "$TEST_TMP_DIR/oversize-notice"
+set +e
+output="$(enforce_context_budget "$long_prompt" "reviewer" "codex" "review")"
+rc=$?
+set -e
+event_args="$(cat "$TEST_TMP_DIR/oversize-event.args" 2>/dev/null || true)"
+if [[ $rc -eq 0 ]] && [[ "${#output}" -eq 64 ]] &&
+   [[ "$event_args" == "codex ${#long_prompt} 64 truncated reviewer review 16" ]]; then
+    test_pass
+else
+    test_fail "non-council fallback changed: rc=$rc output_chars=${#output} event='$event_args'"
+fi
+
+test_case "council prompt is still summarized when the summarizer succeeds"
+run_agent_sync() { echo "condensed prompt"; }
+rm -f "$TEST_TMP_DIR/oversize-event.args"
+output="$(enforce_context_budget "$long_prompt" "reviewer" "codex" "council")"
+event_args="$(cat "$TEST_TMP_DIR/oversize-event.args" 2>/dev/null || true)"
+if [[ "$output" == "condensed prompt" ]] &&
+   [[ "$event_args" == "codex ${#long_prompt} 16 summarized reviewer council 16" ]]; then
+    test_pass
+else
+    test_fail "summarized council path changed: output='$output' event='$event_args'"
+fi
+
+test_case "explicit truncate strategy is unaffected for council"
+OCTOPUS_OVERSIZE_STRATEGY=truncate
+rm -f "$TEST_TMP_DIR/oversize-event.args"
+output="$(enforce_context_budget "$long_prompt" "reviewer" "codex" "council")"
+event_args="$(cat "$TEST_TMP_DIR/oversize-event.args" 2>/dev/null || true)"
+if [[ "${#output}" -eq 64 ]] &&
+   [[ "$event_args" == "codex ${#long_prompt} 64 truncated reviewer council 16" ]]; then
+    test_pass
+else
+    test_fail "explicit truncate changed for council: output_chars=${#output} event='$event_args'"
+fi
+unset OCTOPUS_PROVIDERS_CONFIG OCTOPUS_OVERSIZE_STRATEGY
+
 test_summary

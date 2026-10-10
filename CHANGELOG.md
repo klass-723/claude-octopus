@@ -20,9 +20,72 @@
   `0` preserves the shipped quote-sufficiency behavior exactly. Lets a consumer
   that wants the runner's `blind_seats` accounting to match a stricter grounding
   gate opt in without changing the default (sail-cruisey #2970).
+- A background `orchestrate.sh spawn` now prints `TASK_ID=`, `RESULT_FILE=`,
+  `DONE_FILE=` and `RESULT_END_SENTINEL=` lines (absolute paths) before its PID
+  line, which is still the last line. The finished worker also appends
+  `=== OCTOPUS-RESULT-END <task-id> rc=<n> ===` as the final line of its result
+  file. The result file echoes the prompt, so a caller that waited for `VERDICT`
+  matched the prompt text before the provider answered. Wait for the `.done`
+  marker or that sentinel instead. Internal `spawn_agent` callers keep the
+  bare-PID stdout.
 
 ### Fixed
 
+- Council grounding no longer accepts fabricated quotes beside real `path:line`
+  citations (sail-cruisey #2997). The validator only checked that a cited file
+  existed and had that many lines, so an agy seat that quoted invented "source"
+  next to real line refs was `valid-grounded` and met quorum. Each specific
+  quote (a backtick span or fenced block of at least 3 tokens and 20 characters,
+  within about 1500 characters of a resolving citation) must now appear,
+  whitespace-normalized, in a cited file. Quotes are checked near the cited line
+  first and then anywhere in the file. Diff markers, line-number gutters and
+  `...` elisions are handled. When none of a seat's quotes verify, the seat is
+  `blind` (not counted) and its contribution is `invalid-ungrounded`.
+  Unreadable or oversized cited files make a quote unverifiable, never
+  fabricated. Quotes of deleted code are checked against the removed side
+  (and then the added side) of the reviewed diff. The diff comes from any
+  `--context-file` that is a unified diff, plus `git diff
+  ${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}` in the evidence root. With no diff
+  available, a quote the seat says was removed is unverifiable, not
+  fabricated. Each seat in `summary.json` records the result under `grounding`
+  (`quotes_checked`, `quotes_verified`, `quotes_near_line`,
+  `quotes_verified_in_diff_removed`, `quotes_verified_in_diff_added`,
+  `quotes_unverified`, `quotes_unverifiable`,
+  `quotes_unverifiable_claimed_removed`, `diff_sources`, `unverified_samples`). Set
+  `OCTOPUS_COUNCIL_QUOTE_VERIFY=0` to turn the check off.
+
+- `OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1` now really gives each vendor one
+  fail-safe vote and one seat (sail-cruisey #2996). Previously the policy
+  only deduplicated non-chair seats, and several personas share the `chair`
+  label, so the default roster still seated three Claude seats (two chairs and
+  a verifier) for one Claude vote. Chair verdicts were also left out of the
+  tally entirely, so a round where both Claude chairs said REVISE and the
+  Claude verifier said APPROVE reported `quorum.met=true` on the verifier
+  alone. With the policy on: only the first chair seat is kept; at most
+  `OCTOPUS_COUNCIL_SEATS_PER_VENDOR` seats (default 1) are seated per model
+  family; the chair is folded into its vendor's synthesis-capable voter, which
+  then both votes and synthesizes; and an explicit REVISE/BLOCK from a chair
+  seat makes its vendor non-approving. A chair still never adds an approval
+  (#670). `summary.json` now records `quorum.vendor_votes` (each vendor's
+  vote, whether it split, the reason, and its seats), a `counted_in_vote` and
+  `verdict_explicit` flag on each seat, and a top-level `seating` block. With
+  the policy off, behavior is unchanged.
+- Council seats no longer review a silently truncated prompt. When a council
+  prompt exceeds the seat's context budget and the summarizer is unavailable,
+  dispatch now fails with exit 78 and an ERROR telling the lead to split the
+  diff per file (`git diff -- <paths>` chunks) and re-dispatch, instead of
+  cutting the artifact's tail while seats still vote. Set
+  `OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1` to restore the old fallback. Successful
+  summarization, explicit `OCTOPUS_OVERSIZE_STRATEGY=truncate`, and non-council
+  phases are unchanged.
+- A background `spawn` worker whose provider exits 0 with an empty or
+  whitespace-only output body now exits 1, writes `1` to its completion marker,
+  records `## Status: FAILED (Empty output)`, and logs an ERROR naming the
+  provider and task id. Previously the result said FAILED while the worker and
+  marker reported success. A Codex answer that reached stderr is still recovered
+  only when the transcript ends in a non-empty `codex` message; the bare
+  `tokens used` trailer Codex always prints no longer counts. Tangle implementers,
+  which deliver through the worktree, keep their existing handling.
 - Council proximity grounding continues its bounded scan when a duplicate quote
   matches before the named source file, preserving valid evidence in either
   traversal order.

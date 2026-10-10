@@ -382,17 +382,68 @@ octopus_tangle_execution_boundary_probe() {
     esac
 }
 
+# Absolute path of a spawned worker's completion marker. The worker writes its
+# exit code here (atomically) when it finishes; callers that only have the
+# `orchestrate.sh spawn` stdout get this path from its DONE_FILE= line.
+octopus_spawn_done_marker_path() {
+    local marker_task_id="$1"
+    local done_dir="${WORKSPACE_DIR:-${HOME}/.claude-octopus}/.octo/agents"
+    # The worker runs from PROJECT_ROOT, so a relative workspace resolves there.
+    [[ "$done_dir" == /* ]] || done_dir="${PROJECT_ROOT:-$PWD}/${done_dir}"
+    printf '%s/%s.done\n' "$done_dir" "$marker_task_id"
+}
+
+# The last line a finished worker appends to its result file. The result file
+# also holds the echoed prompt, so a caller polling it for "VERDICT" (or any
+# other word the prompt itself contains) can fire before the provider has
+# answered. Wait for this exact line, or for the .done marker, instead. The
+# task id is generated at spawn time, so a prompt cannot contain the line in
+# advance.
+octopus_spawn_result_sentinel() {
+    local sentinel_task_id="$1" sentinel_rc="${2:-0}"
+    printf '=== OCTOPUS-RESULT-END %s rc=%s ===\n' "$sentinel_task_id" "$sentinel_rc"
+}
+
 octopus_tangle_write_completion_marker() {
     local marker_task_id="$1" marker_exit="${2:-0}"
-    local done_dir="${WORKSPACE_DIR:-${HOME}/.claude-octopus}/.octo/agents"
-    local done_tmp="${done_dir}/${marker_task_id}.done.tmp.$$"
-    local done_file="${done_dir}/${marker_task_id}.done"
+    local done_file
+    done_file="$(octopus_spawn_done_marker_path "$marker_task_id")"
+    local done_dir="${done_file%/*}"
+    local done_tmp="${done_file}.tmp.$$"
     if ! mkdir -p "$done_dir" 2>/dev/null \
         || ! { printf '%s\n' "$marker_exit" > "$done_tmp" && mv -f "$done_tmp" "$done_file"; } 2>/dev/null; then
         log WARN "Failed to write completion marker for $marker_task_id (exit=$marker_exit)"
         rm -f "$done_tmp" 2>/dev/null || true
         return 1
     fi
+    return 0
+}
+
+# Print a failure reason and succeed when a provider exited 0 but its captured
+# output body is empty or whitespace-only, with nothing recoverable in its
+# place. Returns 1 (no reason printed) when the body is usable.
+#
+# Exemptions:
+# - Tangle implementers deliver through the worktree, so empty stdout is not
+#   by itself a failed run; their existing status handling is unchanged.
+# - Codex may emit its answer on stderr only. That counts when stderr carries an
+#   Octopus completion marker or a non-empty final "codex" message; the bare
+#   "tokens used" trailer codex always prints does not.
+octo_spawn_empty_output_reason() {
+    local output_file="$1" agent_type="${2:-}" stderr_file="${3:-}" role="${4:-}" phase="${5:-}"
+    grep -q '[^[:space:]]' "$output_file" 2>/dev/null && return 1
+    if [[ "$phase" == "tangle" && ( "$role" == "implementer" || "$role" == "implementer-heavy" ) ]]; then
+        return 1
+    fi
+    if [[ "$agent_type" == codex* && -n "$stderr_file" && -s "$stderr_file" ]]; then
+        grep -qE '^# Completed:|^## Worktree Changes$|^## Integration Evidence$|^## Verification$' \
+            "$stderr_file" 2>/dev/null && return 1
+        if type octo_file_has_codex_final_message >/dev/null 2>&1 && \
+           octo_file_has_codex_final_message "$stderr_file"; then
+            return 1
+        fi
+    fi
+    printf '%s\n' "Empty output"
     return 0
 }
 
@@ -1507,6 +1558,7 @@ ${heuristic_ctx}"
         _untrusted_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || _untrusted_nonce=""
         if [[ ! "$_untrusted_nonce" =~ $_nonce_pattern ]]; then
             printf '## Output\n```\n(no provider launched)\n```\n## Status: FAILED (Unable to generate result nonce)\n' >> "$result_file"
+            octopus_spawn_result_sentinel "$task_id" 74 >> "$result_file"
             octo_spawn_contract_finish "$_contract_seat_id" failed "$result_file" "" \
                 "Unable to generate result nonce" 74 "" >/dev/null 2>&1 || true
             [[ -n "$metrics_id" ]] && record_agent_failure "$metrics_id" 0 \
@@ -1728,7 +1780,12 @@ ${heuristic_ctx}"
                     -e '^Run /mcp' \
                     "$temp_output" >> "$result_file" 2>/dev/null || cat "$temp_output" >> "$result_file"
             fi
-            if [[ "$agent_type" == codex* ]] \
+            # An exit-0 run with an empty/whitespace-only body is a failure,
+            # not a silent success: callers read the body as the answer.
+            local _octo_empty_output_reason=""
+            _octo_empty_output_reason="$(octo_spawn_empty_output_reason "$temp_output" \
+                "$agent_type" "$temp_errors" "${role:-}" "${phase:-}")" || _octo_empty_output_reason=""
+            if [[ -z "$_octo_empty_output_reason" && "$agent_type" == codex* ]] \
                 && ! grep -q '[[:alnum:]]' "$temp_output" 2>/dev/null \
                 && type octo_file_has_codex_recoverable_stderr >/dev/null 2>&1 \
                 && octo_file_has_codex_recoverable_stderr "$temp_errors"; then
@@ -1758,6 +1815,11 @@ ${heuristic_ctx}"
             _classification=$(classify_agent_output "$temp_output" "$exit_code" "$agent_type" "$temp_errors" 2>/dev/null || echo "ok:")
             _octo_success_status="${_classification%%:*}"
             _octo_success_reason="${_classification#*:}"
+            if [[ -n "$_octo_empty_output_reason" ]]; then
+                _octo_success_status="failed"
+                _octo_success_reason="$_octo_empty_output_reason"
+                log "ERROR" "Agent $agent_type (task $task_id) exited 0 but returned an empty output body; treating as failure (result: $result_file)"
+            fi
             _octo_tokens_out=$(octo_estimate_tokens_for_file "$temp_output" 2>/dev/null || echo 0)
 
             # v8.6.0: Preserve native metrics block for batch completion
@@ -1823,6 +1885,9 @@ ${heuristic_ctx}"
                 record_outcome "$agent_type" "$agent_type" "${task_type:-unknown}" "${phase:-unknown}" "fail" "$elapsed_ms" 2>/dev/null || true
                 type record_failure &>/dev/null && record_failure "$provider_prefix" "provider_rejection" 2>/dev/null || true
                 type write_agent_status >/dev/null 2>&1 && write_agent_status "$agent_type" "failed" "$tokens_in" "$_octo_tokens_out" "${_octo_success_reason:-unusable output}" "$elapsed_ms" "$result_file" "${role:-none}" || true
+                # Surface an empty body to wait/marker-based callers as a
+                # non-zero exit, not only as a status line in the result file.
+                [[ -n "$_octo_empty_output_reason" ]] && exit_code=1
                 octo_spawn_contract_finish "$_contract_seat_id" failed "$result_file" "$temp_errors" \
                     "${_octo_success_reason:-Provider returned unusable output}" "$exit_code" "$elapsed_ms" >/dev/null 2>&1 || true
             else
@@ -2092,7 +2157,12 @@ ${heuristic_ctx}"
             rm -f "$raw_output"  # Clean up if result looks good
         fi
 
+        local _spawn_exit="${exit_code:-0}"
         echo "# Completed: $(date)" >> "$result_file"
+        # Completion sentinel: always the final line, written before the hash
+        # so integrity verification covers it. Callers wait for this line or
+        # the .done marker, never for words the echoed prompt may contain.
+        octopus_spawn_result_sentinel "$task_id" "$_spawn_exit" >> "$result_file"
 
         # v8.7.0: Record result hash for integrity verification
         record_result_hash "$result_file"
@@ -2102,7 +2172,6 @@ ${heuristic_ctx}"
 
         # Write completion marker — used by tangle_develop to detect thread end
         # without relying on kill -0 (which tracks wrapper PID, not provider PID)
-        local _spawn_exit="${exit_code:-0}"
         octopus_tangle_write_completion_marker "$task_id" "$_spawn_exit" || true
 
         local _hook_final_status="failed"
@@ -2157,6 +2226,18 @@ ${heuristic_ctx}"
     # on exit. Parent-side registration can race with a fast worker's exit.
 
     log INFO "Agent spawned with PID: $pid"
+    # `orchestrate.sh spawn` sets this (unexported) flag so its caller learns
+    # where the answer lands. Internal callers keep the bare-PID stdout, and
+    # the PID stays the LAST line either way (consultative-advisors.sh and
+    # spawn_agent_capture_pid read the final numeric line).
+    if [[ "${_OCTOPUS_SPAWN_ANNOUNCE_PATHS:-}" == "1" ]]; then
+        local _announce_result="$result_file"
+        [[ "$_announce_result" == /* ]] || _announce_result="${PROJECT_ROOT:-$PWD}/${_announce_result}"
+        printf 'TASK_ID=%s\n' "$task_id"
+        printf 'RESULT_FILE=%s\n' "$_announce_result"
+        printf 'DONE_FILE=%s\n' "$(octopus_spawn_done_marker_path "$task_id")"
+        printf 'RESULT_END_SENTINEL=%s\n' "$(octopus_spawn_result_sentinel "$task_id" '<rc>')"
+    fi
     echo "$pid"
 }
 

@@ -68,6 +68,9 @@ COUNCIL_DIVERSITY_REPLACED=""
 COUNCIL_DIVERSITY_WARNING=""
 COUNCIL_TIMEOUT_WARNINGS=""
 COUNCIL_BLIND_SEATS=""
+COUNCIL_VENDOR_VOTES_JSON=""
+COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+COUNCIL_SEATING_DROPPED_SEATS=""
 COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE=""
 COUNCIL_BENCHMARK_FRESHNESS_WEIGHT=""
 COUNCIL_COST_CHECK_ESTIMATED=""
@@ -173,6 +176,9 @@ council_reset_defaults() {
     COUNCIL_CHAIR_HOST_NATIVE="false"
     COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
     COUNCIL_BLIND_SEATS=""
+    COUNCIL_VENDOR_VOTES_JSON='[]'
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_DROPPED_SEATS="0"
     COUNCIL_CHAIR_FALLBACK_USED="false"
     COUNCIL_CHAIR_FALLBACK_PERSONA=""
     COUNCIL_IMPLEMENTATION_PLAN_WRITTEN="false"
@@ -1292,6 +1298,8 @@ council_build_roster() {
     COUNCIL_ROSTER_JSON='[]'
     COUNCIL_DIVERSITY_REPLACED="false"
     COUNCIL_DIVERSITY_WARNING=""
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_DROPPED_SEATS="0"
 
     council_add_roster_persona "strategy-analyst"
 
@@ -1350,18 +1358,77 @@ council_dedup_vendor_seats() {
     # layer does not. It is a seating-policy preference, so it stays off unless
     # explicitly enabled with OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1.
     #
-    # When enabled: keep the highest-scoring non-chair seat per model family; chair
-    # (synthesis) seats are never touched. Default (unset/anything but 1) preserves
-    # today's roster exactly.
-    [[ "${OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR:-}" == "1" ]] || return 0
-    COUNCIL_ROSTER_JSON="$(jq -c '
+    # When enabled, seat at most N seats per model family, where N is
+    # OCTOPUS_COUNCIL_SEATS_PER_VENDOR (default 1; explicit opt-in for more):
+    #   1. Keep only the FIRST chair seat. Several personas map to the "chair"
+    #      label (strategy-analyst, research-synthesizer, ...), so the default
+    #      roster seated TWO same-vendor chairs that were dispatched and paid for
+    #      but excluded from the vote — sail-cruisey #2996 ran three Claude seats
+    #      per round for one Claude vote.
+    #   2. Keep the N highest-scoring non-chair (voting) seats per model family.
+    #   3. Fold the chair into its own family's voter when keeping both would
+    #      exceed N: the dedicated chair seat is dropped and the family's
+    #      highest-scoring synthesis-capable voter is marked `synthesizer:true`, so
+    #      it votes AND satisfies the chair contract (its substantive advice is the
+    #      chair response; council_chair_member_json picks it for synthesis). With
+    #      no synthesis-capable voter in that family the chair is kept (the
+    #      synthesis contract wins over the seat cap).
+    # Default (unset/anything but 1) preserves today's roster exactly.
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_DROPPED_SEATS="0"
+    council_one_vote_per_vendor_enabled || return 0
+    local cap before after
+    cap="$(council_seats_per_vendor)"
+    before="$(jq 'length' <<< "$COUNCIL_ROSTER_JSON")"
+    COUNCIL_ROSTER_JSON="$(jq -c --argjson cap "$cap" '
         [ to_entries[] ] as $e
-        | ( [ $e[] | select(.value.seat == "chair") ] ) as $chairs
+        | ( [ $e[] | select(.value.seat == "chair") ] | .[0:1] ) as $chairs
         | ( [ $e[] | select(.value.seat != "chair") ]
             | group_by(.value.model_family)
-            | map( max_by( .value.score | tonumber? // 0 ) ) ) as $voters
+            # sort ascending then reverse keeps max_by tie-breaking (last wins).
+            | map( sort_by( .value.score | tonumber? // 0 ) | reverse | .[0:$cap] )
+            | add // [] ) as $voters
         | ( $chairs + $voters ) | sort_by(.key) | map(.value)
     ' <<< "$COUNCIL_ROSTER_JSON")"
+    council_fold_chair_into_vendor_voter "$cap"
+    after="$(jq 'length' <<< "$COUNCIL_ROSTER_JSON")"
+    COUNCIL_SEATING_DROPPED_SEATS="$(( before - after ))"
+}
+
+council_one_vote_per_vendor_enabled() {
+    [[ "${OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR:-}" == "1" ]]
+}
+
+council_seats_per_vendor() {
+    # Max seats (chair included) per model family under one-vote-per-vendor.
+    # Positive integers only; anything else falls back to the default of 1.
+    local n="${OCTOPUS_COUNCIL_SEATS_PER_VENDOR:-1}"
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
+    printf '%s' "$n"
+}
+
+council_fold_chair_into_vendor_voter() {
+    local cap="$1" chair_family voter_count candidate idx persona
+    chair_family="$(jq -r 'map(select(.seat == "chair"))[0].model_family // ""' <<< "$COUNCIL_ROSTER_JSON")"
+    [[ -n "$chair_family" ]] || return 0
+    voter_count="$(jq --arg f "$chair_family" '[.[] | select(.seat != "chair" and .model_family == $f)] | length' <<< "$COUNCIL_ROSTER_JSON")"
+    (( voter_count >= 1 && voter_count + 1 > cap )) || return 0
+    candidate=""
+    while IFS=$'\t' read -r idx persona; do
+        [[ -n "$idx" ]] || continue
+        if council_synthesis_capable_persona "$persona"; then
+            candidate="$idx"
+            break
+        fi
+    done < <(jq -r --arg f "$chair_family" '
+        to_entries
+        | map(select(.value.seat != "chair" and .value.model_family == $f))
+        | sort_by(.value.score | tonumber? // 0) | reverse
+        | .[] | [(.key | tostring), .value.persona] | @tsv' <<< "$COUNCIL_ROSTER_JSON")
+    [[ -n "$candidate" ]] || return 0
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO="$(jq -r --argjson i "$candidate" '.[$i].persona' <<< "$COUNCIL_ROSTER_JSON")"
+    COUNCIL_ROSTER_JSON="$(jq -c --argjson i "$candidate" '
+        (.[$i].synthesizer = true) | map(select(.seat != "chair"))' <<< "$COUNCIL_ROSTER_JSON")"
 }
 
 council_required_non_chair() {
@@ -2430,6 +2497,16 @@ council_response_is_blind() {
         return 0
     fi
 
+    # Fabricated grounding (sail-cruisey #2997): the seat pairs real path:line
+    # citations with quoted "source" that appears in none of the cited files. A
+    # real citation token is not evidence of reading when the code it quotes is
+    # invented, so this overrides the citation exemptions below. Seats that quote
+    # nothing beside their citations, or whose cited files are unreadable, are
+    # unaffected.
+    if council_response_quotes_fabricated "$f" "$evidence_root"; then
+        return 0
+    fi
+
     # A softer evasion: the seat never admits an access failure, but its verdict
     # rests entirely on the task summary / prior rounds / a clean test suite
     # rather than on reading the artifact, and it cites no real source location.
@@ -2740,6 +2817,350 @@ print(json.dumps(validated, separators=(",", ":")))
 PY
 }
 
+COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"diff_sources":[],"fabricated":false,"unverified_samples":[]}'
+
+council_response_quote_verification_json() {
+    # Verify the code a seat QUOTES next to its `path:line` citations (sail-cruisey
+    # #2997). council_response_evidence_paths_json only proves a cited file exists
+    # and has that many lines; a seat that invents the "source" it quotes beside a
+    # real path:line still passed as valid-grounded. Here every backtick span or
+    # fenced block within QUOTE_PROXIMITY chars of a resolving citation, and long
+    # enough to be specific (the sail-cruisey hook's floor: >=3 tokens and >=20
+    # normalized chars), must appear whitespace-normalized in a cited file. A match
+    # within NEAR_LINES of the cited line is also reported. A quote whose candidate
+    # files cannot be read is unverifiable, never failed. Prints one JSON object;
+    # "fabricated" is true only when at least one quote was checked, none verified,
+    # and at least one definitively failed.
+    local response_path="$1" evidence_root="$2"
+    local empty="$COUNCIL_EMPTY_GROUNDING_JSON"
+    [[ -f "$response_path" && -n "$evidence_root" && -d "$evidence_root" ]] || { printf '%s\n' "$empty"; return 0; }
+    command -v python3 >/dev/null 2>&1 || { printf '%s\n' "$empty"; return 0; }
+    # Diff sources for quotes of REMOVED (or not-yet-on-disk added) code: every
+    # --context-file that looks like a unified diff, plus `git diff` of the
+    # evidence root against OCTOPUS_COUNCIL_DIFF_BASE (default HEAD, i.e. the
+    # uncommitted working-tree change). Passed as trailing argv entries.
+    local -a diff_context_files=()
+    local ctx
+    for ctx in ${COUNCIL_CONTEXT_FILES[@]+"${COUNCIL_CONTEXT_FILES[@]}"}; do
+        [[ -f "$ctx" && -r "$ctx" ]] && diff_context_files+=("$ctx")
+    done
+    # Source evidence is data; never import project-local Python modules.
+    OCTOPUS_COUNCIL_DIFF_BASE="${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}" \
+    python3 -I - "$response_path" "$evidence_root" ${diff_context_files[@]+"${diff_context_files[@]}"} <<'PY' 2>/dev/null || printf '%s\n' "$empty"
+import json
+import os
+import re
+import subprocess
+import sys
+from bisect import bisect_right
+from pathlib import Path
+
+MAX_RESPONSE_BYTES = 1_048_576
+MAX_FILE_BYTES = 1_500_000
+MAX_DIFF_BYTES = 8_388_608
+MAX_UNITS = 256
+QUOTE_PROXIMITY = 1500
+REMOVAL_WINDOW = 200
+NEAR_LINES = 40
+MIN_TOKENS = 3
+MIN_CHARS = 20
+
+result = {"citations": 0, "quotes_checked": 0, "quotes_verified": 0, "quotes_near_line": 0,
+          "quotes_verified_in_diff_removed": 0, "quotes_verified_in_diff_added": 0,
+          "quotes_unverified": 0, "quotes_unverifiable": 0,
+          "quotes_unverifiable_claimed_removed": 0, "diff_sources": [],
+          "fabricated": False, "unverified_samples": []}
+
+def emit():
+    print(json.dumps(result, separators=(",", ":")))
+    sys.exit(0)
+
+try:
+    with open(sys.argv[1], "rb") as handle:
+        raw = handle.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        emit()
+    resp = raw.decode("utf-8", "replace")
+    root = Path(sys.argv[2]).resolve(strict=True)
+except (OSError, RuntimeError, ValueError):
+    emit()
+
+def norm(text):
+    return re.sub(r"\s+", " ", text).strip()
+
+def specific(text):
+    text = norm(text)
+    return len(text) >= MIN_CHARS and len(text.split(" ")) >= MIN_TOKENS
+
+# Same citation grammar as council_response_evidence_paths_json, plus offsets.
+CITATION = re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.[A-Za-z][A-Za-z0-9]*)\s*:\s*([0-9]+)(?:-([0-9]+))?(?![A-Za-z0-9_/-]|\.(?:[A-Za-z0-9_/-]|\.))")
+citations = []
+for match in CITATION.finditer(resp):
+    relative = Path(match.group(1).strip())
+    if relative.is_absolute() or ".." in relative.parts:
+        continue
+    try:
+        candidate = (root / relative).resolve(strict=True)
+        candidate.relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        continue
+    if not candidate.is_file():
+        continue
+    citations.append((match.start(), match.end(), candidate, int(match.group(2))))
+result["citations"] = len(citations)
+if not citations:
+    emit()
+
+# Quote units: fenced blocks (whole block, plus each line, as alternatives) and
+# inline backtick spans outside fences. Markdown fences/backticks are stripped by
+# construction; diff-shaped fences drop removed lines (absent from the working
+# tree) and the leading "+" of added lines; a "12: "/"12 | " line-number gutter
+# is tried with and without.
+units = []
+fence_ranges = []
+GUTTER = re.compile(r"^\s*\d+\s*[:|]\s?")
+for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
+    fence_ranges.append((match.start(), match.end()))
+    info = match.group(1).strip().lower()
+    lines = match.group(2).split("\n")
+    diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
+    kept, removed_kept = [], []
+    for line in lines:
+        if diff_like:
+            if line.startswith(("@@", "+++ ", "--- ")):
+                continue
+            if line.startswith("-"):
+                # Removed code: verifiable only against the diff's removed side.
+                if line[1:].strip():
+                    removed_kept.append(line[1:])
+                continue
+            if line.startswith("+"):
+                line = line[1:]
+        if line.strip():
+            kept.append(line)
+    def expand(block):
+        out = []
+        whole = " ".join(l.strip() for l in block)
+        if whole:
+            out.append(whole)
+            unguttered = " ".join(GUTTER.sub("", l).strip() for l in block)
+            if unguttered != whole:
+                out.append(unguttered)
+        for line in block:
+            out.append(line.strip())
+            stripped = GUTTER.sub("", line).strip()
+            if stripped != line.strip():
+                out.append(stripped)
+        return out
+    units.append((match.start(), match.end(), expand(kept), expand(removed_kept)))
+for match in re.finditer(r"`([^`\n]+)`", resp):
+    if any(match.start() < end and match.end() > start for start, end in fence_ranges):
+        continue
+    units.append((match.start(), match.end(), [match.group(1).strip()], []))
+
+def checkable(text):
+    # A quoted citation or a bare path is not a code quote.
+    if CITATION.search(text):
+        return False
+    if " " not in norm(text) and "/" in text:
+        return False
+    return specific(text)
+
+file_cache = {}
+def load(path):
+    if path in file_cache:
+        return file_cache[path]
+    entry = None
+    try:
+        if path.stat().st_size <= MAX_FILE_BYTES:
+            data = path.read_bytes().decode("utf-8", "replace")
+            starts, parts, pos = [], [], 0
+            for line in data.split("\n"):
+                piece = norm(line)
+                if not piece:
+                    continue
+                starts.append(pos)
+                parts.append(piece)
+                pos += len(piece) + 1
+            entry = (" ".join(parts), starts, [i for i, l in enumerate(data.split("\n"), 1) if norm(l)])
+    except (OSError, ValueError):
+        entry = None
+    file_cache[path] = entry
+    return entry
+
+ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
+def find_lines(hay, starts, line_numbers, needle, limit=50):
+    found, at = [], hay.find(needle)
+    while at >= 0 and len(found) < limit:
+        found.append(line_numbers[bisect_right(starts, at) - 1] if starts else 1)
+        at = hay.find(needle, at + 1)
+    return found
+
+def match_variant(text, entry):
+    hay, starts, line_numbers = entry
+    needle = norm(text)
+    lines = find_lines(hay, starts, line_numbers, needle)
+    if lines:
+        return lines
+    # An elided quote ("a(...) ... b") verifies when every specific piece does.
+    pieces = [p for p in ELLIPSIS.split(needle) if specific(p)]
+    if len(pieces) > 1 or (pieces and pieces[0] != needle):
+        piece_lines = [find_lines(hay, starts, line_numbers, p) for p in pieces]
+        if all(piece_lines):
+            return piece_lines[0]
+    return []
+
+all_cited = []
+for _, _, path, _ in citations:
+    if path not in all_cited:
+        all_cited.append(path)
+
+# Removed/added sides of the reviewed diff. Reviewers routinely quote deleted
+# code ("this guard was removed"); that code is in no working-tree file, so it
+# is checked here instead of being reported as fabricated. Loaded lazily, only
+# when a quote fails against the cited files.
+DIFF_HEADER = re.compile(r"^(@@ |diff --git |\+\+\+ |--- )", re.M)
+diff_sides = None
+def split_diff(text):
+    removed, added = [], []
+    for line in text.split("\n"):
+        if line.startswith(("+++ ", "--- ")):
+            continue
+        if line.startswith("-"):
+            piece = norm(line[1:])
+            if piece:
+                removed.append(piece)
+        elif line.startswith("+"):
+            piece = norm(line[1:])
+            if piece:
+                added.append(piece)
+    return removed, added
+
+def load_diff_sides():
+    removed, added = [], []
+    for name in sys.argv[3:]:
+        try:
+            with open(name, "rb") as handle:
+                data = handle.read(MAX_DIFF_BYTES).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not DIFF_HEADER.search(data):
+            continue  # a plan or prose artifact; its "- " bullets are not removed code
+        r, a = split_diff(data)
+        removed += r
+        added += a
+        result["diff_sources"].append("context-file")
+    base = os.environ.get("OCTOPUS_COUNCIL_DIFF_BASE", "HEAD") or "HEAD"
+    if re.fullmatch(r"[A-Za-z0-9._/@^~-]{1,200}", base) and not base.startswith("-"):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0")
+        try:
+            proc = subprocess.run(["git", "-C", str(root), "diff", "--no-color", "--no-ext-diff",
+                                   "--unified=0", base, "--"],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
+            if proc.returncode == 0 and proc.stdout:
+                r, a = split_diff(proc.stdout[:MAX_DIFF_BYTES].decode("utf-8", "replace"))
+                if r or a:
+                    removed += r
+                    added += a
+                    result["diff_sources"].append("git-diff:" + base)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Joined so a multi-line quote of consecutive diff lines still matches.
+    return (" ".join(removed), " ".join(added))
+
+def in_diff_side(variants, side):
+    if not side:
+        return False
+    for variant in variants:
+        needle = norm(variant)
+        if needle in side:
+            return True
+        pieces = [p for p in ELLIPSIS.split(needle) if specific(p)]
+        if (len(pieces) > 1 or (pieces and pieces[0] != needle)) and all(p in side for p in pieces):
+            return True
+    return False
+
+REMOVAL_WORDS = re.compile(r"\b(remov(?:e|ed|es|ing|al)|delet(?:e|ed|es|ing|ion)|drop(?:ped|s)?|no longer|was gone|got rid of)\b", re.I)
+
+for start, end, variants, removed_variants in units[:MAX_UNITS]:
+    variants = [v for v in variants if checkable(v)]
+    removed_variants = [v for v in removed_variants if checkable(v)]
+    if not variants and not removed_variants:
+        continue
+    bound = [(path, line) for c_start, c_end, path, line in citations
+             if c_start <= end + QUOTE_PROXIMITY and c_end >= start - QUOTE_PROXIMITY]
+    if not bound:
+        continue
+    result["quotes_checked"] += 1
+    bound_paths = []
+    for path, _ in bound:
+        if path not in bound_paths:
+            bound_paths.append(path)
+    readable = False
+    verified = near = False
+    for path in bound_paths + [p for p in all_cited if p not in bound_paths]:
+        entry = load(path)
+        if entry is None:
+            continue
+        readable = True
+        for variant in variants:
+            lines = match_variant(variant, entry)
+            if not lines:
+                continue
+            verified = True
+            cited_lines = [line for p, line in bound if p == path]
+            if any(abs(found - cited) <= NEAR_LINES for found in lines for cited in cited_lines):
+                near = True
+                break
+        if verified:
+            break
+    diff_side_hit = None
+    if not verified:
+        if diff_sides is None:
+            diff_sides = load_diff_sides()
+        removed_side, added_side = diff_sides
+        if in_diff_side(variants + removed_variants, removed_side):
+            diff_side_hit = "removed"
+        elif in_diff_side(variants, added_side):
+            diff_side_hit = "added"
+    if verified:
+        result["quotes_verified"] += 1
+        if near:
+            result["quotes_near_line"] += 1
+    elif diff_side_hit:
+        result["quotes_verified"] += 1
+        result["quotes_verified_in_diff_" + diff_side_hit] += 1
+    elif not diff_sides[0] and not diff_sides[1] and (
+            removed_variants or REMOVAL_WORDS.search(resp[max(0, start - REMOVAL_WINDOW):end + REMOVAL_WINDOW])):
+        # No diff to check a claimed removal against: unverifiable, not fabricated.
+        result["quotes_unverifiable"] += 1
+        result["quotes_unverifiable_claimed_removed"] += 1
+    elif readable:
+        result["quotes_unverified"] += 1
+        if len(result["unverified_samples"]) < 3:
+            result["unverified_samples"].append(norm((variants or removed_variants)[0])[:120])
+    else:
+        result["quotes_unverifiable"] += 1
+
+result["fabricated"] = (result["quotes_unverified"] > 0 and result["quotes_verified"] == 0)
+emit()
+PY
+}
+
+council_response_quotes_fabricated() {
+    # True when a seat quotes code beside its path:line citations and NONE of those
+    # quotes appear in the cited files (council_response_quote_verification_json).
+    # Opt out with OCTOPUS_COUNCIL_QUOTE_VERIFY=0. A precomputed JSON may be passed
+    # as $3 to avoid re-scanning.
+    local f="$1" evidence_root="${2:-}" precomputed="${3:-}"
+    [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]] || return 1
+    [[ -f "$f" && -n "$evidence_root" && -d "$evidence_root" ]] || return 1
+    local report="$precomputed"
+    [[ -n "$report" ]] || report="$(council_response_quote_verification_json "$f" "$evidence_root")"
+    jq -e '.fabricated == true' <<< "$report" >/dev/null 2>&1
+}
+
 council_artifact_digest() {
     local evidence_root="$1" task="${2:-${COUNCIL_TASK:-}}"
     [[ -d "$evidence_root" ]] || return 1
@@ -2818,9 +3239,20 @@ council_contribution_record_json() {
     local response_path="$1" evidence_root="$2" artifact_digest="$3"
     local workspace_digest="$artifact_digest"
     local verdict="" evidence='[]' access_state="unverified" validation_result="invalid-empty"
+    local grounding="$COUNCIL_EMPTY_GROUNDING_JSON"
     if council_response_nonempty "$response_path"; then
         verdict="$(council_response_verdict "$response_path")"
-        if council_response_is_blind "$response_path" "$evidence_root"; then
+        if [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]]; then
+            grounding="$(council_response_quote_verification_json "$response_path" "$evidence_root")"
+            jq -e 'type == "object"' <<< "$grounding" >/dev/null 2>&1 \
+                || grounding="$COUNCIL_EMPTY_GROUNDING_JSON"
+        fi
+        if council_response_quotes_fabricated "$response_path" "$evidence_root" "$grounding"; then
+            # Distinct from invalid-access: the seat did not report an access
+            # failure, its quoted source simply is not in the files it cited.
+            access_state="evidence-rejected"
+            validation_result="invalid-ungrounded"
+        elif council_response_is_blind "$response_path" "$evidence_root"; then
             access_state="failed"
             validation_result="invalid-access"
         elif ! council_response_has_verdict "$response_path"; then
@@ -2850,10 +3282,11 @@ PY
     fi
     jq -cn --arg artifact_digest "$artifact_digest" --arg workspace_digest "$workspace_digest" --arg access_state "$access_state" \
         --arg validation_result "$validation_result" --arg verdict "$verdict" \
-        --argjson evidence_paths "$evidence" \
+        --argjson evidence_paths "$evidence" --argjson grounding "$grounding" \
         '{artifact_digest:$artifact_digest, workspace_digest:$workspace_digest, access_state:$access_state,
           evidence_paths:$evidence_paths, validation_result:$validation_result,
           verdict:(if $verdict=="" then null else $verdict end),
+          grounding:$grounding,
           comprehension_verified:false}'
 }
 
@@ -3052,6 +3485,39 @@ council_compute_approving_providers() {
     printf '%s' "$approving"
 }
 
+council_vendor_votes_json() {
+    # One row per model family seen in the seat records: its single vote
+    # (APPROVE / NOT_APPROVE / NO_VOTE), the reason, and the seats behind it.
+    # Only seats with counted_in_vote=true contribute; a family whose counted
+    # seats disagree is a SPLIT and is NOT_APPROVE (fail-safe).
+    jq -c '
+        map(select((.model_family // "") != ""))
+        | group_by(.model_family)
+        | map(
+            . as $seats
+            | ([ $seats[] | select(.counted_in_vote == true) ]) as $counted
+            | ([ $counted[] | select(.verdict == "APPROVE") ] | length) as $yes
+            | ([ $counted[] | select(.verdict != "APPROVE") ] | length) as $no
+            | {
+                model_family: $seats[0].model_family,
+                providers: ([ $seats[].provider ] | unique),
+                vote: (if ($counted | length) == 0 then "NO_VOTE"
+                       elif $no > 0 then "NOT_APPROVE"
+                       else "APPROVE" end),
+                split: ($yes > 0 and $no > 0),
+                reason: (if ($counted | length) == 0
+                           then "no counted seat (blind, no-response, degenerate, or non-voting chair)"
+                         elif $yes > 0 and $no > 0
+                           then "split: \($yes) APPROVE vs \($no) non-APPROVE among counted seats; fail-safe counts the vendor as not approving"
+                         elif $no > 0
+                           then "all \($no) counted seat(s) did not APPROVE"
+                         else "all \($yes) counted seat(s) APPROVE" end),
+                seats: [ $seats[] | {index, persona, seat, verdict, status,
+                                     counted: (.counted_in_vote == true)} ]
+              })
+    ' <<< "${1:-[]}"
+}
+
 council_rc_is_timeout() {
     # Kill-style exit codes are not unique to our watchdog: providers can return
     # 124, OOM can surface as 137, and an external SIGTERM is 143. Only classify a
@@ -3111,10 +3577,12 @@ council_run_advice_phase() {
     COUNCIL_SEAT_RECORDS_JSON="[]"
     COUNCIL_TIMEOUT_WARNINGS=""
     COUNCIL_BLIND_SEATS=""
+    COUNCIL_VENDOR_VOTES_JSON="[]"
     local dissenting_providers="" dissenting_model_families=""
 
     local index=0 member persona slug output_path seat mprovider mprovider_spec verdict
     local seat_org seat_model seat_model_family resp_bytes seat_status seat_rec dispatch_timeout_provenance
+    local seat_synthesizer verdict_explicit
     local evidence_root="${OCTOPUS_PROJECT_DIR:-${PROJECT_ROOT:-$PWD}}" artifact_digest contribution_json
     [[ -d "$evidence_root" ]] || evidence_root="$PWD"
     artifact_digest="$(council_artifact_digest "$evidence_root" "${COUNCIL_TASK:-}")" || artifact_digest="unavailable"
@@ -3129,9 +3597,10 @@ council_run_advice_phase() {
         seat_model="$(jq -r '.model // ""' <<< "$member")"
         seat_model_family="$(jq -r '.model_family // ""' <<< "$member")"
         [[ -n "$seat_model_family" ]] || seat_model_family="$(council_model_family "$mprovider" "$seat_model")"
+        seat_synthesizer="$(jq -r '.synthesizer // false' <<< "$member")"
         slug="$(council_slug "$persona")"
         output_path="${COUNCIL_RUN_DIR}/responses/$(printf '%02d' "$index")-${slug}.md"
-        verdict=""; seat_status="no-response"; resp_bytes=0
+        verdict=""; verdict_explicit="false"; seat_status="no-response"; resp_bytes=0
         local dispatch_rc=0
         COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE=""
         # Aggregate-deadline stop (#2918): if too little of the run-wide wall-clock
@@ -3149,8 +3618,9 @@ council_run_advice_phase() {
                 --argjson contribution "$contribution_json" \
                 '{index:$idx, persona:$persona, seat:$seat, agent_spec:$agent_spec, provider:$provider, provider_org:$org,
                   model:$model, model_family:$model_family, response_bytes:0, payload_kind:"none",
-                  verdict:null, status:"skipped-deadline", contribution:$contribution,
+                  verdict:null, verdict_explicit:false, status:"skipped-deadline", contribution:$contribution,
                   timeout_provenance:"aggregate-deadline", counted_as_approver:false}')"
+            [[ "$seat_synthesizer" == "true" ]] && seat_rec="$(jq -c '.synthesizer = true' <<< "$seat_rec")"
             COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "$COUNCIL_SEAT_RECORDS_JSON")"
             index=$((index + 1))
             continue
@@ -3170,9 +3640,13 @@ council_run_advice_phase() {
                 && { (( dispatch_rc == 0 )) || council_response_has_verdict "$output_path"; }; then
             COUNCIL_RESPONSES_RECEIVED=$((COUNCIL_RESPONSES_RECEIVED + 1))
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"; [[ -z "$resp_bytes" ]] && resp_bytes=0
-            if [[ "$seat" == "chair" ]]; then
+            # A folded synthesizer voter (one-vote-per-vendor seating) is the
+            # chair's stand-in: its substantive advice satisfies the chair contract
+            # while it still votes as a regular non-chair seat below.
+            if [[ "$seat" == "chair" || "$seat_synthesizer" == "true" ]]; then
                 COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
             fi
+            council_response_has_verdict "$output_path" && verdict_explicit="true"
             # A provider counts toward quorum ONLY via a non-empty, SUBSTANTIVE
             # response (exit 0 alone is not enough — the host self-dispatch stub and
             # empty/degenerate returns review nothing; #2002/#2007/#2003). Record
@@ -3241,15 +3715,19 @@ council_run_advice_phase() {
         seat_rec="$(jq -cn --argjson idx "$index" --arg persona "$persona" --arg seat "$seat" \
             --arg agent_spec "$mprovider_spec" --arg provider "$mprovider" --arg org "$seat_org" --arg model "$seat_model" --arg model_family "$seat_model_family" \
             --argjson bytes "${resp_bytes:-0}" --arg verdict "$verdict" --arg status "$seat_status" \
+            --arg verdict_explicit "$verdict_explicit" \
             --argjson contribution "$contribution_json" \
             --arg timeout_provenance "$dispatch_timeout_provenance" \
             '{index:$idx, persona:$persona, seat:$seat, agent_spec:$agent_spec, provider:$provider, provider_org:$org,
               model:$model, model_family:$model_family, response_bytes:$bytes, payload_kind:"full",
               verdict:(if $verdict=="" then null else $verdict end),
+              verdict_explicit:($verdict_explicit == "true"),
               status:$status,
               contribution:$contribution,
+              grounding:($contribution.grounding // null),
               timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
               counted_as_approver:false}')"
+        [[ "$seat_synthesizer" == "true" ]] && seat_rec="$(jq -c '.synthesizer = true' <<< "$seat_rec")"
         COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "$COUNCIL_SEAT_RECORDS_JSON")"
         index=$((index + 1))
     done < <(jq -c '.[]' <<< "$COUNCIL_ROSTER_JSON")
@@ -3261,6 +3739,29 @@ council_run_advice_phase() {
     local required received_non_chair
     required="$(council_required_non_chair)"
     received_non_chair="$(council_received_non_chair)"
+
+    # One-vote-per-vendor fail-safe (sail-cruisey #2996). With the policy on, a
+    # vendor's ONE vote is APPROVE only if EVERY counted seat of that vendor
+    # approves — and that includes a chair seat that issued an explicit
+    # REVISE/BLOCK. The chair still never ADDS an approval (#670: a chair-only
+    # vendor cannot inflate the approving set), but its explicit dissent now marks
+    # its vendor non-approving, so a split where the chair says REVISE and the
+    # same vendor's verifier says APPROVE no longer passes on the verifier alone
+    # (#2996 CP2 round 2: agy APPROVE + Claude verifier APPROVE was reported met
+    # while both Claude chairs said REVISE). Blind/no-response/degenerate seats and
+    # chairs without an explicit verdict line count neither way.
+    local chair_dissent_rows chair_dissent_provider chair_dissent_family
+    if council_one_vote_per_vendor_enabled; then
+        chair_dissent_rows="$(jq -r '
+            .[] | select(.seat == "chair" and .status == "responded"
+                         and .verdict_explicit == true and .verdict != "APPROVE")
+            | [.provider, (.model_family // "")] | @tsv' <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
+        while IFS=$'\t' read -r chair_dissent_provider chair_dissent_family; do
+            [[ -n "$chair_dissent_provider" ]] || continue
+            dissenting_providers="${dissenting_providers} ${chair_dissent_provider}"
+            [[ -n "$chair_dissent_family" ]] && dissenting_model_families="${dissenting_model_families} ${chair_dissent_family}"
+        done <<< "$chair_dissent_rows"
+    fi
 
     # Quorum is evaluated by model family, while legacy provider metrics remain
     # in summary.json for compatibility and runtime diagnostics. Multiple seats
@@ -3289,6 +3790,18 @@ council_run_advice_phase() {
             | .counted_as_approver = (.seat != "chair"
                 and .status == "responded" and .verdict == "APPROVE"
                 and ($approving_families | contains(" " + $f + " "))))' <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
+
+    # Per-seat counted_in_vote + per-vendor (model family) vote with a reason, so
+    # a same-vendor split is visible in summary.json instead of hidden behind a
+    # single counted_as_approver seat.
+    local ovpv_flag="false"
+    council_one_vote_per_vendor_enabled && ovpv_flag="true"
+    COUNCIL_SEAT_RECORDS_JSON="$(jq -c --argjson ovpv "$ovpv_flag" '
+        map(.counted_in_vote = (.status == "responded"
+            and (.seat != "chair"
+                 or ($ovpv and (.verdict_explicit == true) and .verdict != "APPROVE"))))' \
+        <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
+    COUNCIL_VENDOR_VOTES_JSON="$(council_vendor_votes_json "$COUNCIL_SEAT_RECORDS_JSON")"
 
     # Chair presence: a dispatched chair response OR a host-native chair (which
     # synthesizes in-context and cannot self-dispatch). Gating met on the response
@@ -3414,18 +3927,22 @@ council_run_chair_fallback() {
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"
             [[ -z "$resp_bytes" ]] && resp_bytes=0
             verdict="$(council_response_verdict "$output_path")"
+            local fallback_verdict_explicit="false"
+            council_response_has_verdict "$output_path" && fallback_verdict_explicit="true"
             seat_status="responded"
             contribution_json="$(council_contribution_record_json "$output_path" "$evidence_root" "$artifact_digest")" \
                 || contribution_json="$(council_unavailable_contribution_record_json)"
             seat_rec="$(jq -cn --argjson idx "$index" --arg persona "$persona" \
                 --arg agent_spec "$seat_agent_spec" --arg provider "$(octo_agent_spec_provider "$provider")" --arg org "$seat_org" --arg model "$seat_model" --arg model_family "$seat_model_family" \
                 --argjson bytes "${resp_bytes:-0}" --arg verdict "$verdict" --arg status "$seat_status" \
+                --arg verdict_explicit "$fallback_verdict_explicit" \
                 --argjson contribution "$contribution_json" \
                 --arg timeout_provenance "$dispatch_timeout_provenance" \
                 '{index:$idx, persona:$persona, seat:"chair", agent_spec:$agent_spec, provider:$provider,
                   provider_org:$org, model:$model, model_family:$model_family, response_bytes:$bytes,
                   payload_kind:"full",
                   verdict:(if $verdict=="" then null else $verdict end),
+                  verdict_explicit:($verdict_explicit == "true"),
                   status:$status,
                   contribution:$contribution,
                   timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
@@ -3489,7 +4006,9 @@ council_chair_member_json() {
         return 0
     fi
 
-    member_json="$(jq -c 'map(select(.seat == "chair"))[0] // .[0] // empty' <<< "$COUNCIL_ROSTER_JSON")"
+    # A folded synthesizer voter (one-vote-per-vendor seating) stands in for a
+    # dropped chair seat; prefer it over the positional .[0] fallback.
+    member_json="$(jq -c 'map(select(.seat == "chair"))[0] // map(select(.synthesizer == true))[0] // .[0] // empty' <<< "$COUNCIL_ROSTER_JSON")"
     if [[ -n "$member_json" && "$member_json" != "null" ]]; then
         printf '%s\n' "$member_json"
         return 0
@@ -4221,6 +4740,11 @@ council_write_summary_json() {
         --arg distinct_approving_providers "${COUNCIL_DISTINCT_APPROVING_PROVIDERS:-0}" \
         --arg approving_providers "${COUNCIL_APPROVING_PROVIDERS:-}" \
         --arg blind_seats "${COUNCIL_BLIND_SEATS:-}" \
+        --argjson vendor_votes "${COUNCIL_VENDOR_VOTES_JSON:-[]}" \
+        --arg one_vote_per_vendor "$(council_one_vote_per_vendor_enabled && echo true || echo false)" \
+        --arg seats_per_vendor "$(council_seats_per_vendor)" \
+        --arg chair_folded_into "${COUNCIL_SEATING_CHAIR_FOLDED_INTO:-}" \
+        --arg dropped_seats "${COUNCIL_SEATING_DROPPED_SEATS:-0}" \
         --arg distinct_model_families "${COUNCIL_DISTINCT_MODEL_FAMILIES:-0}" \
         --arg responding_model_families "${COUNCIL_RESPONDING_MODEL_FAMILIES:+${COUNCIL_RESPONDING_MODEL_FAMILIES# }}" \
         --arg distinct_approving_model_families "${COUNCIL_DISTINCT_APPROVING_MODEL_FAMILIES:-0}" \
@@ -4287,7 +4811,15 @@ council_write_summary_json() {
             distinct_approving_model_families: ($distinct_approving_model_families | tonumber),
             approving_model_families: $approving_model_families,
             blind_seats: ($blind_seats | split(" ") | map(select(length > 0))),
+            one_vote_per_vendor: ($one_vote_per_vendor == "true"),
+            vendor_votes: $vendor_votes,
             met: ($quorum_met == "true")
+          },
+          seating: {
+            one_vote_per_vendor: ($one_vote_per_vendor == "true"),
+            seats_per_vendor: (if $one_vote_per_vendor == "true" then ($seats_per_vendor | tonumber) else null end),
+            chair_folded_into: (if $chair_folded_into == "" then null else $chair_folded_into end),
+            dropped_seats: ($dropped_seats | tonumber? // 0)
           },
           providers: $providers,
           execution: {

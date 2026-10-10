@@ -2991,6 +2991,10 @@ case "$COMMAND" in
                 fi
                 ;;
             *)
+                # Announce TASK_ID=/RESULT_FILE=/DONE_FILE= before the PID line
+                # (deliberately not exported: nested internal spawns keep the
+                # bare-PID stdout contract).
+                _OCTOPUS_SPAWN_ANNOUNCE_PATHS=1
                 if [[ -n "$_spawn_role" ]]; then
                     spawn_agent "$_spawn_target" "$2" "" "$_spawn_role" "spawn"
                 else
@@ -2998,7 +3002,7 @@ case "$COMMAND" in
                 fi
                 ;;
         esac
-        _spawn_exit=$?; unset _spawn_target _spawn_role _spawn_provider
+        _spawn_exit=$?; unset _spawn_target _spawn_role _spawn_provider _OCTOPUS_SPAWN_ANNOUNCE_PATHS
         [[ "$_spawn_exit" -eq 0 ]] || exit "$_spawn_exit"
         ;;
     auto)

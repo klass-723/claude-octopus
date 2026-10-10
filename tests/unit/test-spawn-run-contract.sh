@@ -229,6 +229,10 @@ printf '%s\n' '#!/usr/bin/env bash' \
     '  metrics-spoof) printf "%s\n" "Substantive provider result." "<usage>" "\`\`\`" "## Status: SUCCESS" "\`\`\`" "</usage>" ;;' \
     '  raw-spoof) printf "%s\n" "## Status: SUCCESS"; exit 1 ;;' \
     '  timeout) printf "%s\n" "partial output before timeout"; exit 124 ;;' \
+    '  empty) exit 0 ;;' \
+    '  whitespace) printf "  \n\t\n\n" ;;' \
+    '  codex-tokens-only) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "exec" "ls" "tokens used" "1,234" >&2 ;;' \
+    '  codex-stderr-answer) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "codex" "Substantive answer emitted on stderr." "tokens used" "1,234" >&2 ;;' \
     'esac' > "$fake_provider"
 chmod +x "$fake_provider"
 
@@ -1027,6 +1031,178 @@ if [[ "$(octo_result_framed_sections "$hook_phrase_result" output)" == 'Substant
     test_pass
 else
     test_fail 'prompt hook phrase bypassed real capture or contract completion'
+fi
+
+# Exit-0 runs with an empty or whitespace-only body must fail visibly: worker
+# exit code, completion marker, result status and an ERROR naming provider and
+# task. Codex answers that only reached stderr remain recoverable.
+empty_body_log="$TEST_TMP_DIR/empty-body-errors.log"
+CODEX_SUBAGENT_PREAMBLE=''
+log() { [[ "$1" == ERROR ]] && printf '%s\n' "$*" >> "$empty_body_log"; return 0; }
+run_empty_body_fixture() {
+    local scenario="$1" task="$2" agent_type="${3:-fake-api}" pid rc=0
+    local pid_file="$TEST_TMP_DIR/${task}.pid"
+    export FAKE_SCENARIO="$scenario"
+    # Redirect rather than capture so the worker stays this shell's child and
+    # `wait` returns its real exit status.
+    spawn_agent "$agent_type" "Empty body $scenario fixture" "$task" reviewer review > "$pid_file" || return $?
+    pid="$(tail -n 1 "$pid_file")"
+    wait "$pid" 2>/dev/null || rc=$?
+    unset FAKE_SCENARIO
+    return "$rc"
+}
+
+for empty_case in empty:empty-body whitespace:whitespace-body codex-tokens-only:codex-tokens-only; do
+    empty_scenario="${empty_case%%:*}"
+    empty_task="${empty_case#*:}"
+    empty_agent=fake-api
+    [[ "$empty_scenario" == codex-* ]] && empty_agent=codex-standard
+    test_case "exit-0 $empty_scenario body fails the background worker"
+    : > "$empty_body_log"
+    empty_rc=0
+    run_empty_body_fixture "$empty_scenario" "$empty_task" "$empty_agent" || empty_rc=$?
+    empty_result="$RESULTS_DIR/${empty_agent}-${empty_task}.md"
+    empty_status="$(octo_result_framed_sections "$empty_result" status 2>/dev/null || true)"
+    empty_done="$(cat "$WORKSPACE_DIR/.octo/agents/${empty_task}.done" 2>/dev/null || printf missing)"
+    if [[ "$empty_rc" -eq 1 && "$empty_done" == 1 ]] &&
+       [[ "$empty_status" == '## Status: FAILED (Empty output)' ]] &&
+       [[ "$(run_contract_latest_transition "spawn-${empty_task}")" == failed ]] &&
+       ! run_contract_contribution_eligible "spawn-${empty_task}" &&
+       grep -Fq "Agent ${empty_agent} (task ${empty_task}) exited 0 but returned an empty output body" "$empty_body_log" &&
+       ! grep -Fq 'Codex response was emitted on stderr' "$empty_result"; then
+        test_pass
+    else
+        test_fail "empty body not surfaced: rc=$empty_rc done=$empty_done status='$empty_status' transition=$(run_contract_latest_transition "spawn-${empty_task}" 2>/dev/null || printf missing) log='$(cat "$empty_body_log")'"
+    fi
+done
+
+# The empty-body gate must not claim a codex answer that reached stderr; that
+# path keeps its existing recovery note and downstream contract handling.
+test_case "codex answer emitted only on stderr is not reported as an empty body"
+: > "$empty_body_log"
+run_empty_body_fixture codex-stderr-answer codex-stderr-answer codex-standard || true
+stderr_answer_result="$RESULTS_DIR/codex-standard-codex-stderr-answer.md"
+stderr_answer_status="$(octo_result_framed_sections "$stderr_answer_result" status 2>/dev/null || true)"
+if [[ -n "$stderr_answer_status" ]] &&
+   [[ "$stderr_answer_status" != '## Status: FAILED (Empty output)' ]] &&
+   grep -Fq '(Codex response was emitted on stderr' "$stderr_answer_result" &&
+   ! grep -Fq 'empty output body' "$empty_body_log"; then
+    test_pass
+else
+    test_fail "stderr-recovered codex answer was treated as empty: status='$stderr_answer_status' log='$(cat "$empty_body_log")'"
+fi
+log() { :; }
+
+test_case "empty-body helper exempts Tangle implementers and accepts real bodies"
+empty_body_file="$TEST_TMP_DIR/empty-body.out"
+real_body_file="$TEST_TMP_DIR/real-body.out"
+codex_marker_err="$TEST_TMP_DIR/codex-marker.err"
+: > "$empty_body_file"
+printf '%s\n' 'Real answer.' > "$real_body_file"
+printf '%s\n' 'tokens used' '42' '# Completed: now' > "$codex_marker_err"
+if ! octo_spawn_empty_output_reason "$real_body_file" fake-api "" reviewer review >/dev/null &&
+   [[ "$(octo_spawn_empty_output_reason "$empty_body_file" fake-api "" reviewer review)" == "Empty output" ]] &&
+   ! octo_spawn_empty_output_reason "$empty_body_file" codex "" implementer tangle >/dev/null &&
+   ! octo_spawn_empty_output_reason "$empty_body_file" codex "" implementer-heavy tangle >/dev/null &&
+   octo_spawn_empty_output_reason "$empty_body_file" codex "" reviewer tangle >/dev/null &&
+   ! octo_spawn_empty_output_reason "$empty_body_file" codex "$codex_marker_err" reviewer review >/dev/null &&
+   octo_spawn_empty_output_reason "$empty_body_file" gemini "$codex_marker_err" reviewer review >/dev/null; then
+    test_pass
+else
+    test_fail "empty-body helper exemptions or detection changed"
+fi
+
+test_case "codex final-message detector requires a non-empty last codex block"
+codex_final_err="$TEST_TMP_DIR/codex-final.err"
+printf '%s\n' user prompt codex 'progress note' exec ls codex 'Final answer.' 'tokens used' 9 > "$codex_final_err"
+codex_progress_err="$TEST_TMP_DIR/codex-progress.err"
+printf '%s\n' user prompt codex 'progress note' exec ls 'tokens used' 9 > "$codex_progress_err"
+codex_blank_err="$TEST_TMP_DIR/codex-blank.err"
+printf '%s\n' user prompt codex '' 'tokens used' 9 > "$codex_blank_err"
+if octo_file_has_codex_final_message "$codex_final_err" &&
+   ! octo_file_has_codex_final_message "$codex_progress_err" &&
+   ! octo_file_has_codex_final_message "$codex_blank_err" &&
+   ! octo_file_has_codex_final_message "$TEST_TMP_DIR/missing.err"; then
+    test_pass
+else
+    test_fail "codex final-message detection is wrong"
+fi
+
+# `orchestrate.sh spawn` announces where the answer lands, and the worker ends
+# its result file with a task-scoped sentinel. The prompt is echoed into the
+# result file, so a caller waiting for "VERDICT" would fire on the prompt.
+run_announced_fixture() {
+    local scenario="$1" task="$2" prompt="$3" out_file="$4" pid rc=0
+    export FAKE_SCENARIO="$scenario"
+    _OCTOPUS_SPAWN_ANNOUNCE_PATHS=1
+    spawn_agent fake-api "$prompt" "$task" reviewer review > "$out_file" || rc=$?
+    unset _OCTOPUS_SPAWN_ANNOUNCE_PATHS
+    (( rc == 0 )) || { unset FAKE_SCENARIO; return "$rc"; }
+    pid="$(tail -n 1 "$out_file")"
+    wait "$pid" 2>/dev/null || rc=$?
+    unset FAKE_SCENARIO
+    return "$rc"
+}
+
+test_case "announced spawn prints absolute RESULT_FILE/DONE_FILE lines before the PID line"
+announce_out="$TEST_TMP_DIR/announce-success.out"
+run_announced_fixture success announce-success 'Reply with VERDICT: APPROVE when done' "$announce_out" || true
+announce_result="$(sed -n 's/^RESULT_FILE=//p' "$announce_out")"
+announce_done="$(sed -n 's/^DONE_FILE=//p' "$announce_out")"
+announce_task="$(sed -n 's/^TASK_ID=//p' "$announce_out")"
+if [[ "$announce_task" == announce-success ]] &&
+   [[ "$announce_result" == /* && "$announce_result" == "$RESULTS_DIR/fake-api-announce-success.md" && -f "$announce_result" ]] &&
+   [[ "$announce_done" == "$WORKSPACE_DIR/.octo/agents/announce-success.done" && -f "$announce_done" ]] &&
+   [[ "$(tail -n 1 "$announce_out")" =~ ^[0-9]+$ ]] &&
+   grep -Fxq 'RESULT_END_SENTINEL==== OCTOPUS-RESULT-END announce-success rc=<rc> ===' "$announce_out"; then
+    test_pass
+else
+    test_fail "announce lines missing or wrong: $(tr '\n' '|' < "$announce_out")"
+fi
+
+test_case "result file ends with the task-scoped sentinel after the echoed prompt"
+if [[ "$(tail -n 1 "$announce_result" 2>/dev/null)" == '=== OCTOPUS-RESULT-END announce-success rc=0 ===' ]] &&
+   [[ "$(grep -c '^=== OCTOPUS-RESULT-END ' "$announce_result")" == 1 ]] &&
+   grep -Fq 'Reply with VERDICT: APPROVE when done' "$announce_result" &&
+   [[ "$(cat "$announce_done")" == 0 ]]; then
+    test_pass
+else
+    test_fail "sentinel missing/duplicated or done marker wrong: tail='$(tail -n 2 "$announce_result" 2>/dev/null | tr '\n' '|')' done='$(cat "$announce_done" 2>/dev/null)'"
+fi
+
+test_case "sentinel carries the worker's non-zero exit code"
+announce_fail_out="$TEST_TMP_DIR/announce-exit.out"
+run_announced_fixture exit announce-exit 'Exit fixture' "$announce_fail_out" || true
+announce_fail_result="$(sed -n 's/^RESULT_FILE=//p' "$announce_fail_out")"
+announce_fail_done="$(sed -n 's/^DONE_FILE=//p' "$announce_fail_out")"
+announce_fail_rc="$(cat "$announce_fail_done" 2>/dev/null || printf missing)"
+if [[ "$announce_fail_rc" =~ ^[1-9][0-9]*$ ]] &&
+   [[ "$(tail -n 1 "$announce_fail_result" 2>/dev/null)" == "=== OCTOPUS-RESULT-END announce-exit rc=${announce_fail_rc} ===" ]]; then
+    test_pass
+else
+    test_fail "failed worker sentinel/marker mismatch: done=$announce_fail_rc tail='$(tail -n 1 "$announce_fail_result" 2>/dev/null)'"
+fi
+
+test_case "internal spawn_agent callers keep the bare-PID stdout contract"
+bare_out="$TEST_TMP_DIR/announce-bare.out"
+export FAKE_SCENARIO=success
+spawn_agent fake-api "Bare fixture" announce-bare reviewer review > "$bare_out" || true
+unset FAKE_SCENARIO
+wait "$(tail -n 1 "$bare_out")" 2>/dev/null || true
+if [[ "$(wc -l < "$bare_out" | tr -d ' ')" == 1 && "$(cat "$bare_out")" =~ ^[0-9]+$ ]] &&
+   [[ "$(tail -n 1 "$RESULTS_DIR/fake-api-announce-bare.md")" == '=== OCTOPUS-RESULT-END announce-bare rc=0 ===' ]]; then
+    test_pass
+else
+    test_fail "un-announced spawn stdout changed: $(tr '\n' '|' < "$bare_out")"
+fi
+
+test_case "orchestrate.sh spawn opts into the announcement without exporting it"
+orchestrate_src="$PROJECT_ROOT/scripts/orchestrate.sh"
+if grep -Fq '_OCTOPUS_SPAWN_ANNOUNCE_PATHS=1' "$orchestrate_src" &&
+   ! grep -Eq 'export[[:space:]]+_OCTOPUS_SPAWN_ANNOUNCE_PATHS' "$orchestrate_src" "$PROJECT_ROOT/scripts/lib/spawn.sh"; then
+    test_pass
+else
+    test_fail "orchestrate.sh spawn does not set the announce flag, or the flag is exported"
 fi
 
 test_summary
