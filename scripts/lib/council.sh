@@ -68,6 +68,9 @@ COUNCIL_DIVERSITY_REPLACED=""
 COUNCIL_DIVERSITY_WARNING=""
 COUNCIL_TIMEOUT_WARNINGS=""
 COUNCIL_BLIND_SEATS=""
+COUNCIL_VENDOR_VOTES_JSON=""
+COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+COUNCIL_SEATING_DROPPED_SEATS=""
 COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE=""
 COUNCIL_BENCHMARK_FRESHNESS_WEIGHT=""
 COUNCIL_COST_CHECK_ESTIMATED=""
@@ -173,6 +176,9 @@ council_reset_defaults() {
     COUNCIL_CHAIR_HOST_NATIVE="false"
     COUNCIL_CHAIR_SYNTHESIS_AVAILABLE="false"
     COUNCIL_BLIND_SEATS=""
+    COUNCIL_VENDOR_VOTES_JSON='[]'
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_DROPPED_SEATS="0"
     COUNCIL_CHAIR_FALLBACK_USED="false"
     COUNCIL_CHAIR_FALLBACK_PERSONA=""
     COUNCIL_IMPLEMENTATION_PLAN_WRITTEN="false"
@@ -1292,6 +1298,8 @@ council_build_roster() {
     COUNCIL_ROSTER_JSON='[]'
     COUNCIL_DIVERSITY_REPLACED="false"
     COUNCIL_DIVERSITY_WARNING=""
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_DROPPED_SEATS="0"
 
     council_add_roster_persona "strategy-analyst"
 
@@ -1350,18 +1358,77 @@ council_dedup_vendor_seats() {
     # layer does not. It is a seating-policy preference, so it stays off unless
     # explicitly enabled with OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1.
     #
-    # When enabled: keep the highest-scoring non-chair seat per model family; chair
-    # (synthesis) seats are never touched. Default (unset/anything but 1) preserves
-    # today's roster exactly.
-    [[ "${OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR:-}" == "1" ]] || return 0
-    COUNCIL_ROSTER_JSON="$(jq -c '
+    # When enabled, seat at most N seats per model family, where N is
+    # OCTOPUS_COUNCIL_SEATS_PER_VENDOR (default 1; explicit opt-in for more):
+    #   1. Keep only the FIRST chair seat. Several personas map to the "chair"
+    #      label (strategy-analyst, research-synthesizer, ...), so the default
+    #      roster seated TWO same-vendor chairs that were dispatched and paid for
+    #      but excluded from the vote — sail-cruisey #2996 ran three Claude seats
+    #      per round for one Claude vote.
+    #   2. Keep the N highest-scoring non-chair (voting) seats per model family.
+    #   3. Fold the chair into its own family's voter when keeping both would
+    #      exceed N: the dedicated chair seat is dropped and the family's
+    #      highest-scoring synthesis-capable voter is marked `synthesizer:true`, so
+    #      it votes AND satisfies the chair contract (its substantive advice is the
+    #      chair response; council_chair_member_json picks it for synthesis). With
+    #      no synthesis-capable voter in that family the chair is kept (the
+    #      synthesis contract wins over the seat cap).
+    # Default (unset/anything but 1) preserves today's roster exactly.
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_DROPPED_SEATS="0"
+    council_one_vote_per_vendor_enabled || return 0
+    local cap before after
+    cap="$(council_seats_per_vendor)"
+    before="$(jq 'length' <<< "$COUNCIL_ROSTER_JSON")"
+    COUNCIL_ROSTER_JSON="$(jq -c --argjson cap "$cap" '
         [ to_entries[] ] as $e
-        | ( [ $e[] | select(.value.seat == "chair") ] ) as $chairs
+        | ( [ $e[] | select(.value.seat == "chair") ] | .[0:1] ) as $chairs
         | ( [ $e[] | select(.value.seat != "chair") ]
             | group_by(.value.model_family)
-            | map( max_by( .value.score | tonumber? // 0 ) ) ) as $voters
+            # sort ascending then reverse keeps max_by tie-breaking (last wins).
+            | map( sort_by( .value.score | tonumber? // 0 ) | reverse | .[0:$cap] )
+            | add // [] ) as $voters
         | ( $chairs + $voters ) | sort_by(.key) | map(.value)
     ' <<< "$COUNCIL_ROSTER_JSON")"
+    council_fold_chair_into_vendor_voter "$cap"
+    after="$(jq 'length' <<< "$COUNCIL_ROSTER_JSON")"
+    COUNCIL_SEATING_DROPPED_SEATS="$(( before - after ))"
+}
+
+council_one_vote_per_vendor_enabled() {
+    [[ "${OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR:-}" == "1" ]]
+}
+
+council_seats_per_vendor() {
+    # Max seats (chair included) per model family under one-vote-per-vendor.
+    # Positive integers only; anything else falls back to the default of 1.
+    local n="${OCTOPUS_COUNCIL_SEATS_PER_VENDOR:-1}"
+    [[ "$n" =~ ^[1-9][0-9]*$ ]] || n=1
+    printf '%s' "$n"
+}
+
+council_fold_chair_into_vendor_voter() {
+    local cap="$1" chair_family voter_count candidate idx persona
+    chair_family="$(jq -r 'map(select(.seat == "chair"))[0].model_family // ""' <<< "$COUNCIL_ROSTER_JSON")"
+    [[ -n "$chair_family" ]] || return 0
+    voter_count="$(jq --arg f "$chair_family" '[.[] | select(.seat != "chair" and .model_family == $f)] | length' <<< "$COUNCIL_ROSTER_JSON")"
+    (( voter_count >= 1 && voter_count + 1 > cap )) || return 0
+    candidate=""
+    while IFS=$'\t' read -r idx persona; do
+        [[ -n "$idx" ]] || continue
+        if council_synthesis_capable_persona "$persona"; then
+            candidate="$idx"
+            break
+        fi
+    done < <(jq -r --arg f "$chair_family" '
+        to_entries
+        | map(select(.value.seat != "chair" and .value.model_family == $f))
+        | sort_by(.value.score | tonumber? // 0) | reverse
+        | .[] | [(.key | tostring), .value.persona] | @tsv' <<< "$COUNCIL_ROSTER_JSON")
+    [[ -n "$candidate" ]] || return 0
+    COUNCIL_SEATING_CHAIR_FOLDED_INTO="$(jq -r --argjson i "$candidate" '.[$i].persona' <<< "$COUNCIL_ROSTER_JSON")"
+    COUNCIL_ROSTER_JSON="$(jq -c --argjson i "$candidate" '
+        (.[$i].synthesizer = true) | map(select(.seat != "chair"))' <<< "$COUNCIL_ROSTER_JSON")"
 }
 
 council_required_non_chair() {
@@ -3052,6 +3119,39 @@ council_compute_approving_providers() {
     printf '%s' "$approving"
 }
 
+council_vendor_votes_json() {
+    # One row per model family seen in the seat records: its single vote
+    # (APPROVE / NOT_APPROVE / NO_VOTE), the reason, and the seats behind it.
+    # Only seats with counted_in_vote=true contribute; a family whose counted
+    # seats disagree is a SPLIT and is NOT_APPROVE (fail-safe).
+    jq -c '
+        map(select((.model_family // "") != ""))
+        | group_by(.model_family)
+        | map(
+            . as $seats
+            | ([ $seats[] | select(.counted_in_vote == true) ]) as $counted
+            | ([ $counted[] | select(.verdict == "APPROVE") ] | length) as $yes
+            | ([ $counted[] | select(.verdict != "APPROVE") ] | length) as $no
+            | {
+                model_family: $seats[0].model_family,
+                providers: ([ $seats[].provider ] | unique),
+                vote: (if ($counted | length) == 0 then "NO_VOTE"
+                       elif $no > 0 then "NOT_APPROVE"
+                       else "APPROVE" end),
+                split: ($yes > 0 and $no > 0),
+                reason: (if ($counted | length) == 0
+                           then "no counted seat (blind, no-response, degenerate, or non-voting chair)"
+                         elif $yes > 0 and $no > 0
+                           then "split: \($yes) APPROVE vs \($no) non-APPROVE among counted seats; fail-safe counts the vendor as not approving"
+                         elif $no > 0
+                           then "all \($no) counted seat(s) did not APPROVE"
+                         else "all \($yes) counted seat(s) APPROVE" end),
+                seats: [ $seats[] | {index, persona, seat, verdict, status,
+                                     counted: (.counted_in_vote == true)} ]
+              })
+    ' <<< "${1:-[]}"
+}
+
 council_rc_is_timeout() {
     # Kill-style exit codes are not unique to our watchdog: providers can return
     # 124, OOM can surface as 137, and an external SIGTERM is 143. Only classify a
@@ -3111,10 +3211,12 @@ council_run_advice_phase() {
     COUNCIL_SEAT_RECORDS_JSON="[]"
     COUNCIL_TIMEOUT_WARNINGS=""
     COUNCIL_BLIND_SEATS=""
+    COUNCIL_VENDOR_VOTES_JSON="[]"
     local dissenting_providers="" dissenting_model_families=""
 
     local index=0 member persona slug output_path seat mprovider mprovider_spec verdict
     local seat_org seat_model seat_model_family resp_bytes seat_status seat_rec dispatch_timeout_provenance
+    local seat_synthesizer verdict_explicit
     local evidence_root="${OCTOPUS_PROJECT_DIR:-${PROJECT_ROOT:-$PWD}}" artifact_digest contribution_json
     [[ -d "$evidence_root" ]] || evidence_root="$PWD"
     artifact_digest="$(council_artifact_digest "$evidence_root" "${COUNCIL_TASK:-}")" || artifact_digest="unavailable"
@@ -3129,9 +3231,10 @@ council_run_advice_phase() {
         seat_model="$(jq -r '.model // ""' <<< "$member")"
         seat_model_family="$(jq -r '.model_family // ""' <<< "$member")"
         [[ -n "$seat_model_family" ]] || seat_model_family="$(council_model_family "$mprovider" "$seat_model")"
+        seat_synthesizer="$(jq -r '.synthesizer // false' <<< "$member")"
         slug="$(council_slug "$persona")"
         output_path="${COUNCIL_RUN_DIR}/responses/$(printf '%02d' "$index")-${slug}.md"
-        verdict=""; seat_status="no-response"; resp_bytes=0
+        verdict=""; verdict_explicit="false"; seat_status="no-response"; resp_bytes=0
         local dispatch_rc=0
         COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE=""
         # Aggregate-deadline stop (#2918): if too little of the run-wide wall-clock
@@ -3149,8 +3252,9 @@ council_run_advice_phase() {
                 --argjson contribution "$contribution_json" \
                 '{index:$idx, persona:$persona, seat:$seat, agent_spec:$agent_spec, provider:$provider, provider_org:$org,
                   model:$model, model_family:$model_family, response_bytes:0, payload_kind:"none",
-                  verdict:null, status:"skipped-deadline", contribution:$contribution,
+                  verdict:null, verdict_explicit:false, status:"skipped-deadline", contribution:$contribution,
                   timeout_provenance:"aggregate-deadline", counted_as_approver:false}')"
+            [[ "$seat_synthesizer" == "true" ]] && seat_rec="$(jq -c '.synthesizer = true' <<< "$seat_rec")"
             COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "$COUNCIL_SEAT_RECORDS_JSON")"
             index=$((index + 1))
             continue
@@ -3170,9 +3274,13 @@ council_run_advice_phase() {
                 && { (( dispatch_rc == 0 )) || council_response_has_verdict "$output_path"; }; then
             COUNCIL_RESPONSES_RECEIVED=$((COUNCIL_RESPONSES_RECEIVED + 1))
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"; [[ -z "$resp_bytes" ]] && resp_bytes=0
-            if [[ "$seat" == "chair" ]]; then
+            # A folded synthesizer voter (one-vote-per-vendor seating) is the
+            # chair's stand-in: its substantive advice satisfies the chair contract
+            # while it still votes as a regular non-chair seat below.
+            if [[ "$seat" == "chair" || "$seat_synthesizer" == "true" ]]; then
                 COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
             fi
+            council_response_has_verdict "$output_path" && verdict_explicit="true"
             # A provider counts toward quorum ONLY via a non-empty, SUBSTANTIVE
             # response (exit 0 alone is not enough — the host self-dispatch stub and
             # empty/degenerate returns review nothing; #2002/#2007/#2003). Record
@@ -3241,15 +3349,18 @@ council_run_advice_phase() {
         seat_rec="$(jq -cn --argjson idx "$index" --arg persona "$persona" --arg seat "$seat" \
             --arg agent_spec "$mprovider_spec" --arg provider "$mprovider" --arg org "$seat_org" --arg model "$seat_model" --arg model_family "$seat_model_family" \
             --argjson bytes "${resp_bytes:-0}" --arg verdict "$verdict" --arg status "$seat_status" \
+            --arg verdict_explicit "$verdict_explicit" \
             --argjson contribution "$contribution_json" \
             --arg timeout_provenance "$dispatch_timeout_provenance" \
             '{index:$idx, persona:$persona, seat:$seat, agent_spec:$agent_spec, provider:$provider, provider_org:$org,
               model:$model, model_family:$model_family, response_bytes:$bytes, payload_kind:"full",
               verdict:(if $verdict=="" then null else $verdict end),
+              verdict_explicit:($verdict_explicit == "true"),
               status:$status,
               contribution:$contribution,
               timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
               counted_as_approver:false}')"
+        [[ "$seat_synthesizer" == "true" ]] && seat_rec="$(jq -c '.synthesizer = true' <<< "$seat_rec")"
         COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "$COUNCIL_SEAT_RECORDS_JSON")"
         index=$((index + 1))
     done < <(jq -c '.[]' <<< "$COUNCIL_ROSTER_JSON")
@@ -3261,6 +3372,29 @@ council_run_advice_phase() {
     local required received_non_chair
     required="$(council_required_non_chair)"
     received_non_chair="$(council_received_non_chair)"
+
+    # One-vote-per-vendor fail-safe (sail-cruisey #2996). With the policy on, a
+    # vendor's ONE vote is APPROVE only if EVERY counted seat of that vendor
+    # approves — and that includes a chair seat that issued an explicit
+    # REVISE/BLOCK. The chair still never ADDS an approval (#670: a chair-only
+    # vendor cannot inflate the approving set), but its explicit dissent now marks
+    # its vendor non-approving, so a split where the chair says REVISE and the
+    # same vendor's verifier says APPROVE no longer passes on the verifier alone
+    # (#2996 CP2 round 2: agy APPROVE + Claude verifier APPROVE was reported met
+    # while both Claude chairs said REVISE). Blind/no-response/degenerate seats and
+    # chairs without an explicit verdict line count neither way.
+    local chair_dissent_rows chair_dissent_provider chair_dissent_family
+    if council_one_vote_per_vendor_enabled; then
+        chair_dissent_rows="$(jq -r '
+            .[] | select(.seat == "chair" and .status == "responded"
+                         and .verdict_explicit == true and .verdict != "APPROVE")
+            | [.provider, (.model_family // "")] | @tsv' <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
+        while IFS=$'\t' read -r chair_dissent_provider chair_dissent_family; do
+            [[ -n "$chair_dissent_provider" ]] || continue
+            dissenting_providers="${dissenting_providers} ${chair_dissent_provider}"
+            [[ -n "$chair_dissent_family" ]] && dissenting_model_families="${dissenting_model_families} ${chair_dissent_family}"
+        done <<< "$chair_dissent_rows"
+    fi
 
     # Quorum is evaluated by model family, while legacy provider metrics remain
     # in summary.json for compatibility and runtime diagnostics. Multiple seats
@@ -3289,6 +3423,18 @@ council_run_advice_phase() {
             | .counted_as_approver = (.seat != "chair"
                 and .status == "responded" and .verdict == "APPROVE"
                 and ($approving_families | contains(" " + $f + " "))))' <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
+
+    # Per-seat counted_in_vote + per-vendor (model family) vote with a reason, so
+    # a same-vendor split is visible in summary.json instead of hidden behind a
+    # single counted_as_approver seat.
+    local ovpv_flag="false"
+    council_one_vote_per_vendor_enabled && ovpv_flag="true"
+    COUNCIL_SEAT_RECORDS_JSON="$(jq -c --argjson ovpv "$ovpv_flag" '
+        map(.counted_in_vote = (.status == "responded"
+            and (.seat != "chair"
+                 or ($ovpv and (.verdict_explicit == true) and .verdict != "APPROVE"))))' \
+        <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
+    COUNCIL_VENDOR_VOTES_JSON="$(council_vendor_votes_json "$COUNCIL_SEAT_RECORDS_JSON")"
 
     # Chair presence: a dispatched chair response OR a host-native chair (which
     # synthesizes in-context and cannot self-dispatch). Gating met on the response
@@ -3414,18 +3560,22 @@ council_run_chair_fallback() {
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"
             [[ -z "$resp_bytes" ]] && resp_bytes=0
             verdict="$(council_response_verdict "$output_path")"
+            local fallback_verdict_explicit="false"
+            council_response_has_verdict "$output_path" && fallback_verdict_explicit="true"
             seat_status="responded"
             contribution_json="$(council_contribution_record_json "$output_path" "$evidence_root" "$artifact_digest")" \
                 || contribution_json="$(council_unavailable_contribution_record_json)"
             seat_rec="$(jq -cn --argjson idx "$index" --arg persona "$persona" \
                 --arg agent_spec "$seat_agent_spec" --arg provider "$(octo_agent_spec_provider "$provider")" --arg org "$seat_org" --arg model "$seat_model" --arg model_family "$seat_model_family" \
                 --argjson bytes "${resp_bytes:-0}" --arg verdict "$verdict" --arg status "$seat_status" \
+                --arg verdict_explicit "$fallback_verdict_explicit" \
                 --argjson contribution "$contribution_json" \
                 --arg timeout_provenance "$dispatch_timeout_provenance" \
                 '{index:$idx, persona:$persona, seat:"chair", agent_spec:$agent_spec, provider:$provider,
                   provider_org:$org, model:$model, model_family:$model_family, response_bytes:$bytes,
                   payload_kind:"full",
                   verdict:(if $verdict=="" then null else $verdict end),
+                  verdict_explicit:($verdict_explicit == "true"),
                   status:$status,
                   contribution:$contribution,
                   timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
@@ -3489,7 +3639,9 @@ council_chair_member_json() {
         return 0
     fi
 
-    member_json="$(jq -c 'map(select(.seat == "chair"))[0] // .[0] // empty' <<< "$COUNCIL_ROSTER_JSON")"
+    # A folded synthesizer voter (one-vote-per-vendor seating) stands in for a
+    # dropped chair seat; prefer it over the positional .[0] fallback.
+    member_json="$(jq -c 'map(select(.seat == "chair"))[0] // map(select(.synthesizer == true))[0] // .[0] // empty' <<< "$COUNCIL_ROSTER_JSON")"
     if [[ -n "$member_json" && "$member_json" != "null" ]]; then
         printf '%s\n' "$member_json"
         return 0
@@ -4221,6 +4373,11 @@ council_write_summary_json() {
         --arg distinct_approving_providers "${COUNCIL_DISTINCT_APPROVING_PROVIDERS:-0}" \
         --arg approving_providers "${COUNCIL_APPROVING_PROVIDERS:-}" \
         --arg blind_seats "${COUNCIL_BLIND_SEATS:-}" \
+        --argjson vendor_votes "${COUNCIL_VENDOR_VOTES_JSON:-[]}" \
+        --arg one_vote_per_vendor "$(council_one_vote_per_vendor_enabled && echo true || echo false)" \
+        --arg seats_per_vendor "$(council_seats_per_vendor)" \
+        --arg chair_folded_into "${COUNCIL_SEATING_CHAIR_FOLDED_INTO:-}" \
+        --arg dropped_seats "${COUNCIL_SEATING_DROPPED_SEATS:-0}" \
         --arg distinct_model_families "${COUNCIL_DISTINCT_MODEL_FAMILIES:-0}" \
         --arg responding_model_families "${COUNCIL_RESPONDING_MODEL_FAMILIES:+${COUNCIL_RESPONDING_MODEL_FAMILIES# }}" \
         --arg distinct_approving_model_families "${COUNCIL_DISTINCT_APPROVING_MODEL_FAMILIES:-0}" \
@@ -4287,7 +4444,15 @@ council_write_summary_json() {
             distinct_approving_model_families: ($distinct_approving_model_families | tonumber),
             approving_model_families: $approving_model_families,
             blind_seats: ($blind_seats | split(" ") | map(select(length > 0))),
+            one_vote_per_vendor: ($one_vote_per_vendor == "true"),
+            vendor_votes: $vendor_votes,
             met: ($quorum_met == "true")
+          },
+          seating: {
+            one_vote_per_vendor: ($one_vote_per_vendor == "true"),
+            seats_per_vendor: (if $one_vote_per_vendor == "true" then ($seats_per_vendor | tonumber) else null end),
+            chair_folded_into: (if $chair_folded_into == "" then null else $chair_folded_into end),
+            dropped_seats: ($dropped_seats | tonumber? // 0)
           },
           providers: $providers,
           execution: {
