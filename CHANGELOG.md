@@ -20,8 +20,39 @@
   `0` preserves the shipped quote-sufficiency behavior exactly. Lets a consumer
   that wants the runner's `blind_seats` accounting to match a stricter grounding
   gate opt in without changing the default (sail-cruisey #2970).
+- A background `orchestrate.sh spawn` now prints `TASK_ID=`, `RESULT_FILE=`,
+  `DONE_FILE=` and `RESULT_END_SENTINEL=` lines (absolute paths) before its PID
+  line, which is still the last line. The finished worker also appends
+  `=== OCTOPUS-RESULT-END <task-id> rc=<n> ===` as the final line of its result
+  file. The result file echoes the prompt, so a caller that waited for `VERDICT`
+  matched the prompt text before the provider answered. Wait for the `.done`
+  marker or that sentinel instead. Internal `spawn_agent` callers keep the
+  bare-PID stdout.
 
 ### Fixed
+
+- Council grounding no longer accepts fabricated quotes beside real `path:line`
+  citations (sail-cruisey #2997). The validator only checked that a cited file
+  existed and had that many lines, so an agy seat that quoted invented "source"
+  next to real line refs was `valid-grounded` and met quorum. Each specific
+  quote (a backtick span or fenced block of at least 3 tokens and 20 characters,
+  within about 1500 characters of a resolving citation) must now appear,
+  whitespace-normalized, in a cited file. Quotes are checked near the cited line
+  first and then anywhere in the file. Diff markers, line-number gutters and
+  `...` elisions are handled. When none of a seat's quotes verify, the seat is
+  `blind` (not counted) and its contribution is `invalid-ungrounded`.
+  Unreadable or oversized cited files make a quote unverifiable, never
+  fabricated. Quotes of deleted code are checked against the removed side
+  (and then the added side) of the reviewed diff. The diff comes from any
+  `--context-file` that is a unified diff, plus `git diff
+  ${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}` in the evidence root. With no diff
+  available, a quote the seat says was removed is unverifiable, not
+  fabricated. Each seat in `summary.json` records the result under `grounding`
+  (`quotes_checked`, `quotes_verified`, `quotes_near_line`,
+  `quotes_verified_in_diff_removed`, `quotes_verified_in_diff_added`,
+  `quotes_unverified`, `quotes_unverifiable`,
+  `quotes_unverifiable_claimed_removed`, `diff_sources`, `unverified_samples`). Set
+  `OCTOPUS_COUNCIL_QUOTE_VERIFY=0` to turn the check off.
 
 - `OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1` now really gives each vendor one
   fail-safe vote and one seat (sail-cruisey #2996). Previously the policy
