@@ -396,6 +396,34 @@ octopus_tangle_write_completion_marker() {
     return 0
 }
 
+# Print a failure reason and succeed when a provider exited 0 but its captured
+# output body is empty or whitespace-only, with nothing recoverable in its
+# place. Returns 1 (no reason printed) when the body is usable.
+#
+# Exemptions:
+# - Tangle implementers deliver through the worktree, so empty stdout is not
+#   by itself a failed run; their existing status handling is unchanged.
+# - Codex may emit its answer on stderr only. That counts when stderr carries an
+#   Octopus completion marker or a non-empty final "codex" message; the bare
+#   "tokens used" trailer codex always prints does not.
+octo_spawn_empty_output_reason() {
+    local output_file="$1" agent_type="${2:-}" stderr_file="${3:-}" role="${4:-}" phase="${5:-}"
+    grep -q '[^[:space:]]' "$output_file" 2>/dev/null && return 1
+    if [[ "$phase" == "tangle" && ( "$role" == "implementer" || "$role" == "implementer-heavy" ) ]]; then
+        return 1
+    fi
+    if [[ "$agent_type" == codex* && -n "$stderr_file" && -s "$stderr_file" ]]; then
+        grep -qE '^# Completed:|^## Worktree Changes$|^## Integration Evidence$|^## Verification$' \
+            "$stderr_file" 2>/dev/null && return 1
+        if type octo_file_has_codex_final_message >/dev/null 2>&1 && \
+           octo_file_has_codex_final_message "$stderr_file"; then
+            return 1
+        fi
+    fi
+    printf '%s\n' "Empty output"
+    return 0
+}
+
 octopus_tangle_boundary_paths_are_disjoint() {
     local physical_worktree="$1"
     local physical_results="$2"
@@ -1728,7 +1756,12 @@ ${heuristic_ctx}"
                     -e '^Run /mcp' \
                     "$temp_output" >> "$result_file" 2>/dev/null || cat "$temp_output" >> "$result_file"
             fi
-            if [[ "$agent_type" == codex* ]] \
+            # An exit-0 run with an empty/whitespace-only body is a failure,
+            # not a silent success: callers read the body as the answer.
+            local _octo_empty_output_reason=""
+            _octo_empty_output_reason="$(octo_spawn_empty_output_reason "$temp_output" \
+                "$agent_type" "$temp_errors" "${role:-}" "${phase:-}")" || _octo_empty_output_reason=""
+            if [[ -z "$_octo_empty_output_reason" && "$agent_type" == codex* ]] \
                 && ! grep -q '[[:alnum:]]' "$temp_output" 2>/dev/null \
                 && type octo_file_has_codex_recoverable_stderr >/dev/null 2>&1 \
                 && octo_file_has_codex_recoverable_stderr "$temp_errors"; then
@@ -1758,6 +1791,11 @@ ${heuristic_ctx}"
             _classification=$(classify_agent_output "$temp_output" "$exit_code" "$agent_type" "$temp_errors" 2>/dev/null || echo "ok:")
             _octo_success_status="${_classification%%:*}"
             _octo_success_reason="${_classification#*:}"
+            if [[ -n "$_octo_empty_output_reason" ]]; then
+                _octo_success_status="failed"
+                _octo_success_reason="$_octo_empty_output_reason"
+                log "ERROR" "Agent $agent_type (task $task_id) exited 0 but returned an empty output body; treating as failure (result: $result_file)"
+            fi
             _octo_tokens_out=$(octo_estimate_tokens_for_file "$temp_output" 2>/dev/null || echo 0)
 
             # v8.6.0: Preserve native metrics block for batch completion
@@ -1823,6 +1861,9 @@ ${heuristic_ctx}"
                 record_outcome "$agent_type" "$agent_type" "${task_type:-unknown}" "${phase:-unknown}" "fail" "$elapsed_ms" 2>/dev/null || true
                 type record_failure &>/dev/null && record_failure "$provider_prefix" "provider_rejection" 2>/dev/null || true
                 type write_agent_status >/dev/null 2>&1 && write_agent_status "$agent_type" "failed" "$tokens_in" "$_octo_tokens_out" "${_octo_success_reason:-unusable output}" "$elapsed_ms" "$result_file" "${role:-none}" || true
+                # Surface an empty body to wait/marker-based callers as a
+                # non-zero exit, not only as a status line in the result file.
+                [[ -n "$_octo_empty_output_reason" ]] && exit_code=1
                 octo_spawn_contract_finish "$_contract_seat_id" failed "$result_file" "$temp_errors" \
                     "${_octo_success_reason:-Provider returned unusable output}" "$exit_code" "$elapsed_ms" >/dev/null 2>&1 || true
             else
