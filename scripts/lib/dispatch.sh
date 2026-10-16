@@ -1424,6 +1424,17 @@ octo_context_budget_warning() {
     fi
 }
 
+# Council phases must not fall back to lossy truncation when the summarizer is
+# unavailable: a truncated diff still yields confident verdicts. Explicit
+# OCTOPUS_OVERSIZE_STRATEGY=truncate is a separate, deliberate opt-in and is not
+# affected. OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1 restores the legacy fallback.
+octo_context_budget_refuses_fallback_truncation() {
+    local phase="${1:-}"
+    [[ "$phase" == "council" ]] || return 1
+    [[ "${OCTOPUS_COUNCIL_ALLOW_TRUNCATION:-0}" == "1" ]] && return 1
+    return 0
+}
+
 enforce_context_budget() {
     local prompt="$1"
     local role="${2:-}"
@@ -1511,6 +1522,16 @@ enforce_context_budget() {
                     octo_context_budget_warning "Context budget: summarized $target role=${role:-none} phase=${phase:-none} from ${original_chars} to ${#summarized} chars (budget=$budget tokens/$char_budget chars)"
                     octo_strip_json_contract_markers "$summarized" || return 78
                     return 0
+                fi
+                # A council seat votes on the artifact in its prompt. Silently
+                # cutting the tail of a diff lets seats APPROVE code they never
+                # saw, so the summarizer-unavailable fallback refuses to truncate
+                # council prompts unless the caller opts in explicitly.
+                if octo_context_budget_refuses_fallback_truncation "$phase"; then
+                    log "ERROR" "Context budget: summarizer unavailable and the council prompt for $target role=${role:-none} is ${original_chars} chars; limit is $char_budget chars (~$budget tokens). Refusing to truncate: seats would review an incomplete artifact. Split the diff per file (e.g. 'git diff -- <paths>' chunks that each fit the budget) and re-dispatch one council per chunk, or set OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1 to accept a truncated prompt."
+                    type record_oversize_event >/dev/null 2>&1 && record_oversize_event "$target" "$original_chars" "$original_chars" "failed" "$role" "$phase" "$budget" || true
+                    type write_agent_status >/dev/null 2>&1 && write_agent_status "$target" "failed" "$((original_chars / 4))" 0 "Council prompt exceeded context budget and summarizer was unavailable" 0 "" "$role" || true
+                    return 78
                 fi
                 log "DEBUG" "Context budget: truncating prompt for $target from ${#prompt} to $char_budget chars (~$budget tokens)"
                 local truncated
