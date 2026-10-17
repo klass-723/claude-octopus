@@ -31,6 +31,43 @@
 
 ### Fixed
 
+- Council quote verification now checks each quote against the file the seat
+  attributes it to. A quote placed directly under a citation, or introduced as
+  "`x.ts:12` reads `...`", must appear in that file, the other cited files, or
+  the reviewed diff. If it does not, the seat is marked blind even when its
+  other quotes verify. In sail-cruisey #3005 an agy seat listed
+  `c.royalup_price = ub.bid_amount * 2,` under a real `path:112` citation, but
+  the file says `SET royalup_price = (mut.bid_amount * 2)::numeric(14,2)`. The
+  seat still passed because five of its other quotes were real. A multi-line
+  block now verifies only as a whole or when at least two thirds of its
+  specific lines are in the file, so one real signature line no longer carries
+  an invented body. Proposed code ("should become:", "such as") is not checked
+  against the current file.
+- Grounded council seats are no longer marked blind in these cases from
+  sail-cruisey #3032:
+  - They cite an attached `--context-file` by its basename
+    (`phase-3-plan.md:8`), or cite a file under a hidden directory such as
+    `.todo/`.
+  - They quote source as `>` blockquotes, including HTML-escaped `&gt;` ones.
+  - They quote a command they ran (`npm ci --dry-run ...`).
+  - They quote a file outside the evidence root, such as an upstream SDK or a
+    symlinked `node_modules`.
+
+  Citations now resolve against the root first, then the context files, then a
+  unique path suffix under the root that may include hidden directories. A
+  quote tied to a citation that resolves nowhere, and a command, are counted
+  as unverifiable, not fabricated. A bare source line directly under a line
+  that holds only a citation counts as verified evidence when it matches. New
+  `grounding` counters in `summary.json` show which rule applied to each quote.
+- A council seat that exits non-zero now leaves its cause in the run dir. When
+  the provider fails, `run_agent_sync` appends the exit code and the provider's
+  stderr to `stderr/<seat>.log`, with secrets scrubbed and file mode 0600. When
+  stderr is empty it captures the tail of stdout, where some CLIs print their
+  errors. The seat's `summary.json` record gets
+  `failure: {exit_code, detail, stderr_file}`, and the end-of-run warnings name
+  the cause. Chair-fallback attempts are captured the same way. Before this, a
+  failing Claude seat showed only `no-response` in `summary.json` and
+  "Agent claude failed with exit code 1" in the log.
 - The prompt token estimate now sums ASCII text at 4 characters per token and
   non-ASCII text at 3 UTF-8 bytes per token. It used to charge the whole prompt
   at the byte rate as soon as one non-ASCII character appeared, so a handful of

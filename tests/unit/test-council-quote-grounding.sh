@@ -254,4 +254,160 @@ record="$(council_contribution_record_json "$removed_only" "$GROOT" sha256:t)"
 if jq -e '.grounding | has("quotes_verified_in_diff_removed") and has("quotes_verified_in_diff_added") and has("quotes_unverifiable_claimed_removed") and has("diff_sources")' <<< "$record" >/dev/null &&
    jq -e 'has("quotes_verified_in_diff_removed")' <<< "$COUNCIL_EMPTY_GROUNDING_JSON" >/dev/null; then test_pass; else test_fail "record: $record"; fi
 
+# ── sail-cruisey #3005: quotes the seat attributes to a citation must be in the
+# cited file. Real quotes elsewhere in the body no longer excuse invented ones.
+RROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-3005.XXXXXX")"
+mkdir -p "$RROOT/functions-v2/_lib"
+{
+    printf 'sync AS (\n  UPDATE cruises c\n'
+    printf '  SET royalup_price = (mut.bid_amount * 2)::numeric(14,2),\n'
+    printf '      royalup_cabin_type = mut.target_category\n  FROM mut\n)\n'
+} > "$RROOT/functions-v2/_lib/upgrade-bid-royalup-sql.ts"
+{
+    printf 'export function acceptedRoyalupBidSql(cruiseAlias: string): string {\n'
+    printf '  return `EXISTS (\n    SELECT 1 FROM upgrade_bids ub\n'
+    printf '    WHERE ub.cruise_id = ${cruiseAlias}.id\n'
+    printf '      AND ub.household_id = ${cruiseAlias}.household_id\n'
+    printf "      AND ub.program_type = 'royalup'\n"
+    printf "      AND ub.status = 'accepted'\n  )\`;\n}\n"
+} > "$RROOT/functions-v2/_lib/payment-plan.ts"
+_rreport() { council_response_quote_verification_json "$1" "$RROOT"; }
+
+test_case "#3005: an invented block under a 'Checked Source Citations' entry is fabricated despite real quotes elsewhere"
+r3005="$(_resp "The sync writes \`SET royalup_price = (mut.bid_amount * 2)::numeric(14,2),\` per functions-v2/_lib/upgrade-bid-royalup-sql.ts:3 and scopes by \`WHERE ub.cruise_id = \${cruiseAlias}.id\` in functions-v2/_lib/payment-plan.ts:4.
+
+### Checked Source Citations
+
+1. [functions-v2/_lib/upgrade-bid-royalup-sql.ts:3](file:///tmp/ws/functions-v2/_lib/upgrade-bid-royalup-sql.ts#L3)
+   \`\`\`typescript
+   c.royalup_price = ub.bid_amount * 2,
+   \`\`\`
+
+VERDICT: APPROVE")"
+r="$(_rreport "$r3005")"
+if jq -e '.quotes_verified >= 2 and .quotes_attributed == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null &&
+   jq -e '.unverified_samples | index("c.royalup_price = ub.bid_amount * 2,")' <<< "$r" >/dev/null &&
+   council_response_is_blind "$r3005" "$RROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3005: a reconstructed block where only generic lines are real does not verify"
+recon="$(_resp "Checked:
+functions-v2/_lib/payment-plan.ts:1
+\`\`\`typescript
+export function acceptedRoyalupBidSql(alias: string = \"c\"): string {
+  return \`EXISTS (
+    SELECT 1 FROM upgrade_bids ub
+    WHERE ub.cruise_id = \${alias}.id
+      AND ub.household_id = \${alias}.household_id
+      AND ub.status = 'accepted'
+\`\`\`
+VERDICT: APPROVE")"
+r="$(_rreport "$recon")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3005: a verbatim multi-line block under its citation verifies"
+verbatim="$(_resp "functions-v2/_lib/payment-plan.ts:3
+\`\`\`typescript
+    SELECT 1 FROM upgrade_bids ub
+    WHERE ub.cruise_id = \${cruiseAlias}.id
+      AND ub.household_id = \${cruiseAlias}.household_id
+\`\`\`
+VERDICT: APPROVE")"
+r="$(_rreport "$verbatim")"
+if jq -e '.quotes_verified == 1 and .quotes_attributed == 1 and .quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3005: a proposed replacement under a citation is not held to the file's current text"
+proposal="$(_resp "Real today: \`SET royalup_price = (mut.bid_amount * 2)::numeric(14,2),\` at functions-v2/_lib/upgrade-bid-royalup-sql.ts:3.
+This should become, at functions-v2/_lib/upgrade-bid-royalup-sql.ts:3:
+\`\`\`typescript
+SET royalup_price = (mut.bid_amount * mut.guest_count)::numeric(14,2),
+\`\`\`
+VERDICT: REVISE")"
+r="$(_rreport "$proposal")"
+if jq -e '.quotes_attributed_unverified == 0 and .quotes_unverifiable_proposed == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# ── sail-cruisey #3032: grounded seats flagged blind.
+HROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-3032.XXXXXX")"
+mkdir -p "$HROOT/.todo/claude-octopus/3032" "$HROOT/.todo/claude-octopus/3005" "$HROOT/functions-v2/_lib" "$HROOT/scripts"
+{
+    printf '# Plan\n\n'
+    printf -- '- Scrub with `span.attributes = redact(span.attributes)` SEPARATELY.\n'
+    printf -- '- Resolver: `new NodeClient({ ...captured, integrations: [], transport: makeTransport })`.\n'
+} > "$HROOT/.todo/claude-octopus/3032/phase-3-plan.md"
+printf '# Other plan\n' > "$HROOT/.todo/claude-octopus/3005/phase-3-plan.md"
+printf 'export function handler(request) {\n  const extra = { url: request.url, method: request.method };\n  return send(extra);\n}\n' > "$HROOT/functions-v2/_lib/handler.ts"
+printf 'const ALLOWED_ADVISORIES = [\n  "GHSA-xxxx",\n];\nconst out = execSync("npm audit --omit=dev --audit-level=high --json 2>/dev/null");\n' > "$HROOT/scripts/audit-check.mjs"
+_hreport() { council_response_quote_verification_json "$1" "$HROOT"; }
+PLAN32="$HROOT/.todo/claude-octopus/3032/phase-3-plan.md"
+
+test_case "#3032: a bare plan citation resolves to the attached context file under hidden .todo/"
+plancite="$(_resp "### Checked Citations
+
+phase-3-plan.md:3
+\`span.attributes = redact(span.attributes)\` SEPARATELY — never the whole span.
+
+functions-v2/_lib/handler.ts:2 is the URL attachment.
+
+VERDICT: APPROVE")"
+r="$(COUNCIL_CONTEXT_FILES=("$PLAN32"); _hreport "$plancite")"
+blind=no; (COUNCIL_CONTEXT_FILES=("$PLAN32"); council_response_is_blind "$plancite" "$HROOT") && blind=yes
+if jq -e '.citations == 2 and .quotes_verified == 1 and .quotes_attributed == 1 and .fabricated == false' <<< "$r" >/dev/null && [[ "$blind" == no ]]; then
+    test_pass
+else
+    test_fail "blind=$blind report: $r"
+fi
+
+test_case "#3032: without the context file the ambiguous bare plan name stays unresolved, never fabricated"
+r="$(_hreport "$plancite")"
+if jq -e '.citations == 1 and .citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3032: a path suffix under a hidden directory resolves uniquely"
+hidden="$(_resp "claude-octopus/3032/phase-3-plan.md:4 reads \`new NodeClient({ ...captured, integrations: [], transport: makeTransport })\`.
+VERDICT: APPROVE")"
+r="$(_hreport "$hidden")"
+if jq -e '.citations == 1 and .quotes_verified == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3032: HTML-escaped '&gt;' blockquotes under a citation are decoded and verified"
+escaped="$(_resp "- \`functions-v2/_lib/handler.ts:2\`:
+  &gt; const extra = { url: request.url, method: request.method };
+
+VERDICT: APPROVE")"
+r="$(_hreport "$escaped")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_attributed == 1 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$escaped" "$HROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3032: a blockquote attributed to an upstream file outside the root is unverifiable, not checked against local files"
+upstream="$(_resp "- \`functions-v2/_lib/handler.ts:2\`:
+  > const extra = { url: request.url, method: request.method };
+
+- The checked \`@sentry/core/build/cjs/attributes.js:9\`:
+  > const { value, unit } = isAttributeObject(rawValue) ? rawValue : { value: rawValue, unit: void 0 };
+
+- Cover wrapped URL attributes such as \`{ value: \"https://h/x?bookingRef=ABC1234\" }\` in the tests.
+
+VERDICT: APPROVE")"
+r="$(_hreport "$upstream")"
+if jq -e '.quotes_verified == 1 and .quotes_unverifiable_unresolved_citation == 1 and .quotes_unverifiable_proposed == 1
+          and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$upstream" "$HROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3032: a command the seat ran is not a source quote"
+cmd="$(_resp "- The gate at scripts/audit-check.mjs:4 passed; \`npm ci --dry-run --ignore-scripts --no-audit --no-fund --json\` exited 0.
+VERDICT: APPROVE")"
+r="$(_hreport "$cmd")"
+if jq -e '.quotes_checked == 1 and .quotes_unverifiable_command == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$cmd" "$HROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3032: a bare source line under a citation-only line counts as verified evidence"
+bare="$(_resp "Existing exceptions are out of scope.
+
+scripts/audit-check.mjs:1
+const ALLOWED_ADVISORIES = [
+
+scripts/audit-check.mjs:4
+This line is my own summary, not a quote from the file at all.
+
+VERDICT: APPROVE")"
+r="$(_hreport "$bare")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_summary
