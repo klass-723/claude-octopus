@@ -1689,6 +1689,8 @@ ${provider_ctx}"
         if [[ "$exit_code" -eq 139 && "$_sync_retry_count" -lt "$_sync_sigsegv_retries" ]]; then
             _sync_retry_count=$((_sync_retry_count + 1))
             log WARN "Agent $agent_type exited 139 (SIGSEGV); retrying once within the original ${timeout_secs}s budget (stderr: ${_sync_signal_artifact:-unavailable})"
+            # Record this attempt before its output is cleared for the retry.
+            octo_capture_seat_failure "$agent_type" "$exit_code" "SIGSEGV; retrying once" "$temp_err" "$temp_out"
             : > "$temp_err"
             : > "$temp_out"
             continue

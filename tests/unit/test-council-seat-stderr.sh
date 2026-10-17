@@ -21,7 +21,7 @@ source "$PROJECT_ROOT/scripts/lib/secure.sh"
 # Drive the real run_agent_sync failure path with a fake provider. Mirrors the
 # harness in test-agent-sync-signal-retry.sh.
 run_failing_seat() (
-    local scenario="$1" mode="$2" capture="$3"
+    local scenario="$1" mode="$2" capture="$3" agent="${4:-claude}"
     local fixture_root="$TEST_TMP_DIR/$scenario"
     local fake_provider="$fixture_root/provider.sh"
     mkdir -p "$fixture_root/results"
@@ -32,6 +32,7 @@ case "$mode" in
     stderr) printf 'Error: claude session limit reached (key sk-abcdefghijklmnopqrstuvwxyz0123)\n' >&2 ;;
     stdout) printf '{"type":"result","is_error":true,"result":"Invalid model: claude-fable-5-1"}\n' ;;
     silent) : ;;
+    segv) printf 'agy native crash\n' >&2; exit 139 ;;
 esac
 exit 1
 EOF
@@ -58,7 +59,7 @@ EOF
 
     set +e
     _OCTOPUS_SEAT_STDERR_FILE="$capture" OCTOPUS_PERSISTENCE_AVAILABLE=true \
-        run_agent_sync claude 'review this change' 30 reviewer council >/dev/null 2>&1
+        run_agent_sync "$agent" 'review this change' 30 reviewer council >/dev/null 2>&1
 )
 
 CAP_DIR="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/seat-stderr.XXXXXX")"
@@ -106,6 +107,16 @@ before="$(find "$CAP_DIR" -type f | wc -l | tr -d ' ')"
 run_failing_seat no-capture stderr "" || true
 after="$(find "$CAP_DIR" -type f | wc -l | tr -d ' ')"
 if [[ "$before" == "$after" ]]; then test_pass; else test_fail "files before=$before after=$after"; fi
+
+test_case "an AGY SIGSEGV retry records both failed attempts, not just the last"
+cap="$CAP_DIR/stderr/agy-segv.log"
+run_failing_seat agy-segv segv "$cap" agy || true
+if [[ "$(grep -c '^== .* agy exited 139: ' "$cap")" == 2 ]] && grep -q 'SIGSEGV; retrying once' "$cap" &&
+   [[ "$(grep -c 'agy native crash' "$cap")" == 2 ]]; then
+    test_pass
+else
+    test_fail "capture=$(tr '\n' '|' < "$cap" 2>/dev/null)"
+fi
 
 # ── Advice phase: the seat record and warnings carry the cause.
 # shellcheck source=/dev/null
@@ -174,6 +185,30 @@ if jq -e 'has("failure") | not' <<< "$rec" >/dev/null && [[ ! -e "$d/stderr/00-c
     test_pass
 else
     test_fail "record=$rec files=$(ls "$d/stderr" 2>/dev/null)"
+fi
+
+test_case "a rejected chair-fallback attempt keeps its capture even when it left a partial response"
+# _advice_run unset its chair-fallback stub, which also removed the real one.
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/lib/council.sh" 2>/dev/null
+d="$(mktemp -d "$TEST_TMP_DIR/council-fallback.XXXXXX")"; mkdir -p "$d/responses"
+COUNCIL_RUN_DIR="$d"; COUNCIL_FIXTURE=""; COUNCIL_TIMEOUT_WARNINGS=""; COUNCIL_SEAT_RECORDS_JSON='[]'
+council_pick_provider() { printf 'claude\n'; }
+council_provider_is_available() { return 0; }
+council_dispatch_member_detached() {
+    mkdir -p "$(dirname "$_OCTOPUS_SEAT_STDERR_FILE")"
+    printf '== 2026-10-17T03:12:42Z claude exited 1: Exit code 1\n-- stderr --\nError: rate limited\n' >> "$_OCTOPUS_SEAT_STDERR_FILE"
+    printf 'Let me start by reading the plan\n' > "$3"
+    return 1
+}
+council_run_chair_fallback sha256:test >/dev/null 2>&1 || true
+unset -f council_pick_provider council_provider_is_available council_dispatch_member_detached
+logs="$({ find "$d/stderr" -name '*chair-fallback*.log' 2>/dev/null || true; } | wc -l | tr -d ' ')"
+if [[ "$logs" -ge 1 && "$COUNCIL_TIMEOUT_WARNINGS" == *"(chair fallback "*") exited 1: Error: rate limited; full output in $d/stderr/"* ]] &&
+   [[ -z "$(find "$d/responses" -name '*chair-fallback*' 2>/dev/null || true)" ]]; then
+    test_pass
+else
+    test_fail "logs=$logs warns=[$COUNCIL_TIMEOUT_WARNINGS]"
 fi
 
 test_summary

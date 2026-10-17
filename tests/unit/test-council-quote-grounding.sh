@@ -410,4 +410,82 @@ VERDICT: APPROVE")"
 r="$(_hreport "$bare")"
 if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# ── Absolute and ".." citation paths (CodeRabbit on #1207).
+test_case "an upstream quote beside an absolute path outside the root is unverifiable, not fabricated"
+absup="$(_resp "src/pricing.ts:2 is the call site. The upstream \`/home/u/proj/node_modules/x/y.js:9\` has \`const { value, unit } = isAttributeObject(raw) ? raw : { value: raw };\`.
+VERDICT: APPROVE")"
+r="$(_report "$absup")"
+if jq -e '.citations == 1 and .citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1
+          and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$absup" "$ROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "an absolute path inside the root resolves and its quote verifies"
+absin="$(_resp "$ROOT/src/pricing.ts:2 reads \`$REAL_NEAR\`.
+VERDICT: APPROVE")"
+r="$(_report "$absin")"
+if jq -e '.citations == 1 and .quotes_verified == 1 and .quotes_attributed == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "an absolute path into a deleted disposable workspace maps back by its in-root suffix"
+absws="$(_resp "/private/var/folders/xx/T/octopus-consultative.1.2.AB/workspace/src/pricing.ts:2 reads \`$FAKE\`.
+VERDICT: APPROVE")"
+r="$(_report "$absws")"
+if jq -e '.citations == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "a '..' path that escapes the root stays an unresolved token"
+dotdot="$(_resp "src/pricing.ts:2 is fine. ../other-repo/lib/util.ts:4 reads \`const merged = Object.assign({}, defaults, overrides);\`.
+VERDICT: APPROVE")"
+r="$(_report "$dotdot")"
+if jq -e '.citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# ── One verifier run per response (CodeRabbit on #1207).
+test_case "the verifier runs once per response across the blind check and the contribution record"
+count_file="$TEST_TMP_DIR/qv-count"; : > "$count_file"
+shim_dir="$TEST_TMP_DIR/qv-shim"; mkdir -p "$shim_dir"
+real_python="$(command -v python3)"
+# Count only the quote verifier (its script names this counter); pass every
+# python3 call through unchanged.
+cat > "$shim_dir/python3" <<SHIM
+#!/usr/bin/env bash
+if [[ "\$1" == "-I" && "\$2" == "-" ]]; then
+    script="\$(cat)"
+    [[ "\$script" == *quotes_unverifiable_proposed* ]] && printf 'x\\n' >> "$count_file"
+    printf '%s' "\$script" | exec "$real_python" "\$@"
+fi
+exec "$real_python" "\$@"
+SHIM
+chmod 755 "$shim_dir/python3"
+saved_path="$PATH"; PATH="$shim_dir:$PATH"
+COUNCIL_QUOTE_REPORT_KEY=""; COUNCIL_QUOTE_REPORT=""
+cached="$(_resp "In src/pricing.ts:2 the base price is \`$FAKE\` which caches correctly.
+VERDICT: APPROVE")"
+council_response_is_substantive "$cached" "$ROOT" || true
+council_response_is_blind "$cached" "$ROOT" || true
+council_contribution_record_json "$cached" "$ROOT" sha256:t >/dev/null
+first="$(wc -l < "$count_file" | tr -d ' ')"
+printf 'In src/pricing.ts:2 the fallback `%s` is correct.\nVERDICT: APPROVE\n' "$REAL_NEAR" > "$cached"
+record="$(council_contribution_record_json "$cached" "$ROOT" sha256:t)"
+second="$(wc -l < "$count_file" | tr -d ' ')"
+PATH="$saved_path"
+if [[ "$first" == 1 && "$second" == 2 ]] && jq -e '.validation_result == "valid-grounded"' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "runs: first=$first second=$second record=$record"
+fi
+
+test_case "a chair-fallback seat record carries grounding like an advice seat"
+fbdir="$(mktemp -d "$TEST_TMP_DIR/fallback-grounding.XXXXXX")"; mkdir -p "$fbdir/responses"
+COUNCIL_RUN_DIR="$fbdir"; COUNCIL_FIXTURE=""; COUNCIL_SEAT_RECORDS_JSON='[]'
+council_pick_provider() { printf 'claude\n'; }
+council_provider_is_available() { return 0; }
+council_dispatch_member_detached() {
+    printf 'Reviewed src/pricing.ts:2: `%s` handles the fallback, and the null guard on the next line returns early.\n\nVERDICT: APPROVE\n' "$REAL_NEAR" > "$3"
+    return 0
+}
+OCTOPUS_PROJECT_DIR="$ROOT" council_run_chair_fallback sha256:t >/dev/null 2>&1 || true
+unset -f council_pick_provider council_provider_is_available council_dispatch_member_detached
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/lib/council.sh"
+rec="$(jq -c '[.[] | select(.seat == "chair")][0] // {}' <<< "$COUNCIL_SEAT_RECORDS_JSON")"
+if jq -e '.grounding.quotes_verified == 1 and .grounding == .contribution.grounding' <<< "$rec" >/dev/null; then test_pass; else test_fail "record: $rec"; fi
+
 test_summary

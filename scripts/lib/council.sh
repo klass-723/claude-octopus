@@ -3007,11 +3007,40 @@ def resolve_citation(relative):
 CITATION = re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.[A-Za-z][A-Za-z0-9]*)\s*:\s*([0-9]+)(?:-([0-9]+))?(?![A-Za-z0-9_/-]|\.(?:[A-Za-z0-9_/-]|\.))")
 tokens = []      # every citation-shaped token: (start, end, path-or-None, line)
 citations = []   # the resolving subset
+def resolve_outside_form(raw):
+    # Absolute and ".." paths are kept as tokens so a quote written about them
+    # is never checked against some other nearby file. One that lands inside the
+    # root resolves; an absolute path into a deleted disposable workspace
+    # (".../workspace/scripts/x.mjs") maps back by its longest in-root suffix.
+    try:
+        candidate = (raw if raw.is_absolute() else root / raw).resolve(strict=True)
+        if contained(candidate):
+            return candidate
+    except (OSError, RuntimeError):
+        pass
+    if raw.is_absolute():
+        hits = [p for p in context_files if p == Path(os.path.normpath(raw))]
+        if hits:
+            return hits[0]
+        parts = [part for part in raw.parts[1:] if part not in ("", ".")]
+        for size in range(min(len(parts), 12), 1, -1):
+            suffix = Path(*parts[-size:])
+            if ".." in suffix.parts:
+                break
+            try:
+                candidate = (root / suffix).resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if contained(candidate):
+                return candidate
+    return None
+
 for match in CITATION.finditer(resp):
     relative = Path(match.group(1).strip())
     if relative.is_absolute() or ".." in relative.parts:
-        continue
-    candidate = resolve_citation(relative)
+        candidate = resolve_outside_form(relative)
+    else:
+        candidate = resolve_citation(relative)
     token = (match.start(), match.end(), candidate, int(match.group(2)))
     tokens.append(token)
     if candidate is not None:
@@ -3400,6 +3429,27 @@ emit()
 PY
 }
 
+council_response_quote_report_cached() {
+    # Sets COUNCIL_QUOTE_REPORT to the verification report for this response,
+    # running the verifier only when the response bytes, root, context files, or
+    # diff base changed since the last call in this shell. One seat is otherwise
+    # verified up to five times (substantive, blind, contribution record), each
+    # run possibly paying a git diff and a root index walk. Subshells inherit the
+    # cached value, so a record computed in $(...) after the parent's blind
+    # check reuses it.
+    local f="$1" evidence_root="$2" stamp key
+    # Content checksum, not mtime: a response rewritten within one second must
+    # not reuse the previous report.
+    stamp="$(cksum < "$f" 2>/dev/null)" || stamp=""
+    [[ -n "$stamp" ]] || { COUNCIL_QUOTE_REPORT="$(council_response_quote_verification_json "$f" "$evidence_root")"; COUNCIL_QUOTE_REPORT_KEY=""; return 0; }
+    key="${f}|${evidence_root}|${stamp}|${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}|${COUNCIL_CONTEXT_FILES[*]+${COUNCIL_CONTEXT_FILES[*]}}"
+    if [[ -n "${COUNCIL_QUOTE_REPORT_KEY:-}" && "$COUNCIL_QUOTE_REPORT_KEY" == "$key" && -n "${COUNCIL_QUOTE_REPORT:-}" ]]; then
+        return 0
+    fi
+    COUNCIL_QUOTE_REPORT="$(council_response_quote_verification_json "$f" "$evidence_root")"
+    COUNCIL_QUOTE_REPORT_KEY="$key"
+}
+
 council_response_quotes_fabricated() {
     # True when a seat quotes code beside its path:line citations and NONE of those
     # quotes appear in the cited files (council_response_quote_verification_json).
@@ -3409,7 +3459,10 @@ council_response_quotes_fabricated() {
     [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]] || return 1
     [[ -f "$f" && -n "$evidence_root" && -d "$evidence_root" ]] || return 1
     local report="$precomputed"
-    [[ -n "$report" ]] || report="$(council_response_quote_verification_json "$f" "$evidence_root")"
+    if [[ -z "$report" ]]; then
+        council_response_quote_report_cached "$f" "$evidence_root"
+        report="$COUNCIL_QUOTE_REPORT"
+    fi
     jq -e '.fabricated == true' <<< "$report" >/dev/null 2>&1
 }
 
@@ -3495,7 +3548,8 @@ council_contribution_record_json() {
     if council_response_nonempty "$response_path"; then
         verdict="$(council_response_verdict "$response_path")"
         if [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]]; then
-            grounding="$(council_response_quote_verification_json "$response_path" "$evidence_root")"
+            council_response_quote_report_cached "$response_path" "$evidence_root"
+            grounding="$COUNCIL_QUOTE_REPORT"
             jq -e 'type == "object"' <<< "$grounding" >/dev/null 2>&1 \
                 || grounding="$COUNCIL_EMPTY_GROUNDING_JSON"
         fi
@@ -4222,16 +4276,11 @@ council_run_chair_fallback() {
         _OCTOPUS_SEAT_STDERR_FILE="$fallback_stderr" \
             council_dispatch_member_detached "$member_json" "independent-advice" "$output_path" || dispatch_rc=$?
         dispatch_timeout_provenance="$COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE"
-        if (( dispatch_rc != 0 )) && ! council_response_nonempty "$output_path"; then
-            council_note_seat_failure "$(octo_agent_spec_provider "$provider")" "chair fallback ${persona}" "$dispatch_rc" \
-                "$(council_seat_failure_detail "$fallback_stderr" "$dispatch_rc")" "$fallback_stderr"
-        else
-            rm -f "$fallback_stderr" 2>/dev/null
-        fi
         if council_response_nonempty "$output_path" \
                 && council_response_is_substantive "$output_path" "$evidence_root" \
                 && { (( dispatch_rc == 0 )) || council_response_has_verdict "$output_path"; }; then
             COUNCIL_RESPONSES_RECEIVED=$((COUNCIL_RESPONSES_RECEIVED + 1))
+            rm -f "$fallback_stderr" 2>/dev/null
             COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
             COUNCIL_CHAIR_FALLBACK_USED="true"
             COUNCIL_CHAIR_FALLBACK_PERSONA="$persona"
@@ -4265,10 +4314,19 @@ council_run_chair_fallback() {
                   verdict_explicit:($verdict_explicit == "true"),
                   status:$status,
                   contribution:$contribution,
+                  grounding:($contribution.grounding // null),
                   timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
                   counted_as_approver:false}')"
             COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
             return 0
+        fi
+        # Rejected. A non-zero exit keeps its capture and names the cause, even
+        # when the provider left a partial response behind.
+        if (( dispatch_rc != 0 )); then
+            council_note_seat_failure "$(octo_agent_spec_provider "$provider")" "chair fallback ${persona}" "$dispatch_rc" \
+                "$(council_seat_failure_detail "$fallback_stderr" "$dispatch_rc")" "$fallback_stderr"
+        else
+            rm -f "$fallback_stderr" 2>/dev/null
         fi
         rm -f "$output_path"
     done < <(printf '%s\n' strategy-analyst research-synthesizer code-reviewer exec-communicator business-analyst)
