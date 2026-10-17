@@ -31,6 +31,20 @@
 
 ### Fixed
 
+- `council-wait.sh --pool` now sees councils in the runner's per-session
+  sub-pools. The runner writes each default-pool run under
+  `councils/session-<slug>/<run_id>/` and its `latest-<key>` pointer inside
+  that session dir, but the waiter only scanned `councils/2*/` and
+  `councils/latest-<key>`, so it reported `run: pending` until its timeout even
+  after the council finished (sail-cruisey #3011: seven waits timed out at
+  570s, 1.6–6.9 minutes after their councils completed). The waiter now
+  searches `session-*/` sub-pools, follows their `latest-<key>` pointers, and
+  compares sub-pools by UTC run name because creation counters are per pool.
+  The runner also mirrors the keyed pointer to the shared pool as
+  `session-<slug>/<run_id>` and prints `Council run dir: <path>` on stderr at
+  creation, so callers can use `--run-dir` directly. Pointers still cannot
+  leave the pool or follow a symlinked sub-pool.
+
 - Council grounding no longer accepts fabricated quotes beside real `path:line`
   citations (sail-cruisey #2997). The validator only checked that a cited file
   existed and had that many lines, so an agy seat that quoted invented "source"
