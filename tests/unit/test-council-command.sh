@@ -1991,7 +1991,8 @@ test_council_failed_dispatched_synthesis_is_partial() {
     local status=""
     status="$(cat "$d/summary-status" 2>/dev/null)"
 
-    if [[ "$rc" -ne 0 && "$status" == "partial" \
+    # Quorum is met, so the vote stands: exit 0, status partial (#3006/#3011).
+    if [[ "$rc" -eq 0 && "$status" == "partial" \
           && "$COUNCIL_CHAIR_SYNTHESIS_AVAILABLE" == "false" ]]; then
         test_pass
     else
@@ -2073,6 +2074,82 @@ test_council_degenerate_chair_keeps_vote_and_flags_synthesis() {
         test_pass
     else
         test_fail "degenerate-chair quorum wrong: met=$met synth=$synth chair_status=$chair_status approving_families=$approving warn=[$warn]"
+        return 1
+    fi
+}
+
+test_council_oversize_refused_seat_is_labelled() {
+    test_case "a seat refused by the context budget (rc 78, no output) is refused-oversize, not no-response, and warns"
+    load_council_lib || return 1
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-oversize.XXXXXX")"; mkdir -p "$d/responses"
+    COUNCIL_RUN_DIR="$d"
+    COUNCIL_DEPTH="standard"   # required_non_chair = 2
+    COUNCIL_FIXTURE=""
+    COUNCIL_CHAIR_FALLBACK_USED="false"; COUNCIL_CHAIR_FALLBACK_PERSONA=""
+    COUNCIL_ROSTER_JSON='[
+      {"persona":"strategy-analyst","seat":"chair","provider":"claude","provider_org":"anthropic","model":"claude"},
+      {"persona":"backend-architect","seat":"member","provider":"claude","provider_org":"anthropic","model":"claude"},
+      {"persona":"security-auditor","seat":"member","provider":"codex","provider_org":"openai","model":"gpt"},
+      {"persona":"performance-engineer","seat":"member","provider":"agy","provider_org":"google","model":"gemini"}
+    ]'
+    # sail-cruisey #3006/#3011: enforce_context_budget refused the codex seat's
+    # prompt (rc 78) before dispatch, and the seat was reported as no-response.
+    council_dispatch_member_detached() {
+        local mj="$1" out="$3" persona
+        persona="$(jq -r '.persona' <<< "$mj")"
+        if [[ "$persona" == "security-auditor" ]]; then
+            # Real enforce_context_budget writes its enforced limit to this file.
+            mkdir -p "$(dirname "$_OCTOPUS_CONTEXT_REFUSAL_FILE")"
+            printf '%s\n' "prompt for codex role=security-auditor is 32457 chars / 34611 bytes (~11537 tokens); admission limit is 31392 bytes (~10464 tokens)" > "$_OCTOPUS_CONTEXT_REFUSAL_FILE"
+            return 78
+        fi
+        printf '## Review\n\nsrc/app.ts:42 correctly guards the nil case; tests cover it.\n\nVERDICT: APPROVE\n' > "$out"
+        return 0
+    }
+
+    COUNCIL_PROVIDER_STATUS_JSON='{"claude":"available","codex":"available","agy":"available"}' \
+        council_run_advice_phase >/dev/null 2>&1 || true
+
+    local seat_status counted met warn refusal
+    refusal="$(jq -r 'map(select(.persona == "security-auditor"))[0].refusal // "none"' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
+    seat_status="$(jq -r 'map(select(.persona == "security-auditor"))[0].status // "none"' <<< "$COUNCIL_SEAT_RECORDS_JSON" 2>/dev/null)"
+    # The refused seat never reached the provider, so codex is not a responder.
+    counted="false"; [[ " $COUNCIL_RESPONDING_PROVIDERS " == *" codex "* ]] && counted="true"
+    met="$COUNCIL_QUORUM_MET"
+    warn="$(council_print_run_warnings)"
+
+    unset -f council_dispatch_member_detached
+
+    if [[ "$seat_status" == "refused-oversize" && "$counted" == "false" && "$met" == "true" \
+          && "$warn" == *"seat codex (security-auditor) refused: oversize — prompt for codex role=security-auditor is 32457 chars / 34611 bytes"* \
+          && "$refusal" == *"admission limit is 31392 bytes (~10464 tokens)"* ]]; then
+        test_pass
+    else
+        test_fail "oversize seat wrong: status=$seat_status counted=$counted met=$met refusal=$refusal warn=[$warn]"
+        return 1
+    fi
+}
+
+test_council_phase_context_allowance() {
+    test_case "critique/chair prompts get an allowance for council-added peer context; advice gets none"
+    load_council_lib || return 1
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-allowance.XXXXXX")"; mkdir -p "$d/responses" "$d/critiques" "$d/revisions"
+    COUNCIL_RUN_DIR="$d"
+    COUNCIL_TASK="Review the change"
+    COUNCIL_ROSTER_JSON='[{"persona":"strategy-analyst","seat":"chair","provider":"claude"},{"persona":"security-auditor","seat":"member","provider":"codex"}]'
+    printf '%s\n' "$(printf 'peer finding line %.0s' $(seq 1 400))" > "$d/responses/01-strategy-analyst.md"
+    printf '%s\n' "$(printf 'peer finding line %.0s' $(seq 1 400))" > "$d/responses/02-security-auditor.md"
+    source "$PROJECT_ROOT/scripts/lib/dispatch.sh" 2>/dev/null || true
+    local advice chair advice_prompt chair_prompt
+    advice_prompt="$(council_prompt_for_member security-auditor independent-advice)"
+    chair_prompt="$(council_prompt_for_member strategy-analyst chair-synthesis)"
+    advice="$(council_phase_context_allowance security-auditor independent-advice "$advice_prompt")"
+    chair="$(council_phase_context_allowance strategy-analyst chair-synthesis "$chair_prompt")"
+    # The chair prompt carries both ~7.2K-char responses (~3.6K tokens).
+    if [[ "$advice" == 0 && "$chair" =~ ^[0-9]+$ && "$chair" -ge 3000 ]]; then
+        test_pass
+    else
+        test_fail "advice=$advice chair=$chair"
         return 1
     fi
 }
@@ -2196,6 +2273,8 @@ test_council_failed_dispatched_synthesis_is_partial
 test_council_synthesis_warning_uses_logger_and_stays_capturable
 test_council_quorum_met_with_host_native_chair
 test_council_degenerate_chair_keeps_vote_and_flags_synthesis
+test_council_oversize_refused_seat_is_labelled
+test_council_phase_context_allowance
 test_council_one_vote_per_vendor_opt_in
 test_council_defaults_are_depth_aware
 test_council_rejects_non_usd_budget

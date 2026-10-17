@@ -894,7 +894,7 @@ get_provider_context_limit() {
     local phase="${2:-}" role="${3:-}"
     local provider executor registry_default model_env context_env
     local configured_limit transport_limit model_limit="" explicit_model model=""
-    local transport_env=""
+    local transport_env="" transport_defaulted=0
     provider="$(octo_agent_spec_provider "$agent_type")"
     executor="$(octo_agent_spec_executor "$agent_type")"
     local default_budget="${OCTOPUS_CONTEXT_BUDGET:-12000}"
@@ -932,12 +932,26 @@ get_provider_context_limit() {
                 transport_limit="${!transport_env}"
             else
                 transport_limit="$configured_limit"
+                transport_defaulted=1
             fi
             ;;
     esac
 
     configured_limit="$(octo_normalize_context_budget "$configured_limit" "configured context budget")" || return 2
     transport_limit="$(octo_normalize_context_budget "$transport_limit" "effective transport context limit")" || return 2
+
+    # A council critique/revision/chair prompt carries peer responses that the
+    # council adds on top of the seat prompt the caller sized. Council passes
+    # that added size so those phases get their own budget instead of being
+    # refused at the seat budget. A real transport or model limit still caps it.
+    local council_allowance="${_OCTOPUS_COUNCIL_CONTEXT_ALLOWANCE:-}"
+    if [[ "$phase" == "council" && "$council_allowance" =~ ^[0-9]{1,9}$ && "$council_allowance" != 0 ]]; then
+        council_allowance=$((10#$council_allowance))
+        configured_limit="$(octo_saturating_context_add "$configured_limit" "$council_allowance")" || return 2
+        if [[ "$transport_defaulted" == 1 ]]; then
+            transport_limit="$(octo_saturating_context_add "$transport_limit" "$council_allowance")" || return 2
+        fi
+    fi
 
     explicit_model="$(octo_agent_spec_explicit_model "$agent_type" 2>/dev/null || true)"
     if [[ -n "$explicit_model" ]]; then
@@ -1021,6 +1035,35 @@ octo_estimate_prompt_tokens() {
         printf '%s\n' "$byte_tokens"
     else
         printf '%s\n' "$char_tokens"
+    fi
+}
+
+# Describe a prompt's size against the admission limit in the unit that is
+# actually enforced. octo_estimate_prompt_tokens counts any prompt containing
+# non-ASCII text at 3 UTF-8 bytes per token, so its limit is in bytes, not the
+# 4-chars-per-token figure of the raw budget.
+octo_context_record_refusal() {
+    # A detached council seat's stderr is not shown to the operator. When the
+    # council names a refusal file, record why this prompt was refused there.
+    local file="${_OCTOPUS_CONTEXT_REFUSAL_FILE:-}"
+    [[ -n "$file" ]] || return 0
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+    printf '%s\n' "$1" > "$file" 2>/dev/null || true
+}
+
+octo_context_admission_desc() {
+    local prompt="$1" limit="$2"
+    local chars=${#prompt}
+    local estimated
+    estimated="$(octo_estimate_prompt_tokens "$prompt")"
+    local LC_ALL=C
+    local bytes=${#prompt}
+    if [[ "$bytes" -gt "$chars" ]]; then
+        printf '%s chars / %s bytes (~%s tokens); admission limit is %s bytes (~%s tokens, counted at 3 bytes per token because the prompt has non-ASCII text)' \
+            "$chars" "$bytes" "$estimated" "$((limit * 3))" "$limit"
+    else
+        printf '%s chars (~%s tokens); admission limit is %s chars (~%s tokens)' \
+            "$chars" "$estimated" "$((limit * 4))" "$limit"
     fi
 }
 
@@ -1504,7 +1547,10 @@ enforce_context_budget() {
 
         case "$strategy" in
             fail)
-                log "ERROR" "Context budget: prompt for $target is ${original_chars} chars; limit is $char_budget chars (~$budget tokens)"
+                local refusal_desc
+                refusal_desc="prompt for $target role=${role:-none} phase=${phase:-none} is $(octo_context_admission_desc "$prompt" "$admission_limit")"
+                log "ERROR" "Context budget: ${refusal_desc}"
+                octo_context_record_refusal "$refusal_desc"
                 type record_oversize_event >/dev/null 2>&1 && record_oversize_event "$target" "$original_chars" "$original_chars" "failed" "$role" "$phase" "$budget" || true
                 type write_agent_status >/dev/null 2>&1 && write_agent_status "$target" "failed" "$((original_chars / 4))" 0 "Prompt exceeded context budget" 0 "" "$role" || true
                 return 78
@@ -1528,7 +1574,10 @@ enforce_context_budget() {
                 # saw, so the summarizer-unavailable fallback refuses to truncate
                 # council prompts unless the caller opts in explicitly.
                 if octo_context_budget_refuses_fallback_truncation "$phase"; then
-                    log "ERROR" "Context budget: summarizer unavailable and the council prompt for $target role=${role:-none} is ${original_chars} chars; limit is $char_budget chars (~$budget tokens). Refusing to truncate: seats would review an incomplete artifact. Split the diff per file (e.g. 'git diff -- <paths>' chunks that each fit the budget) and re-dispatch one council per chunk, or set OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1 to accept a truncated prompt."
+                    local refusal_desc
+                    refusal_desc="prompt for $target role=${role:-none} is $(octo_context_admission_desc "$prompt" "$admission_limit"); summarizer unavailable and truncation refused"
+                    octo_context_record_refusal "$refusal_desc"
+                    log "ERROR" "Context budget: summarizer unavailable and the council prompt for $target role=${role:-none} is $(octo_context_admission_desc "$prompt" "$admission_limit"). Refusing to truncate: seats would review an incomplete artifact. Split the diff per file (e.g. 'git diff -- <paths>' chunks that each fit the budget) and re-dispatch one council per chunk, or set OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1 to accept a truncated prompt."
                     type record_oversize_event >/dev/null 2>&1 && record_oversize_event "$target" "$original_chars" "$original_chars" "failed" "$role" "$phase" "$budget" || true
                     type write_agent_status >/dev/null 2>&1 && write_agent_status "$target" "failed" "$((original_chars / 4))" 0 "Council prompt exceeded context budget and summarizer was unavailable" 0 "" "$role" || true
                     return 78

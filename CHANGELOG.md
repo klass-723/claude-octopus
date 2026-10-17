@@ -31,6 +31,26 @@
 
 ### Fixed
 
+- Council context-budget refusals now report the limit that is actually
+  enforced, and a refused seat is no longer reported as `no-response`
+  (sail-cruisey #3006, #3011). Admission compares an estimated token count with
+  `admission_limit`, and the estimate counts any prompt with non-ASCII text at 3
+  UTF-8 bytes per token. The error still printed the raw 4-chars-per-token
+  budget, so a 32457-char codex prompt was refused under a message claiming a
+  41856-char limit, while about 31392 bytes was enforced. The message now gives
+  the prompt's chars, bytes and estimated tokens, plus the enforced limit in the
+  unit that applies. A seat refused this way (rc 78, nothing sent) gets status
+  `refused-oversize`. Its warning and `seats[].refusal` in `summary.json` carry
+  that detail, which previously went only to the detached seat's discarded
+  stderr. Critique, revision and chair-synthesis prompts now get their own
+  budget: the size of the peer responses and critiques the council adds on top
+  of the seat prompt. A real transport or model limit still caps it. Before,
+  those rounds were refused at the seat budget and `chair_synthesis_available`
+  was false every round. A council whose quorum is met now exits 0 with
+  `summary.json` status `partial` when chair synthesis is unavailable or the
+  aggregate deadline cuts later phases. It used to exit 1 although the vote
+  stood.
+
 - `council-wait.sh --pool` now sees councils in the runner's per-session
   sub-pools. The runner writes each default-pool run under
   `councils/session-<slug>/<run_id>/` and its `latest-<key>` pointer inside

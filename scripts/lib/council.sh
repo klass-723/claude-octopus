@@ -1804,6 +1804,26 @@ VERDICT: ${fixture_verdict}
 EOF
 }
 
+council_phase_context_allowance() {
+    # Estimated tokens a critique/revision/chair prompt adds over this persona's
+    # independent-advice prompt (peer responses, critiques, revisions). The caller
+    # sizes the artifact against the seat budget and cannot see this scaffolding,
+    # so dispatch budgets these phases with the allowance added (sail-cruisey #3011).
+    local persona="$1" phase="$2" prompt="$3" phase_tokens base_tokens
+    if [[ -z "$phase" || "$phase" == "independent-advice" ]] \
+        || ! declare -f octo_estimate_prompt_tokens >/dev/null 2>&1; then
+        printf '0'
+        return 0
+    fi
+    phase_tokens="$(octo_estimate_prompt_tokens "$prompt")"
+    base_tokens="$(octo_estimate_prompt_tokens "$(council_prompt_for_member "$persona" "independent-advice")")"
+    if [[ "$phase_tokens" =~ ^[0-9]+$ && "$base_tokens" =~ ^[0-9]+$ ]] && (( phase_tokens > base_tokens )); then
+        printf '%s' "$(( phase_tokens - base_tokens ))"
+    else
+        printf '0'
+    fi
+}
+
 council_live_response() {
     local provider="$1"
     local persona="$2"
@@ -1855,7 +1875,10 @@ EOF
         else
             _seat_timeout="$(council_seat_timeout "$agent_type")"
         fi
-        run_agent_sync_consultative "$agent_type" "$prompt" "$_seat_timeout" "$persona" "council"
+        local _allowance
+        _allowance="$(council_phase_context_allowance "$persona" "$dispatch_phase" "$prompt")"
+        _OCTOPUS_COUNCIL_CONTEXT_ALLOWANCE="$_allowance" \
+            run_agent_sync_consultative "$agent_type" "$prompt" "$_seat_timeout" "$persona" "council"
         return $?
     fi
 
@@ -3444,7 +3467,8 @@ council_finalize_deadline_partial() {
     # budget). Marks the hit, writes the reported partial, and surfaces it loudly.
     # The advice vote already stands in summary.json; skipping the remaining phases
     # is exactly what keeps the run from being SIGTERM-reaped past a parent timeout
-    # (#2918). Caller returns 1 afterwards (a partial is not a clean full run).
+    # (#2918). Only reached after quorum is met, so the caller returns 0: the vote
+    # stands and summary.json status "partial" records the skipped phases.
     local where="${1:-after the advice vote}"
     COUNCIL_DEADLINE_HIT="true"
     council_append_corpus_artifacts || return 1
@@ -3506,7 +3530,7 @@ council_vendor_votes_json() {
                        else "APPROVE" end),
                 split: ($yes > 0 and $no > 0),
                 reason: (if ($counted | length) == 0
-                           then "no counted seat (blind, no-response, degenerate, or non-voting chair)"
+                           then "no counted seat (blind, no-response, refused-oversize, degenerate, or non-voting chair)"
                          elif $yes > 0 and $no > 0
                            then "split: \($yes) APPROVE vs \($no) non-APPROVE among counted seats; fail-safe counts the vendor as not approving"
                          elif $no > 0
@@ -3536,6 +3560,15 @@ council_note_seat_timeout() {
     local provider="$1" persona="$2" rc="$3" cap="$4" knob line
     knob="OCTOPUS_COUNCIL_TIMEOUT_$(printf '%s' "$provider" | tr '[:lower:]-' '[:upper:]_')"
     line="seat ${provider} (${persona}) exceeded its ${cap}s cap (rc=${rc}) — raise ${knob} to give it more time"
+    COUNCIL_TIMEOUT_WARNINGS="${COUNCIL_TIMEOUT_WARNINGS:+${COUNCIL_TIMEOUT_WARNINGS}
+}${line}"
+}
+
+council_note_seat_oversize() {
+    # Accumulate an end-of-run warning for a seat whose prompt the context budget
+    # refused before dispatch (rc 78). The log line carries the enforced limit.
+    local provider="$1" persona="$2" detail="${3:-}" line
+    line="seat ${provider} (${persona}) refused: oversize — ${detail:-its prompt exceeded the context admission limit}; the prompt was never sent, so shrink or split the artifact"
     COUNCIL_TIMEOUT_WARNINGS="${COUNCIL_TIMEOUT_WARNINGS:+${COUNCIL_TIMEOUT_WARNINGS}
 }${line}"
 }
@@ -3629,7 +3662,12 @@ council_run_advice_phase() {
         # reaper's) to the live remaining budget while the run is anchored, so the
         # seat cannot overrun the aggregate deadline.
         COUNCIL_SEATS_DISPATCHED=$((COUNCIL_SEATS_DISPATCHED + 1))
-        council_dispatch_member_detached "$member" "independent-advice" "$output_path" || dispatch_rc=$?
+        # The detached seat's stderr is not shown; a context-budget refusal
+        # writes its enforced limit here so the warning and summary carry it.
+        local refusal_file="${COUNCIL_RUN_DIR}/refusals/$(basename "$output_path" .md).txt" refusal=""
+        rm -f "$refusal_file" 2>/dev/null
+        _OCTOPUS_CONTEXT_REFUSAL_FILE="$refusal_file" \
+            council_dispatch_member_detached "$member" "independent-advice" "$output_path" || dispatch_rc=$?
         dispatch_timeout_provenance="$COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE"
         # Confirm-finish-before-shortage: a non-zero dispatch (e.g. the per-seat
         # timeout fired) may still have left a COMPLETE, verdict-bearing review that
@@ -3692,6 +3730,13 @@ council_run_advice_phase() {
             rm -f "$output_path"
             if (( dispatch_rc == 0 )); then
                 seat_status="empty"
+            elif (( dispatch_rc == 78 )); then
+                # The context budget refused this seat's prompt before dispatch
+                # (rc 78): the provider never saw it, so it is not a provider
+                # shortage. Name it so the caller shrinks the artifact.
+                seat_status="refused-oversize"
+                [[ -s "$refusal_file" ]] && refusal="$(head -c 1000 "$refusal_file" | tr -d '\n')"
+                council_note_seat_oversize "$mprovider" "$persona" "$refusal"
             else
                 seat_status="no-response"
             fi
@@ -3728,6 +3773,7 @@ council_run_advice_phase() {
               timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
               counted_as_approver:false}')"
         [[ "$seat_synthesizer" == "true" ]] && seat_rec="$(jq -c '.synthesizer = true' <<< "$seat_rec")"
+        [[ -n "$refusal" ]] && seat_rec="$(jq -c --arg r "$refusal" '.refusal = $r' <<< "$seat_rec")"
         COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "$COUNCIL_SEAT_RECORDS_JSON")"
         index=$((index + 1))
     done < <(jq -c '.[]' <<< "$COUNCIL_ROSTER_JSON")
@@ -5049,7 +5095,9 @@ _council_run_impl() {
         council_write_summary_json "partial" || return 1
         council_print_run_warnings
         _council_warn "Council quorum met on independent vendor approvals, but chair synthesis was unavailable — no synthesized recommendation was produced this round. Read the per-seat verdicts in ${COUNCIL_RUN_DIR}/responses/ (summary.json quorum.met=true, chair_synthesis_available=false)."
-        return 1
+        # Quorum is met, so the vote stands: exit 0 and let summary.json status
+        # "partial" carry the missing synthesis (sail-cruisey #3006/#3011).
+        return 0
     fi
 
     # Aggregate deadline reached after the advice vote: even with quorum met, do not
@@ -5058,7 +5106,7 @@ _council_run_impl() {
     # into a silent reap. Finalize a reported partial; the vote stands (#2918).
     if council_deadline_exceeded; then
         council_finalize_deadline_partial "after the advice vote" || return 1
-        return 1
+        return 0
     fi
 
     if council_check_cost_cap "critique" "critique"; then
@@ -5080,7 +5128,7 @@ _council_run_impl() {
     # partial instead of launching one more (budget-overrunning) synthesis (#2918).
     if council_deadline_exceeded; then
         council_finalize_deadline_partial "during critique/revision" || return 1
-        return 1
+        return 0
     fi
     if council_check_cost_cap "synthesis" "synthesis"; then
         :
@@ -5101,7 +5149,9 @@ _council_run_impl() {
         council_write_summary_json "partial" || return 1
         council_print_run_warnings
         _council_warn "Council quorum met on independent vendor approvals, but chair synthesis was unavailable — no synthesized recommendation was produced this round. Read the per-seat verdicts in ${COUNCIL_RUN_DIR}/responses/ (summary.json quorum.met=true, chair_synthesis_available=false)."
-        return 1
+        # Quorum is met, so the vote stands: exit 0 and let summary.json status
+        # "partial" carry the missing synthesis (sail-cruisey #3006/#3011).
+        return 0
     fi
     # Synthesis itself consumes wall-clock: the pre-synthesis check only gates the
     # dispatch START, so a synthesis that began just under the threshold can run its
@@ -5110,7 +5160,7 @@ _council_run_impl() {
     # hard deadline (#2918).
     if council_deadline_exceeded; then
         council_finalize_deadline_partial "during synthesis" || return 1
-        return 1
+        return 0
     fi
     if council_check_cost_cap "implementation" "implementation planning"; then
         :

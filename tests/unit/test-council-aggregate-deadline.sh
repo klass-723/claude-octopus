@@ -372,7 +372,8 @@ test_synthesis_expiry_publishes_reported_partial() {
             OCTOPUS_COUNCIL_PROVIDER_FIXTURE='claude:available,codex:available,agy:available' \
             council_run --goal review --depth quick --benchmark off --output-dir "$pool" 'Review fixture' \
                 > "$TEST_TMP_DIR/synthesis-partial.out" 2>&1 || rc=$?
-        [[ "$rc" -ne 0 ]] && jq -e '.status == "partial" and .deadline.hit == true' "$COUNCIL_RUN_DIR/summary.json" >/dev/null \
+        # Quorum was met before the deadline: the vote stands, so exit 0.
+        [[ "$rc" -eq 0 ]] && jq -e '.status == "partial" and .deadline.hit == true' "$COUNCIL_RUN_DIR/summary.json" >/dev/null \
             && jq -e '.state == "finished" and .status == "partial"' "$COUNCIL_RUN_DIR/run-status.json" >/dev/null
     ); then test_pass; else test_fail "synthesis expiry was not reported as an aggregate-deadline partial"; fi
 }

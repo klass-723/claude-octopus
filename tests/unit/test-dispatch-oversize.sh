@@ -202,4 +202,69 @@ else
 fi
 unset OCTOPUS_PROVIDERS_CONFIG OCTOPUS_OVERSIZE_STRATEGY
 
+# The size test is octo_estimate_prompt_tokens against admission_limit (the
+# summarize trigger, capped at the provider budget), counting any non-ASCII
+# prompt at 3 UTF-8 bytes per token. Errors must report that limit, not the raw
+# 4-chars-per-token budget: sail-cruisey #3006/#3011 printed "limit is 41856
+# chars" while enforcing 10464 tokens x 3 = 31392 bytes.
+utf8_locale=""
+for _loc in C.UTF-8 en_US.UTF-8 C.utf8 en_US.utf8; do
+    if LC_ALL="$_loc" bash -c 's="—"; [[ ${#s} -eq 1 ]]' 2>/dev/null; then utf8_locale="$_loc"; break; fi
+done
+
+test_case "council refusal reports the enforced admission limit for a non-ASCII prompt"
+if [[ -z "$utf8_locale" ]]; then
+    test_skip "no UTF-8 locale available"
+else
+    run_agent_sync() { return 1; }
+    rm -f "$TEST_TMP_DIR/oversize-error.log"
+    # 3300 ASCII chars + 50 em-dashes: 3350 chars (under the old 4000-char
+    # message) but 3450 bytes, so ~1150 estimated tokens > 1000 admission.
+    utf8_prompt="$(printf 'a%.0s' $(seq 1 3300))$(printf '—%.0s' $(seq 1 50))"
+    set +e
+    LC_ALL="$utf8_locale" OCTOPUS_CONTEXT_BUDGET=1000 OCTOPUS_OVERSIZE_STRATEGY=summarize \
+        enforce_context_budget "$utf8_prompt" "security-auditor" "codex" "council" >/dev/null
+    rc=$?
+    set -e
+    error_log="$(cat "$TEST_TMP_DIR/oversize-error.log" 2>/dev/null || true)"
+    if [[ $rc -eq 78 ]] &&
+       [[ "$error_log" == *"is 3350 chars / 3450 bytes (~1150 tokens); admission limit is 3000 bytes (~1000 tokens, counted at 3 bytes per token"* ]] &&
+       [[ "$error_log" != *"4000 chars"* ]] &&
+       [[ "$error_log" == *"Refusing to truncate"* ]]; then
+        test_pass
+    else
+        test_fail "rc=$rc error='$error_log'"
+    fi
+fi
+
+test_case "fail strategy reports the enforced admission limit for an ASCII prompt"
+rm -f "$TEST_TMP_DIR/oversize-error.log"
+set +e
+OCTOPUS_CONTEXT_BUDGET=40 OCTOPUS_OVERSIZE_STRATEGY=fail \
+    enforce_context_budget "$long_prompt" "reviewer" "codex" "review" >/dev/null
+rc=$?
+set -e
+error_log="$(cat "$TEST_TMP_DIR/oversize-error.log" 2>/dev/null || true)"
+if [[ $rc -eq 78 ]] &&
+   [[ "$error_log" == *"prompt for codex role=reviewer phase=review is ${#long_prompt} chars (~$(( (${#long_prompt} + 3) / 4 )) tokens); admission limit is 64 chars (~16 tokens)"* ]]; then
+    test_pass
+else
+    test_fail "rc=$rc error='$error_log'"
+fi
+
+test_case "council phase allowance widens the budget only for phase council"
+base="$(OCTOPUS_CONTEXT_BUDGET=1000 get_provider_context_limit codex council security-auditor)"
+widened="$(_OCTOPUS_COUNCIL_CONTEXT_ALLOWANCE=500 OCTOPUS_CONTEXT_BUDGET=1000 get_provider_context_limit codex council security-auditor)"
+other="$(_OCTOPUS_COUNCIL_CONTEXT_ALLOWANCE=500 OCTOPUS_CONTEXT_BUDGET=1000 get_provider_context_limit codex review reviewer)"
+bad="$(_OCTOPUS_COUNCIL_CONTEXT_ALLOWANCE=abc OCTOPUS_CONTEXT_BUDGET=1000 get_provider_context_limit codex council security-auditor)"
+if [[ "$base" == 1000 && "$widened" == 1500 && "$other" == 1000 && "$bad" == 1000 ]]; then
+    test_pass
+else
+    test_fail "base=$base widened=$widened other=$other bad=$bad"
+fi
+
+test_case "council phase allowance stays under an explicit transport limit"
+capped="$(_OCTOPUS_COUNCIL_CONTEXT_ALLOWANCE=500 OCTOPUS_CLAUDE_CONTEXT_BUDGET=1000 OCTOPUS_CLAUDE_EFFECTIVE_CONTEXT_LIMIT=1200 get_provider_context_limit claude council security-auditor)"
+if [[ "$capped" == 1200 ]]; then test_pass; else test_fail "capped=$capped want 1200"; fi
+
 test_summary
