@@ -1018,30 +1018,35 @@ octo_normalize_nonnegative_context_value() {
     printf '%s\n' "$normalized"
 }
 
-# Fast conservative estimate without launching a tokenizer. The character
-# estimate is suitable for ordinary prose; the byte estimate closes the gap for
-# UTF-8-heavy prompts where one visible character occupies several bytes.
+# Fast conservative estimate without launching a tokenizer. ASCII text counts
+# at 4 characters per token (ordinary prose); non-ASCII text counts at 3 UTF-8
+# bytes per token (about one token per CJK character or em-dash). The two
+# parts are summed, so a handful of non-ASCII characters costs a handful of
+# tokens. The previous estimate switched the WHOLE prompt to the byte rate as
+# soon as one such character appeared, which cut the effective budget of every
+# council prompt by about a quarter (sail-cruisey #3011). A pure-ASCII prompt
+# is still ceil(chars / 4). Non-ASCII detection relies on the caller's locale
+# counting characters, as before: under LC_ALL=C every prompt counts as ASCII.
 octo_estimate_prompt_tokens() {
     local prompt="$1"
     local chars=${#prompt}
-    local char_tokens=$(((chars + 3) / 4))
     local LC_ALL=C
     local bytes=${#prompt}
-    local byte_tokens=0
-    if [[ "$bytes" -gt "$chars" ]]; then
-        byte_tokens=$(((bytes + 2) / 3))
+    if [[ "$bytes" -le "$chars" ]]; then
+        printf '%s\n' $(((chars + 3) / 4))
+        return 0
     fi
-    if [[ "$byte_tokens" -gt "$char_tokens" ]]; then
-        printf '%s\n' "$byte_tokens"
-    else
-        printf '%s\n' "$char_tokens"
-    fi
+    # tr drops the non-ASCII bytes; what remains is the ASCII byte count. The
+    # local LC_ALL above is not exported, so set it for tr explicitly. If the
+    # count fails, 0 charges every byte at the stricter non-ASCII rate.
+    local ascii_bytes
+    ascii_bytes="$(printf '%s' "$prompt" | LC_ALL=C tr -d '\200-\377' | wc -c | tr -d '[:space:]')"
+    [[ "$ascii_bytes" =~ ^[0-9]+$ && "$ascii_bytes" -le "$bytes" ]] || ascii_bytes=0
+    local non_ascii_bytes=$((bytes - ascii_bytes))
+    # ceil(ascii / 4 + non_ascii / 3), computed over the common denominator 12.
+    printf '%s\n' $(((ascii_bytes * 3 + non_ascii_bytes * 4 + 11) / 12))
 }
 
-# Describe a prompt's size against the admission limit in the unit that is
-# actually enforced. octo_estimate_prompt_tokens counts any prompt containing
-# non-ASCII text at 3 UTF-8 bytes per token, so its limit is in bytes, not the
-# 4-chars-per-token figure of the raw budget.
 octo_context_record_refusal() {
     # A detached council seat's stderr is not shown to the operator. When the
     # council names a refusal file, record why this prompt was refused there.
@@ -1051,6 +1056,11 @@ octo_context_record_refusal() {
     printf '%s\n' "$1" > "$file" 2>/dev/null || true
 }
 
+# Describe a prompt's size against the admission limit in the unit that is
+# actually enforced. A pure-ASCII prompt is counted at 4 chars per token, so
+# its limit is an exact character count. A prompt with non-ASCII text adds
+# those bytes at 3 per token, so only the token limit is exact there and the
+# character figure is what the limit would admit as plain ASCII.
 octo_context_admission_desc() {
     local prompt="$1" limit="$2"
     local chars=${#prompt}
@@ -1059,13 +1069,14 @@ octo_context_admission_desc() {
     local LC_ALL=C
     local bytes=${#prompt}
     if [[ "$bytes" -gt "$chars" ]]; then
-        printf '%s chars / %s bytes (~%s tokens); admission limit is %s bytes (~%s tokens, counted at 3 bytes per token because the prompt has non-ASCII text)' \
-            "$chars" "$bytes" "$estimated" "$((limit * 3))" "$limit"
+        printf '%s chars / %s bytes (~%s tokens: ASCII at 4 chars per token, non-ASCII at 3 bytes per token); admission limit is ~%s tokens (about %s chars of ASCII text)' \
+            "$chars" "$bytes" "$estimated" "$limit" "$((limit * 4))"
     else
         printf '%s chars (~%s tokens); admission limit is %s chars (~%s tokens)' \
             "$chars" "$estimated" "$((limit * 4))" "$limit"
     fi
 }
+
 
 octo_saturating_context_add() {
     local base
@@ -1528,7 +1539,7 @@ enforce_context_budget() {
     fi
 
     # Preserve the familiar four-character reporting boundary while admission
-    # uses the stricter of character- and UTF-8-byte-based estimates.
+    # uses the token estimate (ASCII at 4 chars per token, non-ASCII bytes at 3).
     local char_budget=$((budget * 4))
     local estimated_tokens summary_trigger_budget strategy admission_limit
     estimated_tokens="$(octo_estimate_prompt_tokens "$prompt")"

@@ -203,14 +203,36 @@ fi
 unset OCTOPUS_PROVIDERS_CONFIG OCTOPUS_OVERSIZE_STRATEGY
 
 # The size test is octo_estimate_prompt_tokens against admission_limit (the
-# summarize trigger, capped at the provider budget), counting any non-ASCII
-# prompt at 3 UTF-8 bytes per token. Errors must report that limit, not the raw
-# 4-chars-per-token budget: sail-cruisey #3006/#3011 printed "limit is 41856
-# chars" while enforcing 10464 tokens x 3 = 31392 bytes.
+# summarize trigger, capped at the provider budget). ASCII counts at 4 chars per
+# token and non-ASCII bytes at 3 per token, summed. Errors must report that
+# limit, not the raw 4-chars-per-token budget: sail-cruisey #3006/#3011 printed
+# "limit is 41856 chars" while the old estimate charged the whole prompt at the
+# byte rate (10464 tokens x 3 = 31392 bytes) because of a few em-dashes.
 utf8_locale=""
 for _loc in C.UTF-8 en_US.UTF-8 C.utf8 en_US.utf8; do
-    if LC_ALL="$_loc" bash -c 's="—"; [[ ${#s} -eq 1 ]]' 2>/dev/null; then utf8_locale="$_loc"; break; fi
+    if LC_ALL="$_loc" bash -c '[[ ${#1} -eq 1 ]]' _ "$(printf '\xe2\x80\x94')" 2>/dev/null; then utf8_locale="$_loc"; break; fi
 done
+
+test_case "a few non-ASCII characters no longer push an otherwise-fitting council prompt over the limit"
+if [[ -z "$utf8_locale" ]]; then
+    test_skip "no UTF-8 locale available"
+else
+    run_agent_sync() { return 1; }
+    rm -f "$TEST_TMP_DIR/oversize-error.log"
+    # 3300 ASCII chars + 50 em-dashes = 875 tokens (825 + 50). The old estimate
+    # charged all 3450 bytes at 3 per token (1150) and refused it at 1000.
+    utf8_prompt="$(printf 'a%.0s' $(seq 1 3300))$(printf '\xe2\x80\x94%.0s' $(seq 1 50))"
+    set +e
+    output="$(LC_ALL="$utf8_locale" OCTOPUS_CONTEXT_BUDGET=1000 OCTOPUS_OVERSIZE_STRATEGY=summarize \
+        enforce_context_budget "$utf8_prompt" "security-auditor" "codex" "council")"
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 && "$output" == "$utf8_prompt" && ! -s "$TEST_TMP_DIR/oversize-error.log" ]]; then
+        test_pass
+    else
+        test_fail "rc=$rc out_chars=${#output} error='$(cat "$TEST_TMP_DIR/oversize-error.log" 2>/dev/null)'"
+    fi
+fi
 
 test_case "council refusal reports the enforced admission limit for a non-ASCII prompt"
 if [[ -z "$utf8_locale" ]]; then
@@ -218,9 +240,9 @@ if [[ -z "$utf8_locale" ]]; then
 else
     run_agent_sync() { return 1; }
     rm -f "$TEST_TMP_DIR/oversize-error.log"
-    # 3300 ASCII chars + 50 em-dashes: 3350 chars (under the old 4000-char
-    # message) but 3450 bytes, so ~1150 estimated tokens > 1000 admission.
-    utf8_prompt="$(printf 'a%.0s' $(seq 1 3300))$(printf '—%.0s' $(seq 1 50))"
+    # 3900 ASCII chars + 50 em-dashes: 3950 chars (under 4000) but 975 + 50 =
+    # 1025 estimated tokens, so the em-dashes alone tip it over the 1000 limit.
+    utf8_prompt="$(printf 'a%.0s' $(seq 1 3900))$(printf '\xe2\x80\x94%.0s' $(seq 1 50))"
     set +e
     LC_ALL="$utf8_locale" OCTOPUS_CONTEXT_BUDGET=1000 OCTOPUS_OVERSIZE_STRATEGY=summarize \
         enforce_context_budget "$utf8_prompt" "security-auditor" "codex" "council" >/dev/null
@@ -228,8 +250,8 @@ else
     set -e
     error_log="$(cat "$TEST_TMP_DIR/oversize-error.log" 2>/dev/null || true)"
     if [[ $rc -eq 78 ]] &&
-       [[ "$error_log" == *"is 3350 chars / 3450 bytes (~1150 tokens); admission limit is 3000 bytes (~1000 tokens, counted at 3 bytes per token"* ]] &&
-       [[ "$error_log" != *"4000 chars"* ]] &&
+       [[ "$error_log" == *"is 3950 chars / 4050 bytes (~1025 tokens: ASCII at 4 chars per token, non-ASCII at 3 bytes per token); admission limit is ~1000 tokens (about 4000 chars of ASCII text)"* ]] &&
+       [[ "$error_log" != *"4000 chars (~"* ]] &&
        [[ "$error_log" == *"Refusing to truncate"* ]]; then
         test_pass
     else

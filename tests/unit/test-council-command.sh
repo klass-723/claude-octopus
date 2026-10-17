@@ -2168,9 +2168,10 @@ test_council_prompt_template_is_ascii() {
     printf 'critique\n' > "$d/critiques/01-strategy-analyst.md"
     printf 'revision\n' > "$d/revisions/01-strategy-analyst.md"
     COUNCIL_ROSTER_JSON='[{"persona":"strategy-analyst","seat":"chair","provider":"claude"},{"persona":"security-auditor","seat":"member","provider":"codex"}]'
-    # octo_estimate_prompt_tokens counts a prompt with ANY non-ASCII character at
-    # 3 UTF-8 bytes per token, so one em-dash in Octopus's own template cut every
-    # council's effective admission limit to 3/4 of its budget (sail-cruisey #3011).
+    # Until the estimator summed ASCII and non-ASCII text separately, one em-dash
+    # in Octopus's own template made every council prompt count at 3 UTF-8 bytes
+    # per token, 3/4 of its budget (sail-cruisey #3011). Keep the template ASCII
+    # so the 4-chars-per-token figure the caller sizes against stays exact.
     local phase prompt bad="" rendered="" LC_ALL=C
     for phase in independent-advice cross-critique revision-after-critique chair-synthesis; do
         prompt="$(council_prompt_for_member security-auditor "$phase")"
