@@ -2154,6 +2154,47 @@ test_council_phase_context_allowance() {
     fi
 }
 
+test_council_prompt_template_is_ascii() {
+    test_case "council phase prompts built from ASCII inputs stay ASCII, so admission counts 4 chars per token"
+    load_council_lib || return 1
+    source "$PROJECT_ROOT/scripts/lib/dispatch.sh" 2>/dev/null || true
+    local d; d="$(mktemp -d "$TEST_TMP_DIR/council-ascii.XXXXXX")"; mkdir -p "$d/responses" "$d/critiques" "$d/revisions"
+    COUNCIL_RUN_DIR="$d"
+    COUNCIL_TASK="Review the change"; COUNCIL_GOAL="review"; COUNCIL_DOMAIN="software"
+    COUNCIL_STYLE="balanced"; COUNCIL_DEPTH="standard"
+    printf 'diff --git a/app.ts b/app.ts\n+guard nil\n' > "$d/change.diff"
+    COUNCIL_CONTEXT_FILES=("$d/change.diff")
+    printf 'peer review\nVERDICT: APPROVE\n' > "$d/responses/01-strategy-analyst.md"
+    printf 'critique\n' > "$d/critiques/01-strategy-analyst.md"
+    printf 'revision\n' > "$d/revisions/01-strategy-analyst.md"
+    COUNCIL_ROSTER_JSON='[{"persona":"strategy-analyst","seat":"chair","provider":"claude"},{"persona":"security-auditor","seat":"member","provider":"codex"}]'
+    # octo_estimate_prompt_tokens counts a prompt with ANY non-ASCII character at
+    # 3 UTF-8 bytes per token, so one em-dash in Octopus's own template cut every
+    # council's effective admission limit to 3/4 of its budget (sail-cruisey #3011).
+    local phase prompt bad="" rendered="" LC_ALL=C
+    for phase in independent-advice cross-critique revision-after-critique chair-synthesis; do
+        prompt="$(council_prompt_for_member security-auditor "$phase")"
+        # Prove the context-file and peer-artifact wrappers were rendered too.
+        [[ "$prompt" == *"guard nil"* ]] && rendered="$rendered ctx"
+        [[ "$phase" == chair-synthesis && "$prompt" == *"peer review"* ]] && rendered="$rendered peers"
+        if [[ "$prompt" == *[$'\x80'-$'\xff']* ]]; then
+            local line first=""
+            while IFS= read -r line; do
+                [[ "$line" == *[$'\x80'-$'\xff']* ]] && { first="${line:0:80}"; break; }
+            done <<< "$prompt"
+            bad="$bad $phase:[$first]"
+        elif [[ "$(octo_estimate_prompt_tokens "$prompt")" != "$(( (${#prompt} + 3) / 4 ))" ]]; then
+            bad="$bad $phase:estimate-not-4-chars-per-token"
+        fi
+    done
+    if [[ -z "$bad" && "$rendered" == " ctx ctx ctx ctx peers" ]]; then
+        test_pass
+    else
+        test_fail "non-ASCII council template text:$bad (rendered:$rendered)"
+        return 1
+    fi
+}
+
 test_council_one_vote_per_vendor_opt_in() {
     test_case "OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1 keeps one voting seat per model family; default leaves the roster intact"
     load_council_lib || return 1
@@ -2275,6 +2316,7 @@ test_council_quorum_met_with_host_native_chair
 test_council_degenerate_chair_keeps_vote_and_flags_synthesis
 test_council_oversize_refused_seat_is_labelled
 test_council_phase_context_allowance
+test_council_prompt_template_is_ascii
 test_council_one_vote_per_vendor_opt_in
 test_council_defaults_are_depth_aware
 test_council_rejects_non_usd_budget

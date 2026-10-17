@@ -31,6 +31,15 @@
 
 ### Fixed
 
+- Council prompts built by Octopus are now plain ASCII. Two em-dashes in the
+  seat prompt template made every council prompt non-ASCII, and the context
+  estimator counts such a prompt at 3 UTF-8 bytes per token instead of 4
+  characters. That cut every council's effective admission limit to about 3/4
+  of its budget (sail-cruisey #3011). A test renders each phase prompt from
+  ASCII inputs and fails on any non-ASCII byte. Text the caller supplies, such
+  as the task, context files or the project `AGENTS.md` policy block, can still
+  make a prompt non-ASCII.
+
 - Council context-budget refusals now report the limit that is actually
   enforced, and a refused seat is no longer reported as `no-response`
   (sail-cruisey #3006, #3011). Admission compares an estimated token count with
