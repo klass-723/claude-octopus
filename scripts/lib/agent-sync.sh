@@ -1281,6 +1281,36 @@ run_agent_sync_consultative() {
     return "$rc"
 }
 
+# Council seats run detached, so a failed provider's stderr reaches no one and
+# summary.json could only say "no-response". When the caller names a capture
+# file, append this failed attempt there: the exit code and reason, the
+# provider's stderr, or the tail of its stdout when stderr is empty (some CLIs
+# print their error there). Secrets are scrubbed and the file is private.
+octo_capture_seat_failure() {
+    local file="${_OCTOPUS_SEAT_STDERR_FILE:-}" agent="$1" rc="$2" reason="$3" err="$4" out="$5" body=""
+    [[ -n "$file" ]] || return 0
+    mkdir -p "$(dirname "$file")" 2>/dev/null || return 0
+    {
+        printf '== %s %s exited %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent" "$rc" "$reason"
+        if [[ -s "$err" ]]; then
+            printf -- '-- stderr --\n'
+            body="$(tail -c 16384 "$err")"
+        elif [[ -s "$out" ]]; then
+            printf -- '-- stdout tail (stderr was empty) --\n'
+            body="$(tail -c 4096 "$out")"
+        else
+            printf -- '-- no stderr or stdout --\n'
+        fi
+        if [[ -n "$body" ]]; then
+            if declare -F sanitize_secrets >/dev/null 2>&1; then
+                sanitize_secrets "$body"
+            else
+                printf '%s\n' "$body"
+            fi
+        fi
+    } | (umask 077; cat >> "$file") 2>/dev/null || true
+}
+
 # Print the timeout that replaces run_agent_sync's caller value, or return 1
 # when the caller value (or the dynamic default) stands.
 # OCTOPUS_AGENT_TIMEOUT overrides all caller-hardcoded values. Without this,
@@ -1659,6 +1689,8 @@ ${provider_ctx}"
         if [[ "$exit_code" -eq 139 && "$_sync_retry_count" -lt "$_sync_sigsegv_retries" ]]; then
             _sync_retry_count=$((_sync_retry_count + 1))
             log WARN "Agent $agent_type exited 139 (SIGSEGV); retrying once within the original ${timeout_secs}s budget (stderr: ${_sync_signal_artifact:-unavailable})"
+            # Record this attempt before its output is cleared for the retry.
+            octo_capture_seat_failure "$agent_type" "$exit_code" "SIGSEGV; retrying once" "$temp_err" "$temp_out"
             : > "$temp_err"
             : > "$temp_out"
             continue
@@ -1718,6 +1750,7 @@ ${provider_ctx}"
             _sync_status="timeout"
             _sync_reason="Timed out before completion"
         fi
+        octo_capture_seat_failure "$agent_type" "$exit_code" "$_sync_reason" "$temp_err" "$temp_out"
         run_contract_transition "$_sync_seat_id" "$_sync_status" \
             "reason=$_sync_reason" "stderr_file=$_sync_signal_artifact" \
             "duration_ms=$_elapsed_ms" >/dev/null 2>&1 || true
@@ -1754,6 +1787,7 @@ ${provider_ctx}"
                 return 0
             fi
             log ERROR "Agent $agent_type returned unusable output: $_sync_reason"
+            octo_capture_seat_failure "$agent_type" "$exit_code" "unusable output: $_sync_reason" "$temp_err" "$temp_out"
             type update_agent_status >/dev/null 2>&1 && update_agent_status \
                 "$agent_type" "failed" "$_elapsed_ms" "$_estimated_cost" "$timeout_secs" \
                 "$_progress_task_id" "${phase:-unknown}" "$_sync_signal_artifact" || true

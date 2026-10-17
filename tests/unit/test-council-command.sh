@@ -3140,7 +3140,10 @@ test_council_advice_does_not_infer_timeout_from_provider_rc() {
     warns="$COUNCIL_TIMEOUT_WARNINGS"
     unset -f council_dispatch_member_detached council_run_chair_fallback
 
-    if [[ "$status" == "no-response" && "$provenance" == "null" && -z "$warns" ]]; then
+    # The only warning is the seat-failure line naming the exit code and capture
+    # file; there is no "exceeded its cap" timeout hint.
+    if [[ "$status" == "no-response" && "$provenance" == "null" && "$warns" != *"cap (rc="* \
+          && "$warns" == "seat codex (code-reviewer) exited 137: "*"stderr/00-code-reviewer.log" ]]; then
         test_pass
     else
         test_fail "provider rc was misclassified as an internal timeout: status='$status' provenance='$provenance' warns=[$warns]"
