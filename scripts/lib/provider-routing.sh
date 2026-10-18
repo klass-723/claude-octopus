@@ -247,6 +247,7 @@ _octo_build_provider_env_impl() {
             [[ -n "${COMMAND_CODE_API_KEY:-}" ]] && PROVIDER_ENV_ARRAY+=("COMMAND_CODE_API_KEY=${COMMAND_CODE_API_KEY}")
             [[ -n "${CMD_ZDR:-}" ]] && PROVIDER_ENV_ARRAY+=("CMD_ZDR=${CMD_ZDR}")
             [[ -n "${OCTOPUS_COMMANDCODE_BIN:-}" ]] && PROVIDER_ENV_ARRAY+=("OCTOPUS_COMMANDCODE_BIN=${OCTOPUS_COMMANDCODE_BIN}")
+            [[ -n "${OCTOPUS_COMMANDCODE_HEARTBEAT_SECS:-}" ]] && PROVIDER_ENV_ARRAY+=("OCTOPUS_COMMANDCODE_HEARTBEAT_SECS=${OCTOPUS_COMMANDCODE_HEARTBEAT_SECS}")
             [[ ${#_trace_env[@]} -gt 0 ]] && PROVIDER_ENV_ARRAY+=("${_trace_env[@]}")
             return 0
             ;;
@@ -399,6 +400,11 @@ _octo_build_provider_env_impl() {
             ;;
         api-route*)
             _octo_build_openai_tool_loop_env "api-route" "API_ROUTE_API_KEY"
+            [[ ${#_trace_env[@]} -gt 0 ]] && PROVIDER_ENV_ARRAY+=("${_trace_env[@]}")
+            return 0
+            ;;
+        litellm*)
+            _octo_build_openai_tool_loop_env "litellm" "LITELLM_API_KEY"
             [[ ${#_trace_env[@]} -gt 0 ]] && PROVIDER_ENV_ARRAY+=("${_trace_env[@]}")
             return 0
             ;;

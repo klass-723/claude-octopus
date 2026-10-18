@@ -4,22 +4,6 @@
 
 ### Added
 
-- `council` now fails fast — or warns — when a task names a file path to read but
-  no `--context-file` was passed. Council seats default to `permissionMode "plan"`
-  (no file tools), so a plan-mode seat cannot open a referenced path and reviews
-  blind, round after round, until someone notices. The preflight detects a real
-  artifact path in the task with no `--context-file` and prints an actionable
-  warning naming the fix (pass `--context-file <path>` to inline the bytes). Set
-  `OCTOPUS_COUNCIL_REQUIRE_CONTEXT=1` to fail closed instead of warning. Bare
-  prose, a context file already supplied, or a filename mentioned without a path
-  pass silently.
-- Optional named-file proximity for council content-match grounding, off by
-  default. `OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=N` requires a quoted
-  fragment to sit within `N` characters of a *resolving* named-file mention (a
-  basename the scan actually reached) before it counts as grounding. Unset or
-  `0` preserves the shipped quote-sufficiency behavior exactly. Lets a consumer
-  that wants the runner's `blind_seats` accounting to match a stricter grounding
-  gate opt in without changing the default (sail-cruisey #2970).
 - A background `orchestrate.sh spawn` now prints `TASK_ID=`, `RESULT_FILE=`,
   `DONE_FILE=` and `RESULT_END_SENTINEL=` lines (absolute paths) before its PID
   line, which is still the last line. The finished worker also appends
@@ -43,6 +27,7 @@
   specific lines are in the file, so one real signature line no longer carries
   an invented body. Proposed code ("should become:", "such as") is not checked
   against the current file.
+
 - Grounded council seats are no longer marked blind in these cases from
   sail-cruisey #3032:
   - They cite an attached `--context-file` by its basename
@@ -59,6 +44,7 @@
   as unverifiable, not fabricated. A bare source line directly under a line
   that holds only a citation counts as verified evidence when it matches. New
   `grounding` counters in `summary.json` show which rule applied to each quote.
+
 - A council seat that exits non-zero now leaves its cause in the run dir. When
   the provider fails, `run_agent_sync` appends the exit code and the provider's
   stderr to `stderr/<seat>.log`, with secrets scrubbed and file mode 0600. When
@@ -68,17 +54,6 @@
   the cause. Chair-fallback attempts are captured the same way. Before this, a
   failing Claude seat showed only `no-response` in `summary.json` and
   "Agent claude failed with exit code 1" in the log.
-- The prompt token estimate now sums ASCII text at 4 characters per token and
-  non-ASCII text at 3 UTF-8 bytes per token. It used to charge the whole prompt
-  at the byte rate as soon as one non-ASCII character appeared, so a handful of
-  em-dashes or arrows (a project `AGENTS.md`, a plan, a diff comment) cut the
-  effective context budget of every seat by about a quarter. That is what
-  refused a 32457-character council prompt under a 41856-character limit in
-  sail-cruisey #3011. A prompt of 3300 ASCII characters and 50 em-dashes now
-  estimates 875 tokens, not 1150. Pure-ASCII prompts are unchanged, and prompts
-  that are mostly non-ASCII (CJK text) are still counted by bytes. Context
-  budget errors describe non-ASCII prompts with both rates and give the limit in
-  tokens, with the equivalent ASCII character count.
 
 - Council prompts built by Octopus are now plain ASCII. Two em-dashes in the
   seat prompt template made every council prompt non-ASCII, and the context
@@ -108,20 +83,6 @@
   `summary.json` status `partial` when chair synthesis is unavailable or the
   aggregate deadline cuts later phases. It used to exit 1 although the vote
   stood.
-
-- `council-wait.sh --pool` now sees councils in the runner's per-session
-  sub-pools. The runner writes each default-pool run under
-  `councils/session-<slug>/<run_id>/` and its `latest-<key>` pointer inside
-  that session dir, but the waiter only scanned `councils/2*/` and
-  `councils/latest-<key>`, so it reported `run: pending` until its timeout even
-  after the council finished (sail-cruisey #3011: seven waits timed out at
-  570s, 1.6–6.9 minutes after their councils completed). The waiter now
-  searches `session-*/` sub-pools, follows their `latest-<key>` pointers, and
-  compares sub-pools by UTC run name because creation counters are per pool.
-  The runner also mirrors the keyed pointer to the shared pool as
-  `session-<slug>/<run_id>` and prints `Council run dir: <path>` on stderr at
-  creation, so callers can use `--run-dir` directly. Pointers still cannot
-  leave the pool or follow a symlinked sub-pool.
 
 - Council grounding no longer accepts fabricated quotes beside real `path:line`
   citations (sail-cruisey #2997). The validator only checked that a cited file
@@ -171,6 +132,7 @@
   `OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1` to restore the old fallback. Successful
   summarization, explicit `OCTOPUS_OVERSIZE_STRATEGY=truncate`, and non-council
   phases are unchanged.
+
 - A background `spawn` worker whose provider exits 0 with an empty or
   whitespace-only output body now exits 1, writes `1` to its completion marker,
   records `## Status: FAILED (Empty output)`, and logs an ERROR naming the
@@ -179,29 +141,195 @@
   only when the transcript ends in a non-empty `codex` message; the bare
   `tokens used` trailer Codex always prints no longer counts. Tangle implementers,
   which deliver through the worktree, keep their existing handling.
-- Council proximity grounding continues its bounded scan when a duplicate quote
-  matches before the named source file, preserving valid evidence in either
-  traversal order.
 
-- Council's optional source-quote proximity check no longer stalls on large
-  responses with repeated quotes and filenames within the response size limit.
-- Council source-evidence checks isolate Python imports so project files cannot
-  execute as standard-library modules during grounding.
+## [11.14.2] - 2026-10-17
 
-- Council content-match grounding no longer counts a seat that merely echoes
-  agent-instruction boilerplate. `CLAUDE.md`, `AGENTS.md`, their `-OCTO.md`
-  twins, `GEMINI.md`, and similar files are injected into every seat's prompt
-  context, so a seat could quote their verbatim prose and score a false
-  content-match without reading any source. The scan already skipped hidden
-  paths (`.claude/…`); it now also skips these boilerplate basenames wherever
-  they appear, including the visible repo-root twins (sail-cruisey #2970). Real
-  source quotes still ground.
+### Fixed
 
-- Deliver no longer runs the "Quality gate FAILED in tangle phase"
-  retrospective after a tangle phase that passed or recorded no quality gate.
-  The ceremony ran whenever a tangle results file existed, adding a failure
-  retrospective of about two minutes to healthy runs. It now runs only when the
-  tangle results record `Quality Gate: FAILED`.
+- `council-wait.sh --pool` now sees councils in the runner's per-session
+  sub-pools. The runner writes each default-pool run under
+  `councils/session-<slug>/<run_id>/` and its `latest-<key>` pointer inside
+  that session dir, but the waiter only scanned `councils/2*/` and
+  `councils/latest-<key>`, so it reported `run: pending` until its timeout even
+  after the council finished (sail-cruisey #3011: seven waits timed out at
+  570s, 1.6–6.9 minutes after their councils completed). The waiter now
+  searches `session-*/` sub-pools, follows their `latest-<key>` pointers, and
+  compares sub-pools by UTC run name because creation counters are per pool.
+  The runner also mirrors the keyed pointer to the shared pool as
+  `session-<slug>/<run_id>` and prints `Council run dir: <path>` on stderr at
+  creation, so callers can use `--run-dir` directly. Pointers still cannot
+  leave the pool or follow a symlinked sub-pool.
+
+- Council selection fails closed when different session runs share the newest
+  UTC creation second. A stale shared pointer cannot choose an old summary;
+  the timeout explains the ambiguity and directs callers to `--run-dir`.
+  A clearly newer round still wins over ambiguity among older rounds.
+
+- The prompt token estimate now sums ASCII text at 4 characters per token and
+  non-ASCII text at 3 UTF-8 bytes per token. It used to charge the whole prompt
+  at the byte rate as soon as one non-ASCII character appeared, so a handful of
+  em-dashes or arrows (a project `AGENTS.md`, a plan, a diff comment) cut the
+  effective context budget of every seat by about a quarter. That is what
+  refused a 32457-character council prompt under a 41856-character limit in
+  sail-cruisey #3011. A prompt of 3300 ASCII characters and 50 em-dashes now
+  estimates 875 tokens, not 1150. Pure-ASCII prompts are unchanged, and prompts
+  that are mostly non-ASCII (CJK text) are still counted by bytes.
+
+- Token estimates classify UTF-8 bytes independently of the shell locale, so
+  C-locale processes cannot admit dense Unicode prompts at the ASCII rate.
+  Failed ASCII-byte counts retain the conservative byte rate.
+
+## [11.14.1] - 2026-10-16
+
+### Fixed
+
+- Codex dispatch accepts `OCTOPUS_CODEX_REASONING=ultra` and the shared
+  `OCTOPUS_REASONING_LEVEL=ultra` setting instead of failing with
+  `Unknown agent type: codex`. Claude seats map `ultra` to `max`, and
+  OpenAI-compatible seats map it to `high`.
+  Resolves [#1200](https://github.com/nyldn/claude-octopus/issues/1200)
+  via [#1201](https://github.com/nyldn/claude-octopus/pull/1201),
+  commit `04b24c6eec77a88e39d2f8d5c2a8cd51aade7b78`.
+
+## [11.14.0] - 2026-10-15
+
+### Added
+
+- `litellm-agent` runs the OpenAI-compatible tool-loop helper against a
+  self-hosted [LiteLLM](https://docs.litellm.ai/docs/simple_proxy) proxy. Set
+  `LITELLM_BASE_URL` (default `http://localhost:4000`), `LITELLM_API_KEY`, and
+  `LITELLM_MODEL` or an exact `litellm-agent:<model>` seat;
+  `LITELLM_ALLOWED_MODELS` restricts dispatch. The proxy URL must be an
+  HTTPS URL without credentials; HTTP is allowed only for `localhost` or
+  `127.0.0.1`. Export the endpoint in the operator's environment; project
+  `.env` files cannot redirect an independently supplied key. Detection,
+  health, readiness and dispatch share this URL policy.
+  With `OCTOPUS_PREFLIGHT_PROBE=1`, live readiness
+  checks `GET /v1/models` on the proxy and reports a rejected key as
+  `auth-invalid`. The provider is excluded from Council,
+  and a proxy model name does not establish model-family independence.
+
+### Fixed
+
+- Concurrent installation receipt writers retry when the lock holder releases
+  its directory during contention inspection. Stale-owner inspection uses a
+  non-following directory handle, preserving foreign metadata even if the
+  lock is replaced by a symlink. File and symlink lock objects remain rejected.
+
+- Tangle adequacy review accepts a JSON `pass` verdict that omits the empty
+  `scope_review` list instead of rejecting it as semantic-invalid and paying
+  for a fallback reviewer. A `fail` verdict still requires the field.
+- The second adequacy review after a planner reconsideration no longer logs
+  "Deprecated Tangle textual adequacy compatibility path used" for a JSON
+  review: the already materialized verdict is checked structurally instead of
+  being materialized again.
+- `commandcode-exec.sh` no longer leaves the Command Code CLI running after the
+  helper is killed. A Tangle stall watchdog kill used to orphan the CLI, which
+  kept editing the shared worktree next to its own retry. The helper now uses
+  an isolated process group where `setsid` is available and a watcher-backed,
+  child-first process-tree fallback otherwise. The CLI remains alive until
+  the watcher can stop its descendants when process-group isolation is absent.
+  TERM, INT and HUP cleanup removes private temporary files and preserves
+  termination status even when the watcher has already exited.
+- Supervised Tangle implementers on Command Code are no longer stopped as
+  stalled while the model is still reading and planning. The helper buffers
+  the CLI's NDJSON event stream until the final result, so the watchdog saw
+  no output; it now writes a progress line to stderr at most once per
+  `OCTOPUS_COMMANDCODE_HEARTBEAT_SECS` (default 60, forwarded through the
+  provider's isolated environment) while that stream grows.
+
+### Maintenance
+
+- CI artifact uploads use the verified immutable upload-artifact v7.0.2 commit.
+
+## [11.13.2] - 2026-10-10
+
+Provider routing and host detection fixes from [PR #1190](https://github.com/nyldn/claude-octopus/pull/1190), commit `b34780d48d9360d6c349c988e593be440b091c0f`.
+
+### Fixed
+
+- Automatic research, design, copywriting, and image routes load provider configuration before choosing a fallback. Authenticated Codex and installed Claude seats remain available when Antigravity is absent. Resolves [#1174](https://github.com/nyldn/claude-octopus/issues/1174).
+- Claude Code runtime markers take precedence over a shared plugin's Codex installation path, preventing Codex council seats from being incorrectly treated as host-native. Resolves [#1175](https://github.com/nyldn/claude-octopus/issues/1175).
+
+## [11.13.1] - 2026-10-09
+
+### Fixed
+
+- Model configuration rejects unsafe names before saving configuration, while preserving supported Antigravity display labels. Existing provider model identifiers remain supported. Resolves [#1181](https://github.com/nyldn/claude-octopus/issues/1181).
+- Concurrent provider-history writes use exclusive kernel directory creation. This prevents lost entries when a directory utility reports success to multiple writers. History recording safely skips the optional write when Python 3 or the lock is unavailable. Resolves [#1187](https://github.com/nyldn/claude-octopus/issues/1187).
+- GitHub CI uses the repository's test selector to route unmapped and shared changes to the full unit-test lane. MCP dependency updates no longer run the full suite in the shorter focused lane.
+
+### Security
+
+- Upgrade `@modelcontextprotocol/sdk` from 1.26.0 to 1.31.0, incorporating the fix for [GHSA-6qxp-vccf-f47h](https://github.com/advisories/GHSA-6qxp-vccf-f47h). The advisory concerns OAuth client credential forwarding; Octopus's MCP server uses the SDK's stdio server APIs. This update does not establish that credentials were disclosed by Octopus. The dependency update originates from [Dependabot PR #1186](https://github.com/nyldn/claude-octopus/pull/1186).
+
+## [11.13.0] - 2026-10-08
+
+### Fixed
+
+- Parallel work packages use their own branches and retain committed work after
+  cleanup. Uncommitted worktrees stay available for recovery, retries validate
+  worktree identity and clear stale markers, and failed launches report completion.
+  ([#1179](https://github.com/nyldn/claude-octopus/pull/1179),
+  commit `9f7aadaafff253d6d6754eb3ef2983ffd167cbf5`.)
+- Reviews and research preserve substantial results that discuss context limits
+  instead of discarding them as oversized-prompt rejections. Error-channel
+  rejections and recorded terminal failures remain failures.
+  ([#1180](https://github.com/nyldn/claude-octopus/pull/1180),
+  commit `4d152db0cd580167cdde7629a9fc70bc20d66f39`.)
+- Tangle's codex execution boundary gives `thread-writer-locks` and `.tmp` in
+  `CODEX_HOME` a private tmpfs, like the other runtime directories. `codex exec`
+  could not start a thread inside the boundary (`EROFS` on
+  `thread-writer-locks/.coordination.lock`), so a codex seat still produced no
+  code after #1164. Checked on Codex 0.155.1 and 0.161.0.
+  ([#1184](https://github.com/nyldn/claude-octopus/pull/1184), fixes
+  [#1182](https://github.com/nyldn/claude-octopus/issues/1182),
+  commit `0b9fd98386ef6197a06de9267037043a4656ece6`.)
+
+### Added
+
+- `OCTO_PROVIDER_REJECTION_MAX_OUTPUT_BYTES` configures when provider stdout
+  is substantial enough to retain despite a rejection phrase. The default is
+  4096 bytes; invalid or overflowing values use that default. Error-channel
+  rejection detection is independent of this setting. (#1180)
+
+## [11.12.0] - 2026-10-06
+
+### Added
+
+- Council warns before dispatch when a task names a supported artifact path and
+  no `--context-file` was supplied. Pass the file with `--context-file <path>`
+  so every seat receives the same contents without relying on file tools. Set
+  `OCTOPUS_COUNCIL_REQUIRE_CONTEXT=1` to reject these runs with exit code 2.
+  Bare filenames and prose without a supported path do not trigger the guard.
+  The path-text check does not inspect file-tool access or copied-workspace
+  visibility. It can warn or reject a tracked-file review that a CLI seat could
+  perform. Supplying any context file suppresses it; the guard does not verify
+  that every referenced file was supplied.
+  See [council evidence](https://github.com/nyldn/claude-octopus/blob/v11.12.0/docs/COUNCIL.md). (#1176)
+- Optional council quote proximity through
+  `OCTOPUS_COUNCIL_CONTENT_MATCH_PROXIMITY_CHARS=N`. A positive integer requires
+  source-matching quotes to appear within `N` characters of a filename whose
+  basename the bounded scan reached. Unset or `0` retains quote-only matching.
+  Filename proximity is an additional evidence signal, not proof that a seat
+  read that specific file. (#1177)
+
+### Fixed
+
+- Package archives include the public documentation, including the council
+  evidence guide, so installed copies can read the release guidance locally.
+- Council source checks exclude injected agent-instruction files, including
+  `CLAUDE.md`, `AGENTS.md`, their `-OCTO.md` variants, `GEMINI.md`, and Cursor
+  and Copilot instruction basenames, including nested and mixed-case names.
+  Echoing those instructions no longer counts as source evidence. (#1177)
+- Optional quote proximity preserves valid evidence when a duplicate quote
+  matches before the named source file. Repeated quotes and filename mentions
+  stay within the existing response and scan budgets without a quadratic
+  comparison. Project-local Python modules cannot execute during source checks.
+  (#1177)
+- Deliver runs the failure retrospective only when the development report
+  records `Quality Gate: FAILED`. Successful runs and reports without a quality
+  gate skip the unnecessary failure ceremony. (#1173)
 
 ## [11.11.0] - 2026-10-05
 

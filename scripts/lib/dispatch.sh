@@ -4,6 +4,7 @@ source "${_profile_lib_dir}/agent-spec.sh" 2>/dev/null || true
 source "${_profile_lib_dir}/provider-registry.sh" || { echo "dispatch: failed to load provider-registry.sh" >&2; return 1 2>/dev/null || exit 1; }
 source "${_profile_lib_dir}/cheaperinference.sh" || return 1
 source "${_profile_lib_dir}/api-route.sh" || return 1
+source "${_profile_lib_dir}/litellm.sh" || return 1
 if ! declare -f get_model_capability >/dev/null 2>&1; then
     source "${_profile_lib_dir}/models.sh" 2>/dev/null || true
 fi
@@ -655,6 +656,32 @@ get_agent_command() {
             octo_tool_loop_requires_no_tools "$phase" "$role" && ci_tool_fragment="--tool-policy none"
             echo "${PLUGIN_DIR}/scripts/helpers/openai-compatible-agent.py --provider api-route --model ${model} ${ci_tool_fragment} --cwd ${PWD}"
             ;;
+        litellm-agent)  # LiteLLM via the OpenAI-compatible tool-loop agent
+            if [[ "$agent_type" == *:* ]]; then
+                model="$(get_agent_model "$agent_type" "$phase" "$role")" || return 1
+            else
+                if ! model="$(octo_litellm_model)"; then
+                    log ERROR "LITELLM_MODEL, OCTOPUS_LITELLM_MODEL, or providers.json litellm.default is required"
+                    return 1
+                fi
+            fi
+            if ! model="$(octo_litellm_effective_model "$model")"; then
+                log ERROR "Invalid or disallowed LiteLLM model or fallback"
+                return 1
+            fi
+            if ! _octopus_is_safe_openai_compatible_dispatch_value "${PWD}"; then
+                log ERROR "Invalid LiteLLM cwd: ${PWD}"
+                return 1
+            fi
+            local litellm_base_url
+            if ! litellm_base_url="$(octo_litellm_base_url)"; then
+                log ERROR "Invalid LITELLM_BASE_URL: use HTTPS, or HTTP on localhost or 127.0.0.1, without credentials"
+                return 1
+            fi
+            local ci_tool_fragment=""
+            octo_tool_loop_requires_no_tools "$phase" "$role" && ci_tool_fragment="--tool-policy none"
+            echo "${PLUGIN_DIR}/scripts/helpers/openai-compatible-agent.py --provider litellm --base-url ${litellm_base_url} --model ${model} ${ci_tool_fragment} --cwd ${PWD}"
+            ;;
         perplexity|perplexity-fast)  # v8.24.0: Perplexity Sonar — web-grounded research (Issue #22)
             if ! model=$(get_agent_model "$agent_type" "$phase" "$role"); then
                 return 1
@@ -1018,29 +1045,19 @@ octo_normalize_nonnegative_context_value() {
     printf '%s\n' "$normalized"
 }
 
-# Fast conservative estimate without launching a tokenizer. ASCII text counts
-# at 4 characters per token (ordinary prose); non-ASCII text counts at 3 UTF-8
-# bytes per token (about one token per CJK character or em-dash). The two
-# parts are summed, so a handful of non-ASCII characters costs a handful of
-# tokens. The previous estimate switched the WHOLE prompt to the byte rate as
-# soon as one such character appeared, which cut the effective budget of every
-# council prompt by about a quarter (sail-cruisey #3011). A pure-ASCII prompt
-# is still ceil(chars / 4). Non-ASCII detection relies on the caller's locale
-# counting characters, as before: under LC_ALL=C every prompt counts as ASCII.
+# Sum ASCII at four bytes per token and non-ASCII at three UTF-8 bytes per
+# token. Classify bytes in the C locale so the caller's locale cannot change
+# admission. Pure ASCII stays fork-free; failed counts use the stricter rate.
 octo_estimate_prompt_tokens() {
     local prompt="$1"
-    local chars=${#prompt}
     local LC_ALL=C
     local bytes=${#prompt}
-    if [[ "$bytes" -le "$chars" ]]; then
-        printf '%s\n' $(((chars + 3) / 4))
+    if [[ "$prompt" != *[$'\200'-$'\377']* ]]; then
+        printf '%s\n' $(((bytes + 3) / 4))
         return 0
     fi
-    # tr drops the non-ASCII bytes; what remains is the ASCII byte count. The
-    # local LC_ALL above is not exported, so set it for tr explicitly. If the
-    # count fails, 0 charges every byte at the stricter non-ASCII rate.
     local ascii_bytes
-    ascii_bytes="$(printf '%s' "$prompt" | LC_ALL=C tr -d '\200-\377' | wc -c | tr -d '[:space:]')"
+    ascii_bytes="$(printf '%s' "$prompt" | LC_ALL=C tr -d '\200-\377' | wc -c | tr -d '[:space:]')" || ascii_bytes=0
     [[ "$ascii_bytes" =~ ^[0-9]+$ && "$ascii_bytes" -le "$bytes" ]] || ascii_bytes=0
     local non_ascii_bytes=$((bytes - ascii_bytes))
     # ceil(ascii / 4 + non_ascii / 3), computed over the common denominator 12.
@@ -1068,7 +1085,7 @@ octo_context_admission_desc() {
     estimated="$(octo_estimate_prompt_tokens "$prompt")"
     local LC_ALL=C
     local bytes=${#prompt}
-    if [[ "$bytes" -gt "$chars" ]]; then
+    if [[ "$prompt" == *[$'\200'-$'\377']* ]]; then
         printf '%s chars / %s bytes (~%s tokens: ASCII at 4 chars per token, non-ASCII at 3 bytes per token); admission limit is ~%s tokens (about %s chars of ASCII text)' \
             "$chars" "$bytes" "$estimated" "$limit" "$((limit * 4))"
     else
@@ -1679,6 +1696,11 @@ get_agent_model() {
             if [[ "$provider" == api-route ]] &&
                ! octo_api_route_model "$fallback" >/dev/null; then
                 log ERROR "Invalid API Route fallback model name"
+                return 1
+            fi
+            if [[ "$provider" == litellm ]] &&
+               ! octo_litellm_model "$fallback" >/dev/null; then
+                log ERROR "Invalid LiteLLM fallback model name"
                 return 1
             fi
             if ! octo_model_automatic_target_allowed "$fallback" "$provider"; then

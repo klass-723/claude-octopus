@@ -58,6 +58,26 @@ by `OPENAI_COMPAT_API_KEY_ENV` is forwarded automatically. Other custom
 provider keys require a comma-separated `OCTOPUS_CREDENTIAL_ENV_NAMES` list;
 names must end in `API_KEY`, `TOKEN`, `CREDENTIAL`, or `CREDENTIALS`.
 
+## Availability and host detection
+
+As of v11.13.2, automatic research, design, copywriting, and image tasks can
+fall back to authenticated Codex or installed Claude seats when Antigravity is
+unavailable. Existing provider configuration and explicit model pins still apply.
+
+Availability checks load provider state before evaluating fallback candidates,
+including when the initial Codex installed flag is `false`. Successful loading
+is tracked separately from installation, so a Claude-only host does not repeat
+discovery for every candidate. File-open and discovery failures remain retryable
+until loading succeeds. Standalone resolver users can supply provider
+flags without loading the smoke module. A configured Codex
+seat still requires an authentication method; loading state does not grant
+access to an unauthenticated provider.
+
+The plugin directory argument is a fallback host hint. Claude Code runtime
+markers identify a Claude host even when a shared plugin points into a Codex
+cache. Active Codex runtime markers take precedence. Hooks also use
+`CLAUDE_PLUGIN_ROOT`; a hook root inside a Codex plugin cache identifies Codex.
+
 ## The seven wiring points
 
 | # | Concern | File | Anchor | What to add |
@@ -121,6 +141,49 @@ is excluded from Council, and gateway identity does not establish independent
 model-family diversity. Local readiness does not prove entitlement, quota,
 tool support or billed cost.
 
+## LiteLLM setup
+
+`litellm-agent` uses the same OpenAI-compatible tool-loop helper against a
+self-hosted [LiteLLM](https://docs.litellm.ai/docs/simple_proxy) proxy, which
+routes one OpenAI-format endpoint to 100+ providers (Bedrock, Vertex AI, Azure,
+Anthropic, local Ollama, and so on) under the operator's own keys, budgets and
+fallbacks. Set `LITELLM_BASE_URL` to the proxy (default `http://localhost:4000`;
+a trailing `/v1` is optional and a path prefix such as `https://host/litellm` is
+kept), set `LITELLM_API_KEY` to a virtual key or the master key, and choose a
+model name the proxy serves. No model is selected automatically.
+
+Model selection uses `LITELLM_MODEL`, then `OCTOPUS_LITELLM_MODEL`, then the
+string `providers.litellm.default` in `~/.claude-octopus/config/providers.json`.
+`OPENAI_COMPAT_MODEL` is not read, so another gateway's setting cannot make
+LiteLLM look configured. `OCTOPUS_PROVIDERS_CONFIG` can select
+another file. Detection, health, readiness and dispatch share this resolution.
+An exact seat such as `litellm-agent:claude-sonnet-4-6` uses its model pin
+without requiring a default. `LITELLM_ALLOWED_MODELS` restricts dispatch
+models; missing models, unsafe pins and invalid fallbacks fail closed.
+
+Export `LITELLM_BASE_URL` in the operator's environment; without it, Octopus
+uses `http://localhost:4000`. Project `.env` files and shell fallbacks cannot
+select the endpoint that receives an independently supplied key.
+`LITELLM_API_KEY` retains the usual non-interactive shell fallbacks. The URL
+must use HTTPS unless its host is `localhost` or `127.0.0.1`. Hosts may contain
+letters, digits, `.`, `-` or `_` (for example `https://litellm_proxy:4000`), an optional numeric
+port and a path of letters, digits, `.`, `_`, `/`, `:` or `-`. Embedded
+credentials are rejected. This is the same grammar dispatch enforces on
+`--base-url`, so detection, health and readiness never report a URL ready that
+dispatch would refuse; dispatch passes the normalized `/v1` root to the helper.
+The helper follows a redirect only within the same scheme, host and port and
+refuses a cross-origin redirect, so the key is never sent to another origin.
+
+With `OCTOPUS_PREFLIGHT_PROBE=1`, live readiness calls `GET /v1/models` on the
+proxy. A 401 or 403 reports `auth-invalid`, 402 or 429 reports `quota`, and an
+unreachable proxy fails open as with the other probed gateways.
+
+Read-only roles disable local tools. The isolated child receives only
+`LITELLM_API_KEY` and the helper's approved runtime settings. This provider is
+excluded from Council, and gateway identity does not establish independent
+model-family diversity: a proxy model name can resolve to any upstream. Local
+readiness does not prove entitlement, quota, tool support or billed cost.
+
 ## Perplexity Agent API
 
 Perplexity requests use `POST /v1/agent`. Legacy Sonar model names map to
@@ -173,12 +236,25 @@ File transport cancellation sends TERM to the direct child, waits up to two
 seconds, then escalates to KILL and reaps it before removing the prompt. It
 does not claim ownership of unregistered descendants.
 
+## Provider rejection handling
+
+A provider result longer than 4096 bytes is retained when its own text mentions
+an oversized-prompt rejection phrase, such as `context limit`. Short stdout-only
+rejections remain detectable. Rejection signatures on stderr still fail the seat
+regardless of result length, and a recorded rejection stays a terminal failure.
+This size check is a heuristic rather than a semantic assessment of the response.
+
+Set `OCTO_PROVIDER_REJECTION_MAX_OUTPUT_BYTES` to a non-negative integer to adjust
+the byte threshold. Invalid values or values exceeding the supported integer
+bound use 4096. A result must be longer than the threshold to count as substantial.
+
 ## Codex in bounded Tangle runs
 
 The Linux execution boundary projects an existing canonical `CODEX_HOME` with
 read-only configuration, instructions, profiles, skills, plugins and other
 entries. Its root cannot create or replace entries. Runtime directories `tmp`,
-`sessions`, `archived_sessions`, `log` and `shell_snapshots` use private temporary
+`.tmp`, `thread-writer-locks`, `sessions`, `archived_sessions`, `log` and
+`shell_snapshots` use private temporary
 filesystems, so worker changes there disappear after each dispatch. The required
 `installation_id` file points into private `tmp` storage instead of host state.
 An existing
@@ -203,6 +279,9 @@ already-private `tmp` subtree is allowed. Configuration subtrees cannot be
 reopened by a later TMPDIR mount. Reading this setting requires Python 3.11 or
 newer; without `tomllib`, a config containing TMPDIR aborts dispatch. Unsafe configured
 TMPDIR layouts also abort, including paths inside the writable worktree.
+If your configuration places TMPDIR under another HOME directory, such as
+`~/.cache`, choose a canonical absolute path outside HOME or the accepted
+`CODEX_HOME/tmp` subtree before running a Codex Tangle seat.
 Other providers receive no Codex state mounts.
 
 For Codex 0.160, `CODEX_SQLITE_HOME` redirects the default state database to
@@ -291,8 +370,16 @@ Use `VERTEXAI_API_KEY` or `GOOGLE_API_KEY` inside the selected provider's
 
 codex, commandcode, claude, claude-sdk (Agent SDK seat), anthropic-api (text-only Messages seat), agy (Antigravity,
 Google seat), perplexity, opencode, openrouter, orcarouter, atlascloud,
-cheaperinference, openai-compatible, openai-tools, openai-compatible-agent, cursor-agent, grok,
+cheaperinference, api-route, litellm, openai-compatible, openai-tools, openai-compatible-agent, cursor-agent, grok,
 qwen, ollama, copilot, vibe, and kimi.
+
+`commandcode` reports progress to stderr while its event stream grows. Set
+`OCTOPUS_COMMANDCODE_HEARTBEAT_SECS` to a positive number of seconds (default
+60) to control the interval; invalid values use the default. The setting is
+forwarded through the provider environment. Progress lines indicate incoming
+events, not task completion. Cancellation stops the CLI and attempts to stop
+its descendants using an isolated process group or a process-tree fallback.
+TERM, INT and HUP also remove private temporary files.
 
 `cursor-agent` is the Cursor CLI (`agent` binary, `cursor` alias). Its auth
 probe lives in `scripts/lib/cursor-agent.sh` (`cursor_agent_is_available`):

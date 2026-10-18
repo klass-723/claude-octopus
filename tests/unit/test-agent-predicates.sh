@@ -53,6 +53,9 @@ fi
 test_case "Claude agent availability uses the shared predicate for fast variants"
 # shellcheck source=/dev/null
 source "$MODEL_RESOLVER"
+# These predicate cases supply provider flags directly; real configuration
+# loading and fallback are covered by test-agy-workflow-routing.sh.
+load_providers_config() { :; }
 PROVIDER_CODEX_INSTALLED=false
 PROVIDER_CLAUDE_INSTALLED=false
 if ! is_agent_available_v2 "claude-opus-fast"; then
@@ -186,6 +189,23 @@ if cheaperinference_fixture_available "configured"; then
     test_pass
 else
     test_fail "Cheaper Inference was rejected despite API key and model"
+fi
+
+test_case "standalone resolver availability does not invoke an undefined loader"
+octo_fixture_value="fixture-value"
+standalone_rc=0
+standalone_out="$(env -i "PATH=$PATH" "HOME=$TEST_TMP_DIR" \
+    "ANTHROPIC_API_KEY=${octo_fixture_value}" bash -e -c '
+        source "$1"
+        PROVIDER_CODEX_INSTALLED=false
+        is_agent_available_v2 anthropic-api
+        printf "available\n"
+    ' _ "$MODEL_RESOLVER" 2>"$TEST_TMP_DIR/standalone-provider.stderr")" || standalone_rc=$?
+if [[ "$standalone_rc" -eq 0 && "$standalone_out" == "available" && \
+      ! -s "$TEST_TMP_DIR/standalone-provider.stderr" ]]; then
+    test_pass
+else
+    test_fail "standalone resolver failed: rc=$standalone_rc out=[$standalone_out]"
 fi
 
 test_summary

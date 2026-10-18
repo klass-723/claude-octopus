@@ -67,12 +67,15 @@ jobs:
           if [[ -z "$changed" ]]; then
             echo "heavy_tests=true" >> "$GITHUB_OUTPUT"
             echo "fast_path=false" >> "$GITHUB_OUTPUT"
+            echo "full_unit=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           fast_path=true
           full_unit=false
+          selector_args=()
           while IFS= read -r file; do
+            selector_args+=(--changed "$file")
             case "$file" in
               package.json|README.md|CHANGELOG.md|docs/*|.claude-plugin/plugin.json|.claude-plugin/marketplace.json|.codex-plugin/plugin.json|.cursor-plugin/plugin.json|.factory-plugin/plugin.json|.factory-plugin/marketplace.json)
                 ;;
@@ -80,12 +83,17 @@ jobs:
                 fast_path=false
                 ;;
             esac
-            case "$file" in
-              .github/workflows/*|Makefile|scripts/orchestrate.sh|scripts/ci-changed.sh|scripts/lib/agent-sync.sh|scripts/lib/heartbeat.sh|scripts/lib/council.sh|scripts/lib/session.sh|scripts/lib/workflows.sh|scripts/lib/spawn.sh|scripts/lib/agents.sh|scripts/lib/dispatch.sh|scripts/build-*|scripts/sync-*|scripts/gen-*|scripts/validate-*|tests/changed-scope.tsv|tests/run-all*.sh|config/*)
-                full_unit=true
-                ;;
-            esac
           done <<< "$changed"
+
+          if [[ "$fast_path" == false ]]; then
+            # Use the same scope decision as the test runner. Unmapped paths
+            # must not run the full suite inside the 15-minute focused job.
+            selection="$(./scripts/ci-changed.sh --list --unit-only --skip-smoke "${selector_args[@]}")"
+            printf '%s\n' "$selection"
+            if ! grep -qx 'Mode: focused' <<< "$selection"; then
+              full_unit=true
+            fi
+          fi
 
           if [[ "$fast_path" == "true" ]]; then
             echo "heavy_tests=false" >> "$GITHUB_OUTPUT"
@@ -266,7 +274,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: smoke-test-logs-${{ matrix.os }}
           path: /tmp/test_*.log
@@ -305,7 +313,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: focused-unit-test-logs
           path: /tmp/test_*.log
@@ -359,7 +367,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: unit-test-results-${{ matrix.os }}-${{ matrix.shard_index }}
           path: test-results*.xml
@@ -367,7 +375,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: unit-test-logs-${{ matrix.os }}-${{ matrix.shard_index }}
           path: /tmp/test_*.log
@@ -403,7 +411,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: deep-council-test-results
           path: test-results*.xml
@@ -411,7 +419,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: deep-council-test-logs
           path: /tmp/test_*.log
@@ -474,7 +482,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: symlinked-path-logs
           path: /tmp/test_*.log
@@ -545,7 +553,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: integration-test-results
           path: test-results*.xml
@@ -553,7 +561,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: integration-test-logs
           path: /tmp/test_*.log
