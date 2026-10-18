@@ -425,11 +425,28 @@ VERDICT: APPROVE")"
 r="$(_report "$absin")"
 if jq -e '.citations == 1 and .quotes_verified == 1 and .quotes_attributed == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-test_case "an absolute path into a deleted disposable workspace maps back by its in-root suffix"
-absws="$(_resp "/private/var/folders/xx/T/octopus-consultative.1.2.AB/workspace/src/pricing.ts:2 reads \`$FAKE\`.
+test_case "an absolute path into a deleted disposable workspace maps back to the same root-relative file"
+absws="$(_resp "/private/var/folders/xx/T/octopus-consultative.1.2.Ab3dE9/workspace/src/pricing.ts:2 reads \`$FAKE\`.
 VERDICT: APPROVE")"
 r="$(_report "$absws")"
 if jq -e '.citations == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "an existing file outside the root is not mapped onto a same-suffix file inside it"
+OTHER="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-other.XXXXXX")"
+mkdir -p "$OTHER/src"
+printf '%s\n' "$FAKE" > "$OTHER/src/pricing.ts"
+absother="$(_resp "src/pricing.ts:2 is the call site. $OTHER/src/pricing.ts:1 reads \`$FAKE\`.
+VERDICT: APPROVE")"
+r="$(_report "$absother")"
+if jq -e '.citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1
+          and .quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$absother" "$ROOT"; then test_pass; else test_fail "report: $r"; fi
+
+test_case "a deleted absolute path outside a disposable workspace stays unresolved"
+absgone="$(_resp "src/pricing.ts:2 is the call site. /home/u/elsewhere/src/pricing.ts:2 reads \`$FAKE\`.
+VERDICT: APPROVE")"
+r="$(_report "$absgone")"
+if jq -e '.citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
 test_case "a '..' path that escapes the root stays an unresolved token"
 dotdot="$(_resp "src/pricing.ts:2 is fine. ../other-repo/lib/util.ts:4 reads \`const merged = Object.assign({}, defaults, overrides);\`.

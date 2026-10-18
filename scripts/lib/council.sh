@@ -3007,32 +3007,41 @@ def resolve_citation(relative):
 CITATION = re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_./-]+\.[A-Za-z][A-Za-z0-9]*)\s*:\s*([0-9]+)(?:-([0-9]+))?(?![A-Za-z0-9_/-]|\.(?:[A-Za-z0-9_/-]|\.))")
 tokens = []      # every citation-shaped token: (start, end, path-or-None, line)
 citations = []   # the resolving subset
+CONSULTATIVE = re.compile(r"octopus-consultative\.(?:[^/]{6}|[0-9]+\.[0-9]+\.[^/.]{6})")
+
 def resolve_outside_form(raw):
     # Absolute and ".." paths are kept as tokens so a quote written about them
-    # is never checked against some other nearby file. One that lands inside the
-    # root resolves; an absolute path into a deleted disposable workspace
-    # (".../workspace/scripts/x.mjs") maps back by its longest in-root suffix.
+    # is never checked against some other nearby file. An existing file
+    # resolves only inside the root or as an attached context file. A deleted
+    # path maps back to the root only when it sits under a disposable
+    # consultative workspace, whose layout mirrors the root
+    # (".../octopus-consultative.<pid>.<run>.<random>/workspace/scripts/x.mjs").
     try:
         candidate = (raw if raw.is_absolute() else root / raw).resolve(strict=True)
+    except (OSError, RuntimeError):
+        candidate = None
+    if candidate is not None:
+        if contained(candidate) or candidate in context_files:
+            return candidate
+        return None
+    if raw.is_absolute():
+        parts = [part for part in raw.parts[1:] if part not in ("", ".")]
+        workspace = next(
+            (i for i, part in enumerate(parts)
+             if part == "workspace" and i > 0 and CONSULTATIVE.fullmatch(parts[i - 1])),
+            None,
+        )
+        if workspace is None:
+            return None
+        rest = parts[workspace + 1:]
+        if not rest or ".." in rest:
+            return None
+        try:
+            candidate = (root / Path(*rest)).resolve(strict=True)
+        except (OSError, RuntimeError):
+            return None
         if contained(candidate):
             return candidate
-    except (OSError, RuntimeError):
-        pass
-    if raw.is_absolute():
-        hits = [p for p in context_files if p == Path(os.path.normpath(raw))]
-        if hits:
-            return hits[0]
-        parts = [part for part in raw.parts[1:] if part not in ("", ".")]
-        for size in range(min(len(parts), 12), 1, -1):
-            suffix = Path(*parts[-size:])
-            if ".." in suffix.parts:
-                break
-            try:
-                candidate = (root / suffix).resolve(strict=True)
-            except (OSError, RuntimeError):
-                continue
-            if contained(candidate):
-                return candidate
     return None
 
 for match in CITATION.finditer(resp):

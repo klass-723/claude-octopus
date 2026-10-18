@@ -77,7 +77,7 @@ else
 fi
 
 test_case "captured stderr is private and secrets in it are scrubbed"
-mode="$(stat -f '%Lp' "$cap" 2>/dev/null || stat -c '%a' "$cap" 2>/dev/null)"
+mode="$(stat -c '%a' "$cap" 2>/dev/null || stat -f '%Lp' "$cap" 2>/dev/null)"
 if [[ "$mode" == 600 ]] && ! grep -q 'sk-abcdefghijklmnopqrstuvwxyz0123' "$cap" && grep -q 'REDACTED-API-KEY' "$cap"; then
     test_pass
 else
