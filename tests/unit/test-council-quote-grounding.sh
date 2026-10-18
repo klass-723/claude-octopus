@@ -527,6 +527,32 @@ else
     test_fail "resolver calls: $calls report: $r"
 fi
 
+test_case "many fences and inline spans do not stall the verifier"
+# 40k fences plus 40k spans took ~26s when every span rescanned every fence;
+# the bounded run must finish well inside 10s and still check the real quote.
+many="$TEST_TMP_DIR/many-fences.md"
+python3 - "$many" "$REAL_NEAR" <<'PY_MANY'
+import sys
+n = 40000
+parts = ["src/pricing.ts:2 reads `%s`.\n" % sys.argv[2]]
+parts += ["```\nx\n```\n"] * n + ["`a` "] * n + ["\nVERDICT: APPROVE\n"]
+open(sys.argv[1], "w").write("".join(parts))
+PY_MANY
+# Run in its own process group and kill the whole group at the bound, so the
+# verifier's python child cannot outlive the alarm while holding stdout open.
+bounded() {
+    perl -e '$t = shift; $pid = fork; if (!$pid) { setpgrp(0, 0); exec @ARGV }
+             $SIG{ALRM} = sub { kill "KILL", -$pid; exit 124 }; alarm $t;
+             waitpid($pid, 0); exit($? >> 8)' "$@"
+}
+r="$(bounded 10 bash -c 'source "$1"; council_response_quote_verification_json "$2" "$3"' _ \
+    "$PROJECT_ROOT/scripts/lib/council.sh" "$many" "$ROOT" 2>/dev/null || true)"
+if jq -e '.citations == 1 and .quotes_verified == 1 and .fabricated == false' <<< "$r" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "verifier did not finish inside 10s or misreported: ${r:0:200}"
+fi
+
 test_case "a chair-fallback seat record carries grounding like an advice seat"
 fbdir="$(mktemp -d "$TEST_TMP_DIR/fallback-grounding.XXXXXX")"; mkdir -p "$fbdir/responses"
 COUNCIL_RUN_DIR="$fbdir"; COUNCIL_FIXTURE=""; COUNCIL_SEAT_RECORDS_JSON='[]'

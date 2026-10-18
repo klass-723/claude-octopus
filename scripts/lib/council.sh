@@ -3092,8 +3092,14 @@ for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
             kept.append(line)
     units.append((match.start(), match.end(), "fence", kept, removed_kept, info))
 
+# Fences come from one finditer pass, so they are sorted and disjoint: only the
+# last fence starting before the span ends can overlap it. A bisect keeps a
+# response with many fences and spans linear-log instead of quadratic.
+fence_starts = [f_start for f_start, _ in fence_ranges]
+
 def in_fence(start, end):
-    return any(start < f_end and end > f_start for f_start, f_end in fence_ranges)
+    i = bisect_right(fence_starts, end - 1) - 1
+    return i >= 0 and fence_ranges[i][1] > start
 
 for match in re.finditer(r"(?:^[ \t]*>[^\n]*(?:\n|$))+", resp, re.M):
     if in_fence(match.start(), match.end()):
