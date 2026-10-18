@@ -3044,12 +3044,18 @@ def resolve_outside_form(raw):
             return candidate
     return None
 
+# Resolve each distinct path once; a long response repeats the same few paths,
+# and an unresolved multi-part one rescans the whole suffix index.
+resolved = {}
 for match in CITATION.finditer(resp):
-    relative = Path(match.group(1).strip())
-    if relative.is_absolute() or ".." in relative.parts:
-        candidate = resolve_outside_form(relative)
-    else:
-        candidate = resolve_citation(relative)
+    raw = match.group(1).strip()
+    if raw not in resolved:
+        relative = Path(raw)
+        if relative.is_absolute() or ".." in relative.parts:
+            resolved[raw] = resolve_outside_form(relative)
+        else:
+            resolved[raw] = resolve_citation(relative)
+    candidate = resolved[raw]
     token = (match.start(), match.end(), candidate, int(match.group(2)))
     tokens.append(token)
     if candidate is not None:

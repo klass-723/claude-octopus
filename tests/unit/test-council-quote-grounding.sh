@@ -489,6 +489,44 @@ else
     test_fail "runs: first=$first second=$second record=$record"
 fi
 
+test_case "a path cited many times is resolved once"
+resolve_count="$TEST_TMP_DIR/qv-resolve-count"; : > "$resolve_count"
+# Wrap both resolvers with a call counter just before the citation loop.
+cat > "$shim_dir/python3" <<SHIM
+#!/usr/bin/env bash
+if [[ "\$1" == "-I" && "\$2" == "-" ]]; then
+    script="\$(cat)"
+    if [[ "\$script" == *quotes_unverifiable_proposed* ]]; then
+        hook='def _counted(f):
+    def g(*a):
+        with open("$resolve_count", "a") as h:
+            h.write("r\\n")
+        return f(*a)
+    return g
+resolve_citation = _counted(resolve_citation)
+resolve_outside_form = _counted(resolve_outside_form)
+for match in CITATION.finditer(resp):'
+        script="\${script/for match in CITATION.finditer(resp):/\$hook}"
+    fi
+    printf '%s' "\$script" | exec "$real_python" "\$@"
+fi
+exec "$real_python" "\$@"
+SHIM
+chmod 755 "$shim_dir/python3"
+repeat="$(_resp "src/pricing.ts:2 and src/pricing.ts:3 and src/pricing.ts:2 again.
+lib/missing/util.ts:1, lib/missing/util.ts:4, lib/missing/util.ts:9, lib/missing/util.ts:9.
+/home/u/elsewhere/a.ts:1 and /home/u/elsewhere/a.ts:2.
+VERDICT: APPROVE")"
+PATH="$shim_dir:$saved_path"
+r="$(_report "$repeat")"
+PATH="$saved_path"
+calls="$(wc -l < "$resolve_count" | tr -d ' ')"
+if [[ "$calls" == 3 ]] && jq -e '.citations == 3 and .citations_unresolved == 6' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "resolver calls: $calls report: $r"
+fi
+
 test_case "a chair-fallback seat record carries grounding like an advice seat"
 fbdir="$(mktemp -d "$TEST_TMP_DIR/fallback-grounding.XXXXXX")"; mkdir -p "$fbdir/responses"
 COUNCIL_RUN_DIR="$fbdir"; COUNCIL_FIXTURE=""; COUNCIL_SEAT_RECORDS_JSON='[]'
