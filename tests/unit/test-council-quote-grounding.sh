@@ -124,6 +124,18 @@ VERDICT: APPROVE")"
 r="$(_report "$huge")"
 if jq -e '.quotes_checked == 1 and .quotes_unverifiable == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "a quote attributed to a too-large file stays unverifiable beside a readable citation"
+# The readable src/pricing.ts must not make the unreadable bound file count as
+# checked: the quote may well be real in src/huge.ts.
+hugemix="$(_resp "src/pricing.ts:2 is the call site.
+
+src/huge.ts:2 reads \`$FAKE\`.
+VERDICT: APPROVE")"
+r="$(_report "$hugemix")"
+if jq -e '.citations == 2 and .quotes_checked == 1 and .quotes_unverifiable == 1 and .quotes_unverified == 0
+          and .quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$hugemix" "$ROOT"; then test_pass; else test_fail "report: $r"; fi
+
 test_case "an unreadable cited file is unverifiable and does not crash"
 printf 'const secret = 1;\n' > "$ROOT/src/locked.ts"
 chmod 000 "$ROOT/src/locked.ts"

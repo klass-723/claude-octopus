@@ -3378,13 +3378,16 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     for path, _ in bound:
         if path not in bound_paths:
             bound_paths.append(path)
-    readable = False
+    # A miss is only checkable when every file the quote is bound to loaded; a
+    # readable neighbor cannot stand in for an oversized or unreadable bound file.
+    readable = True
     verified = near = False
     for path in bound_paths + [p for p in all_cited if p not in bound_paths]:
         entry = load(path)
         if entry is None:
+            if path in bound_paths:
+                readable = False
             continue
-        readable = True
         lines = match_unit(wholes, line_variants, entry)
         if not lines:
             continue
