@@ -2840,7 +2840,7 @@ print(json.dumps(validated, separators=(",", ":")))
 PY
 }
 
-COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"diff_sources":[],"fabricated":false,"unverified_samples":[]}'
+COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_verified_in_context":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"diff_sources":[],"fabricated":false,"unverified_samples":[]}'
 
 council_response_quote_verification_json() {
     # Verify the code a seat QUOTES next to its `path:line` citations (sail-cruisey
@@ -2904,7 +2904,7 @@ MIN_CHARS = 20
 result = {"citations": 0, "citations_unresolved": 0, "quotes_checked": 0, "quotes_verified": 0,
           "quotes_near_line": 0, "quotes_attributed": 0, "quotes_attributed_unverified": 0,
           "quotes_verified_in_diff_removed": 0, "quotes_verified_in_diff_added": 0,
-          "quotes_unverified": 0, "quotes_unverifiable": 0,
+          "quotes_verified_in_context": 0, "quotes_unverified": 0, "quotes_unverifiable": 0,
           "quotes_unverifiable_claimed_removed": 0, "quotes_unverifiable_unresolved_citation": 0,
           "quotes_unverifiable_command": 0, "quotes_unverifiable_proposed": 0, "diff_sources": [],
           "fabricated": False, "unverified_samples": []}
@@ -2936,7 +2936,11 @@ for name in sys.argv[3:]:
         context_files.append(path)
 
 def norm(text):
-    return re.sub(r"\s+", " ", text).strip()
+    # "\|" is how a seat writes "|" inside a Markdown table cell (sail-cruisey
+    # #3125: `a \|\| b` for `a || b`). Unescaped on every side norm() touches
+    # (quote, file, diff, context text), so a source line containing "\|" still
+    # matches a quote of itself.
+    return re.sub(r"\s+", " ", text.replace("\\|", "|")).strip()
 
 def specific(text):
     text = norm(text)
@@ -3285,6 +3289,26 @@ def load_diff_sides():
     # Joined so a multi-line quote of consecutive diff lines still matches.
     return (" ".join(removed), " ".join(added))
 
+context_text = None
+def load_context_text():
+    # Prose --context-files (a plan, a spec) that load_diff_sides() skips. A seat
+    # reviewing a plan quotes the plan's PROPOSED code next to the source file it
+    # would change (sail-cruisey #3118); that quote is grounded in the context
+    # the seat was given, not fabricated.
+    pieces = []
+    for path in context_files:
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read(MAX_DIFF_BYTES).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if DIFF_HEADER.search(data):
+            continue  # already a diff side
+        data = norm(html.unescape(data))
+        if data:
+            pieces.append(data)
+    return " ".join(pieces)
+
 def in_diff_side(variants, side):
     if not side:
         return False
@@ -3417,6 +3441,11 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
             diff_side_hit = "removed"
         elif in_diff_side(flat_variants, added_side):
             diff_side_hit = "added"
+    context_hit = False
+    if not verified and not diff_side_hit:
+        if context_text is None:
+            context_text = load_context_text()
+        context_hit = in_diff_side(flat_variants + removed_variants, context_text)
     sample = (flat_variants or removed_variants)[0]
     if verified:
         result["quotes_verified"] += 1
@@ -3425,6 +3454,11 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     elif diff_side_hit:
         result["quotes_verified"] += 1
         result["quotes_verified_in_diff_" + diff_side_hit] += 1
+    elif context_hit:
+        result["quotes_verified"] += 1
+        result["quotes_verified_in_context"] += 1
+        if "context-file-text" not in result["diff_sources"]:
+            result["diff_sources"].append("context-file-text")
     elif not diff_sides[0] and not diff_sides[1] and (
             removed_variants or REMOVAL_WORDS.search(resp[max(0, start - REMOVAL_WINDOW):end + REMOVAL_WINDOW])):
         # No diff to check a claimed removal against: unverifiable, not fabricated.

@@ -252,7 +252,70 @@ test_case "a non-diff context file's '- ' bullets are not treated as removed cod
 ctx_plan="$TEST_TMP_DIR/plan.md"
 printf '# Plan\n\n- const base = await fetchCabinPrice(cabin.id, { cache: true });\n' > "$ctx_plan"
 r="$(COUNCIL_CONTEXT_FILES=("$ctx_plan"); _report "$fab")"
-if jq -e '.fabricated == true and .diff_sources == []' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+# The bullet's text still grounds the quote as plan context (sail-cruisey #3118),
+# but never as a diff side.
+if jq -e '.quotes_verified_in_diff_removed == 0 and .quotes_verified_in_diff_added == 0
+          and .quotes_verified_in_context == 1 and .diff_sources == ["context-file-text"]' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# ── sail-cruisey #3118: a seat reviewing a PLAN quotes the plan's proposed code
+# under the source file it would change. That code is in no source file and no
+# diff, but it is in the prose --context-file the seat was given.
+PLAN_CODE='const reportErr = new Error(`price lookup failed for ${cabin.id}`);'
+plan3118="$TEST_TMP_DIR/plan-3118.md"
+printf '# Plan\n\nStep 2: in src/pricing.ts, before the return:\n\n```ts\n%s\nreportError(reportErr);\n```\n' "$PLAN_CODE" > "$plan3118"
+plan_other="$TEST_TMP_DIR/plan-3118-other.md"
+printf '# Plan\n\nStep 2: log the failure in src/pricing.ts with the shared logger.\n' > "$plan_other"
+plan_quote="$(_resp "src/pricing.ts:3:
+\`\`\`ts
+$PLAN_CODE
+\`\`\`
+The plan's guard is sound.
+VERDICT: APPROVE")"
+
+test_case "#3118: plan-only code attributed to a source citation verifies against the prose context file"
+r="$(COUNCIL_CONTEXT_FILES=("$plan3118"); _report "$plan_quote")"
+blind=no; (COUNCIL_CONTEXT_FILES=("$plan3118"); council_response_is_blind "$plan_quote" "$ROOT") && blind=yes
+if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_verified_in_context == 1 and .quotes_unverified == 0
+          and .fabricated == false and .diff_sources == ["context-file-text"]' <<< "$r" >/dev/null && [[ "$blind" == no ]]; then
+    test_pass
+else
+    test_fail "blind=$blind report: $r"
+fi
+
+test_case "#3118 placebo: the same quote absent from the attached plan is still fabricated"
+r="$(COUNCIL_CONTEXT_FILES=("$plan_other"); _report "$plan_quote")"
+blind=no; (COUNCIL_CONTEXT_FILES=("$plan_other"); council_response_is_blind "$plan_quote" "$ROOT") && blind=yes
+if jq -e '.quotes_verified_in_context == 0 and .quotes_attributed_unverified == 1 and .fabricated == true and .diff_sources == []' <<< "$r" >/dev/null &&
+   [[ "$blind" == yes ]]; then test_pass; else test_fail "blind=$blind report: $r"; fi
+
+test_case "#3118: an elided quote verifies when each specific piece is in the plan text"
+elided="$(_resp "src/pricing.ts:3:
+\`\`\`ts
+const reportErr = new Error(\`price lookup failed
+...
+reportError(reportErr);
+\`\`\`
+VERDICT: APPROVE")"
+r="$(COUNCIL_CONTEXT_FILES=("$plan3118"); _report "$elided")"
+if jq -e '.quotes_verified_in_context == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# ── sail-cruisey #3125: '||' quoted inside a Markdown table cell is written '\|\|'.
+printf 'export function tierOf(member) {\n  const tier = member.tier || member.legacyTier || DEFAULT_TIER;\n  return tier;\n}\n' > "$ROOT/src/tier-3125.ts"
+test_case "#3125: a table-escaped '\\|\\|' quote of a real '||' line verifies"
+table="$(_resp "| File | Code |
+|---|---|
+| src/tier-3125.ts:2 | \`const tier = member.tier \\|\\| member.legacyTier \\|\\| DEFAULT_TIER;\` |
+VERDICT: APPROVE")"
+r="$(_report "$table")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_near_line == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3125 placebo: a table-escaped quote that differs from the file is still unverified"
+table_fab="$(_resp "| File | Code |
+|---|---|
+| src/tier-3125.ts:2 | \`const tier = member.tier \\|\\| member.vipTier \\|\\| DEFAULT_TIER;\` |
+VERDICT: APPROVE")"
+r="$(_report "$table_fab")"
+if jq -e '.quotes_verified == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
@@ -264,7 +327,8 @@ if jq -e '.quotes_unverifiable == 1 and .quotes_unverifiable_claimed_removed == 
 test_case "summary grounding carries the new diff counters"
 record="$(council_contribution_record_json "$removed_only" "$GROOT" sha256:t)"
 if jq -e '.grounding | has("quotes_verified_in_diff_removed") and has("quotes_verified_in_diff_added") and has("quotes_unverifiable_claimed_removed") and has("diff_sources")' <<< "$record" >/dev/null &&
-   jq -e 'has("quotes_verified_in_diff_removed")' <<< "$COUNCIL_EMPTY_GROUNDING_JSON" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+   jq -e 'has("quotes_verified_in_diff_removed") and has("quotes_verified_in_context")' <<< "$COUNCIL_EMPTY_GROUNDING_JSON" >/dev/null &&
+   jq -e '.grounding | has("quotes_verified_in_context")' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
 
 # ── sail-cruisey #3005: quotes the seat attributes to a citation must be in the
 # cited file. Real quotes elsewhere in the body no longer excuse invented ones.

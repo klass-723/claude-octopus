@@ -15,6 +15,14 @@
 
 ### Fixed
 
+- Council seats reviewing a plan are no longer marked blind for quoting the
+  plan's proposed code under the source file it would change (sail-cruisey
+  #3118). A quote that is in no cited file and no diff now verifies when it is
+  in the text of a prose `--context-file`, and `grounding` counts it under
+  `quotes_verified_in_context` with `diff_sources` naming
+  `context-file-text`. A quote of `||` written as `\|\|` inside a Markdown
+  table cell now matches the source line (sail-cruisey #3125).
+
 - Council quote verification now checks each quote against the file the seat
   attributes it to. A quote placed directly under a citation, or introduced as
   "`x.ts:12` reads `...`", must appear in that file, the other cited files, or
