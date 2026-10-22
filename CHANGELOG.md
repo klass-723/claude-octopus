@@ -28,6 +28,15 @@
   timestamp, the process id and `$RANDOM`. `OCTOPUS_PROOF_RUN_ID` still sets
   the whole run id. `run.json` and `seats.json` stay in `runs/<session-id>/`.
 
+- A code-span quote written inside a Markdown table cell now matches its
+  source line. Seats escape `|` as `\|` in a table, so a quote of
+  `member.tier || member.legacyTier` arrived as `member.tier \|\| member.legacyTier`
+  and was counted as invented (sail-cruisey #3125). Quote matching now also
+  tries a table-cell code span with `\|` read as `|`. Outside a table, `\|` is
+  literal (it changes a regular expression), and source text keeps its
+  backslashes, so a quote that drops a source line's own `\|` still does not
+  match it.
+
 ## [11.15.2] - 2026-10-28
 
 ### Fixed
