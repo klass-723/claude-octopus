@@ -317,6 +317,26 @@ VERDICT: APPROVE")"
 r="$(_report "$table_fab")"
 if jq -e '.quotes_verified == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# A source line that itself contains a literal '\|' keeps its backslash: a
+# quote that drops it is not that line, and a quote that keeps it still is.
+cat > "$ROOT/src/pattern-3125.ts" <<'SRC'
+export function tierPattern(tierName, legacyTierName) {
+  const pattern = escapeRegex(tierName) + "\|" + legacyTierName;
+  return new RegExp(pattern, "u");
+}
+SRC
+test_case "#3125: a quote that drops a source line's literal '\\|' is not verified"
+dropped="$(_resp "src/pattern-3125.ts:2 reads \`const pattern = escapeRegex(tierName) + \"|\" + legacyTierName;\`.
+VERDICT: APPROVE")"
+r="$(_report "$dropped")"
+if jq -e '.quotes_verified == 0 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3125: a quote that keeps a source line's literal '\\|' verifies"
+kept="$(_resp "src/pattern-3125.ts:2 reads \`const pattern = escapeRegex(tierName) + \"\\|\" + legacyTierName;\`.
+VERDICT: APPROVE")"
+r="$(_report "$kept")"
+if jq -e '.quotes_verified == 1 and .quotes_near_line == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"

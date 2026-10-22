@@ -2936,11 +2936,7 @@ for name in sys.argv[3:]:
         context_files.append(path)
 
 def norm(text):
-    # "\|" is how a seat writes "|" inside a Markdown table cell (sail-cruisey
-    # #3125: `a \|\| b` for `a || b`). Unescaped on every side norm() touches
-    # (quote, file, diff, context text), so a source line containing "\|" still
-    # matches a quote of itself.
-    return re.sub(r"\s+", " ", text.replace("\\|", "|")).strip()
+    return re.sub(r"\s+", " ", text).strip()
 
 def specific(text):
     text = norm(text)
@@ -3145,6 +3141,13 @@ def checkable(text):
         return False
     return specific(text)
 
+def unescaped(variants):
+    # "\|" is how a seat writes "|" inside a Markdown table cell (sail-cruisey
+    # #3125: `a \|\| b` for `a || b`). Quote side only, after the literal
+    # variant: source text keeps its backslashes, so a quote that drops a
+    # source line's own "\|" still does not match it.
+    return variants + [v.replace("\\|", "|") for v in variants if "\\|" in v]
+
 def specific_lines(block):
     out = []
     for line in block:
@@ -3152,7 +3155,7 @@ def specific_lines(block):
         stripped = GUTTER.sub("", line).strip()
         if stripped != variants[0]:
             variants.append(stripped)
-        variants = [v for v in variants if checkable(v)]
+        variants = [v for v in unescaped(variants) if checkable(v)]
         if variants:
             out.append(variants)
     return out
@@ -3163,7 +3166,7 @@ def unit_wholes(block):
     unguttered = " ".join(GUTTER.sub("", l).strip() for l in block)
     if unguttered and unguttered != whole:
         out.append(unguttered)
-    return [v for v in out if checkable(v)]
+    return [v for v in unescaped(out) if checkable(v)]
 
 file_cache = {}
 def load(path):
@@ -3375,7 +3378,7 @@ def record_unverified(text):
 for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     wholes = unit_wholes(block) if len(block) > 1 else []
     line_variants = specific_lines(block)
-    removed_variants = [v for v in [" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block]
+    removed_variants = [v for v in unescaped([" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block])
                         if v and checkable(v)]
     if not wholes and not line_variants and not removed_variants:
         continue
