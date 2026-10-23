@@ -337,6 +337,29 @@ VERDICT: APPROVE")"
 r="$(_report "$kept")"
 if jq -e '.quotes_verified == 1 and .quotes_near_line == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# Outside a table, '\|' is literal: in a regular expression it is a different
+# pattern, so it must not match a source '|' (maintainer repro on #1224).
+printf 'export const pattern = /alpha|beta/;\n' > "$ROOT/src/regex-3125.ts"
+test_case "#3125: an escaped '\\|' quote outside a Markdown table does not match a source '|'"
+prose_escaped="$(_resp "src/regex-3125.ts:1 contains \`export const pattern = /alpha\\|beta/;\`.
+VERDICT: APPROVE")"
+r="$(_report "$prose_escaped")"
+if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3125: a table row without outer pipes still reads '\\|' as '|'"
+bare_table="$(_resp "File | Code
+--- | ---
+src/regex-3125.ts:1 | \`export const pattern = /alpha\\|beta/;\`
+VERDICT: APPROVE")"
+r="$(_report "$bare_table")"
+if jq -e '.quotes_verified == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3125: prose with a pipe but no delimiter row is not a table"
+pipe_prose="$(_resp "Either path | both: src/regex-3125.ts:1 contains \`export const pattern = /alpha\\|beta/;\`.
+VERDICT: APPROVE")"
+r="$(_report "$pipe_prose")"
+if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
