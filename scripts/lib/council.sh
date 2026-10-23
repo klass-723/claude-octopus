@@ -3153,6 +3153,16 @@ offset = 0
 for raw in resp.split("\n"):
     resp_lines.append((offset, offset + len(raw), raw))
     offset += len(raw) + 1
+def cell_count(text):
+    # Unescaped pipes separate cells; one leading and one trailing pipe are
+    # borders. GFM requires the header and delimiter rows to match.
+    row_text = text.strip()
+    if row_text.startswith("|"):
+        row_text = row_text[1:]
+    if row_text.endswith("|") and not row_text.endswith("\\|"):
+        row_text = row_text[:-1]
+    return len(re.split(r"(?<!\\)\|", row_text))
+
 def table_line(index):
     l_start, l_end, text = resp_lines[index]
     return "|" in text and not BLOCK_START.match(text) and not in_fence(l_start, l_end + 1)
@@ -3161,7 +3171,8 @@ row = 1
 while row < len(resp_lines):
     delimiter = resp_lines[row]
     if not ("|" in delimiter[2] and DELIMITER_ROW.match(delimiter[2])
-            and not in_fence(delimiter[0], delimiter[1] + 1) and table_line(row - 1)):
+            and not in_fence(delimiter[0], delimiter[1] + 1) and table_line(row - 1)
+            and cell_count(resp_lines[row - 1][2]) == cell_count(delimiter[2])):
         row += 1
         continue
     last = row

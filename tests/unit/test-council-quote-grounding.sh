@@ -378,6 +378,13 @@ VERDICT: APPROVE")"
 r="$(_report "$table_list")"
 if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3125: a delimiter row with fewer cells than its header is not a table"
+cell_mismatch="$(_resp "src/regex-3125.ts:1 | contains \`export const pattern = /alpha\\|beta/;\`
+|---|
+VERDICT: APPROVE")"
+r="$(_report "$cell_mismatch")"
+if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
