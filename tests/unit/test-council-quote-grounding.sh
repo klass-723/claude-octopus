@@ -360,6 +360,24 @@ VERDICT: APPROVE")"
 r="$(_report "$pipe_prose")"
 if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3125: a heading after a table ends the table"
+table_heading="$(_resp "| File | Note |
+|---|---|
+| a | b |
+## Notes | src/regex-3125.ts:1 contains \`export const pattern = /alpha\\|beta/;\`
+VERDICT: APPROVE")"
+r="$(_report "$table_heading")"
+if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3125: a list item after a table ends the table"
+table_list="$(_resp "| File | Note |
+|---|---|
+| a | b |
+- src/regex-3125.ts:1 | contains \`export const pattern = /alpha\\|beta/;\`
+VERDICT: APPROVE")"
+r="$(_report "$table_list")"
+if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"

@@ -3142,9 +3142,11 @@ def checkable(text):
     return specific(text)
 
 # GFM table rows: a delimiter row, the header line above it, and the rows
-# below it that still contain a pipe. Only a code span in one of these rows
-# can carry a table-escaped "\|".
+# below it that still contain a pipe, up to a line that starts another block
+# (heading, quote, fence, list item, thematic break or HTML). Only a code span
+# in one of these rows can carry a table-escaped "\|".
 DELIMITER_ROW = re.compile(r"^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*:?-+:?[ \t]*\|?[ \t]*$")
+BLOCK_START = re.compile(r"^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|```|~~~|[-+*][ \t]|\d{1,9}[.)][ \t]|<|(?:[-*_][ \t]*){3,}$)")
 table_ranges = []
 resp_lines = []
 offset = 0
@@ -3153,11 +3155,13 @@ for raw in resp.split("\n"):
     offset += len(raw) + 1
 def table_line(index):
     l_start, l_end, text = resp_lines[index]
-    return "|" in text and not in_fence(l_start, l_end + 1)
+    return "|" in text and not BLOCK_START.match(text) and not in_fence(l_start, l_end + 1)
 
 row = 1
 while row < len(resp_lines):
-    if not (table_line(row - 1) and table_line(row) and DELIMITER_ROW.match(resp_lines[row][2])):
+    delimiter = resp_lines[row]
+    if not ("|" in delimiter[2] and DELIMITER_ROW.match(delimiter[2])
+            and not in_fence(delimiter[0], delimiter[1] + 1) and table_line(row - 1)):
         row += 1
         continue
     last = row
@@ -3166,8 +3170,12 @@ while row < len(resp_lines):
     table_ranges.append((resp_lines[row - 1][0], resp_lines[last][1]))
     row = last + 2
 
+# Tables come from one forward scan, so they are sorted and disjoint.
+table_starts = [t_start for t_start, _ in table_ranges]
+
 def in_table(start, end):
-    return any(t_start <= start and end <= t_end for t_start, t_end in table_ranges)
+    i = bisect_right(table_starts, start) - 1
+    return i >= 0 and end <= table_ranges[i][1]
 
 def unescaped(variants, table):
     # "\|" is how a seat writes "|" inside a Markdown table cell (sail-cruisey
