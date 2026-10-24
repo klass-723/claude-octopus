@@ -3163,14 +3163,22 @@ def cell_count(text):
         row_text = row_text[:-1]
     return len(re.split(r"(?<!\\)\|", row_text))
 
+def indented_code(text):
+    # Four columns of indentation make an indented code block, not a table.
+    indent = text[:len(text) - len(text.lstrip(" \t"))]
+    return len(indent.expandtabs(4)) >= 4
+
 def table_line(index):
     l_start, l_end, text = resp_lines[index]
-    return "|" in text and not BLOCK_START.match(text) and not in_fence(l_start, l_end + 1)
+    return ("|" in text and not indented_code(text) and not BLOCK_START.match(text)
+            and not in_fence(l_start, l_end + 1))
 
 row = 1
 while row < len(resp_lines):
     delimiter = resp_lines[row]
-    if not ("|" in delimiter[2] and DELIMITER_ROW.match(delimiter[2])
+    # The delimiter skips BLOCK_START, since a "- | -" delimiter also looks
+    # like a list item.
+    if not ("|" in delimiter[2] and DELIMITER_ROW.match(delimiter[2]) and not indented_code(delimiter[2])
             and not in_fence(delimiter[0], delimiter[1] + 1) and table_line(row - 1)
             and cell_count(resp_lines[row - 1][2]) == cell_count(delimiter[2])):
         row += 1

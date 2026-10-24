@@ -385,6 +385,17 @@ VERDICT: APPROVE")"
 r="$(_report "$cell_mismatch")"
 if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3125: a table-shaped indented code block is not a table"
+indented_table="$(_resp "Example:
+
+    | File | Code |
+    |---|---|
+    | src/regex-3125.ts:1 | \`export const pattern = /alpha\\|beta/;\` |
+
+VERDICT: APPROVE")"
+r="$(_report "$indented_table")"
+if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
