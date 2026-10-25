@@ -3155,13 +3155,15 @@ for raw in resp.split("\n"):
     offset += len(raw) + 1
 def cell_count(text):
     # Unescaped pipes separate cells; one leading and one trailing pipe are
-    # borders. GFM requires the header and delimiter rows to match.
-    row_text = text.strip()
+    # borders. GFM requires the header and delimiter rows to match. A
+    # backslash escapes the next character, so "\\|" is an escaped backslash
+    # and then a separator.
+    row_text = re.sub(r"\\.", "x", text.strip())
     if row_text.startswith("|"):
         row_text = row_text[1:]
-    if row_text.endswith("|") and not row_text.endswith("\\|"):
+    if row_text.endswith("|"):
         row_text = row_text[:-1]
-    return len(re.split(r"(?<!\\)\|", row_text))
+    return row_text.count("|") + 1
 
 def indented_code(text):
     # Four columns of indentation make an indented code block, not a table.
