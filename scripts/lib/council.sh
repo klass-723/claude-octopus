@@ -3093,6 +3093,11 @@ fence_ranges = []
 for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
     fence_ranges.append((match.start(), match.end()))
     info = match.group(1).strip().lower()
+    # The feature workflow's structured findings block is JSON, not a code
+    # quote; feature-workflow.py checks each finding by digest (sail-cruisey
+    # #3244 CP1). Its range stays a fence so code spans inside are skipped too.
+    if info == "octopus-policy-findings":
+        continue
     lines = match.group(2).split("\n")
     diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
     kept, removed_kept = [], []

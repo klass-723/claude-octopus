@@ -451,6 +451,36 @@ VERDICT: APPROVE')"
 r="$(_report "$fenced_lit")"
 if jq -e '.quotes_verified == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# An `octopus-policy-findings` block is the feature workflow's structured
+# findings format (checked by digest in feature-workflow.py), not a code quote.
+# sail-cruisey #3244 CP1: codex's only "quote" was this block, so it was
+# marked fabricated beside real citations.
+test_case "#3244: an octopus-policy-findings block is not a code quote"
+policy='src/pricing.ts:2 keeps the fallback, but the plan skips a required audit.
+
+```octopus-policy-findings
+{
+  "findings": [
+    {
+      "source": "RULES.md",
+      "line_start": 3,
+      "quote": "**Audit:** run `/octo:security` when the\ndiff touches external input\nhandling.",
+      "recommendation": "Run the audit before CP2."
+    }
+  ]
+}
+```
+
+VERDICT: REVISE'
+r="$(_report "$(_resp "$policy")")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: an invented quote beside an octopus-policy-findings block is still fabricated"
+policy_fab="$policy
+src/pricing.ts:2 has \`const base = await fetchCabinPrice(cabin.id, { cache: true });\`."
+r="$(_report "$(_resp "$policy_fab")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
