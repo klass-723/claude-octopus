@@ -3035,6 +3035,11 @@ if opener is not None:
 for start, end, info, body in fences:
     fence_ranges.append((start, end))
     info = info.strip().lower()
+    # The feature workflow's structured findings block is JSON, not a code
+    # quote; feature-workflow.py checks each finding by digest (sail-cruisey
+    # #3244 CP1). Its range stays a fence so code spans inside are skipped too.
+    if info == "octopus-policy-findings":
+        continue
     lines = body.split("\n")
     diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
     kept, removed_kept = [], []

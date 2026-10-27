@@ -28,6 +28,19 @@
   timestamp, the process id and `$RANDOM`. `OCTOPUS_PROOF_RUN_ID` still sets
   the whole run id. `run.json` and `seats.json` stay in `runs/<session-id>/`.
 
+- A seat's `octopus-policy-findings` block no longer marks it fabricated. The
+  feature workflow asks seats for that fenced JSON block and checks each
+  finding by digest, but the council quote verifier read the block as a code
+  quote. With JSON escapes it never matches a file, so a seat with real
+  citations whose only other "quote" was that block was marked fabricated and
+  blind. The block now stays a fence, so code spans inside it are skipped too,
+  but is not checked as a quote. Only a block `feature-analysis.py` reads is
+  exempt: a marker line holding only the label `octopus-policy-findings` (at
+  any indentation), closed by the same marker, around a findings list or an
+  object holding one. An unclosed, invalid, case-variant or wider-closed block
+  is checked like any other fence, and an invented quote beside a valid one is
+  still fabricated.
+
 ## [11.15.2] - 2026-10-28
 
 ### Fixed
