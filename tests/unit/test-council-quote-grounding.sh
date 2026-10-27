@@ -481,6 +481,35 @@ src/pricing.ts:2 has \`const base = await fetchCabinPrice(cabin.id, { cache: tru
 r="$(_report "$(_resp "$policy_fab")")"
 if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# A seat's own arithmetic is a computed value, not a quote of the payload
+# (sail-cruisey #3246 CP1: codex disputed a size estimate with its own sum and
+# was marked fabricated on it).
+test_case "#3246: a seat's own arithmetic in backticks is not a quote"
+sum_resp="$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 KB` adds up.
+VERDICT: APPROVE')"
+r="$(_report "$sum_resp")"
+if jq -e '.quotes_checked == 0 and .fabricated == false and .unverified_samples == []' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic with variables is still a code quote"
+var_resp="$(_resp 'src/pricing.ts:2 computes `const total = base + taxes * 2;` before returning.
+VERDICT: APPROVE')"
+r="$(_report "$var_resp")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an unverified quote says why, naming the cited file"
+cited_fab="$(_resp 'src/pricing.ts:2 reads `const base = await fetchCabinPrice(cabin.id, { cache: true });`.
+VERDICT: APPROVE')"
+r="$(_report "$cited_fab")"
+if jq -e '(.unverified_reasons | length) == (.unverified_samples | length) and (.unverified_reasons[0] | test("cited file src/pricing.ts"))' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an unattributed unverified quote says it is in no readable file"
+loose="$(_resp 'src/pricing.ts:2 looks right.
+
+Elsewhere the code does `await fetchCabinPrice(cabin.id, { cache: true, ttl: 30 })` too.
+VERDICT: APPROVE')"
+r="$(_report "$loose")"
+if jq -e '.quotes_unverified >= 1 and (.unverified_reasons | length) == (.unverified_samples | length) and (.unverified_reasons[0] | test("not found in any readable file"))' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"

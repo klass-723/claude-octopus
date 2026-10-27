@@ -2859,7 +2859,7 @@ print(json.dumps(validated, separators=(",", ":")))
 PY
 }
 
-COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_verified_in_context":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"diff_sources":[],"fabricated":false,"unverified_samples":[]}'
+COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_verified_in_context":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"diff_sources":[],"fabricated":false,"unverified_samples":[],"unverified_reasons":[]}'
 
 council_response_quote_verification_json() {
     # Verify the code a seat QUOTES next to its `path:line` citations (sail-cruisey
@@ -2926,7 +2926,7 @@ result = {"citations": 0, "citations_unresolved": 0, "quotes_checked": 0, "quote
           "quotes_verified_in_context": 0, "quotes_unverified": 0, "quotes_unverifiable": 0,
           "quotes_unverifiable_claimed_removed": 0, "quotes_unverifiable_unresolved_citation": 0,
           "quotes_unverifiable_command": 0, "quotes_unverifiable_proposed": 0, "diff_sources": [],
-          "fabricated": False, "unverified_samples": []}
+          "fabricated": False, "unverified_samples": [], "unverified_reasons": []}
 
 def emit():
     print(json.dumps(result, separators=(",", ":")))
@@ -3157,11 +3157,24 @@ for c_start, c_end, _, _ in tokens:
     units.append((line_end + 1, next_end, "bare", [line], [], ""))
 units.sort(key=lambda unit: unit[0])
 
+# A seat's own arithmetic ("8 + 10 + 0.5 = 18.5 KB") is a value it computed,
+# not a quote of the payload (sail-cruisey #3246): only numbers, optional unit
+# words right after a number, and operators, with at least one digit and one
+# operator. Any identifier ("base + taxes * 2") keeps it a code quote.
+COMPUTED_NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:\s*(?:%|[A-Za-z]{1,6}\b))?")
+def computed(text):
+    text = norm(text)
+    if not re.search(r"\d", text) or not re.search(r"[-+*/×÷=≈<>]", text):
+        return False
+    return re.sub(r"[\s\-+*/×÷=≈~<>()\[\],.]+", "", COMPUTED_NUMBER.sub("", text)) == ""
+
 def checkable(text):
-    # A quoted citation or a bare path is not a code quote.
+    # A quoted citation, a bare path or a computed value is not a code quote.
     if CITATION.search(text):
         return False
     if " " not in norm(text) and "/" in text:
+        return False
+    if computed(text):
         return False
     return specific(text)
 
@@ -3468,10 +3481,13 @@ def proposed(start):
         line_start = resp.rfind("\n", 0, max(0, line_start - 1)) + 1
     return bool(PROPOSAL.search(LINK_TARGET.sub("", resp[line_start:start])))
 
-def record_unverified(text):
+def record_unverified(text, reason):
+    # Each sample carries why it failed, so a lead can tell an invented quote
+    # from one aimed at the wrong file (sail-cruisey #3246).
     result["quotes_unverified"] += 1
     if len(result["unverified_samples"]) < 3:
         result["unverified_samples"].append(norm(text)[:120])
+        result["unverified_reasons"].append(reason)
 
 for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     wholes = unit_wholes(block) if len(block) > 1 else []
@@ -3573,7 +3589,15 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
         result["quotes_unverifiable"] += 1
         result["quotes_unverifiable_proposed"] += 1
     elif readable:
-        record_unverified(sample)
+        if attributed is not None:
+            try:
+                cited = str(Path(attributed[2]).relative_to(root))
+            except ValueError:
+                cited = str(attributed[2])
+            reason = "not found in the cited file " + cited
+        else:
+            reason = "not found in any readable file under the evidence root, the reviewed diff or the context files"
+        record_unverified(sample, reason)
         if attributed is not None:
             result["quotes_attributed_unverified"] += 1
     else:
