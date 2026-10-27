@@ -845,7 +845,14 @@ smoke_test_cache_key() {
     if _smoke_claude_available; then
         claude_seat="${OCTOPUS_CLAUDE_BIN:-claude}/$(get_agent_model "claude-sonnet" 2>/dev/null || echo "default")"
     fi
-    echo "${codex_model}:${cursor_agent_model}:${cursor_agent_state}:${codex_sandbox}:claude=${claude_seat}"
+    local roster=""
+    declare -f octo_preflight_roster >/dev/null 2>&1 && roster="$(octo_preflight_roster 2>/dev/null || printf 'invalid')"
+    echo "${codex_model}:${cursor_agent_model}:${cursor_agent_state}:${codex_sandbox}:claude=${claude_seat}:roster=${roster//$'\n'/,}"
+}
+
+# A pinned council roster limits the smoke test to its seats.
+_smoke_in_roster() {
+    ! declare -f octo_preflight_in_roster >/dev/null 2>&1 || octo_preflight_in_roster "$1"
 }
 
 # Claude seats run as `claude --print` subprocesses with the CLI's own
@@ -1115,12 +1122,12 @@ provider_smoke_test() {
 
     # Determine which providers are available (from preflight state)
     local has_codex=false has_cursor_agent=false has_agy=false has_claude=false
-    command -v codex &>/dev/null && has_codex=true
-    if declare -f cursor_agent_is_available >/dev/null 2>&1 && cursor_agent_is_available; then
+    command -v codex &>/dev/null && _smoke_in_roster codex && has_codex=true
+    if declare -f cursor_agent_is_available >/dev/null 2>&1 && cursor_agent_is_available && _smoke_in_roster cursor-agent; then
         has_cursor_agent=true
     fi
-    command -v agy &>/dev/null && has_agy=true
-    _smoke_claude_available && has_claude=true
+    command -v agy &>/dev/null && _smoke_in_roster agy && has_agy=true
+    _smoke_claude_available && _smoke_in_roster claude && has_claude=true
 
     if [[ "$has_codex" == "false" && "$has_cursor_agent" == "false" && "$has_agy" == "false" && "$has_claude" == "false" ]]; then
         log WARN "Smoke test: no providers to test"
@@ -1205,6 +1212,9 @@ provider_smoke_test() {
             local claude_error="${claude_result%%:*}"
             local claude_model="${claude_result#*:}"
             _display_smoke_test_error "Claude" "$claude_error" "$claude_model"
+        fi
+        if declare -f octo_preflight_sandbox_note >/dev/null 2>&1; then
+            octo_preflight_sandbox_note | sed 's/^/  /'
         fi
         echo ""
     fi
