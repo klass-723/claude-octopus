@@ -233,6 +233,7 @@ printf '%s\n' '#!/usr/bin/env bash' \
     '  whitespace) printf "  \n\t\n\n" ;;' \
     '  codex-tokens-only) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "exec" "ls" "tokens used" "1,234" >&2 ;;' \
     '  codex-stderr-answer) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "codex" "Substantive answer emitted on stderr." "tokens used" "1,234" >&2 ;;' \
+    '  codex-big-stderr) printf "%s\n" "Final review text from the last message."; { printf "%s\n" "OpenAI Codex" "user" "$prompt_text"; for n in $(seq 1 600); do printf "exec cat src/file-%s.ts\nconst echoedLine%s = readRepoFile(%s);\n" "$n" "$n" "$n"; done; printf "%s\n" "codex" "Final review text from the last message." "tokens used" "9,999"; } >&2 ;;' \
     'esac' > "$fake_provider"
 chmod +x "$fake_provider"
 
@@ -1092,6 +1093,27 @@ else
     test_fail "stderr-recovered codex answer was treated as empty: status='$stderr_answer_status' log='$(cat "$empty_body_log")'"
 fi
 log() { :; }
+
+# sail-cruisey #3245: codex echoes every file it reads on stderr. A large
+# stderr transcript goes to a sidecar beside the result when stdout carries the
+# answer, so the result holds the review, not hundreds of KB of tool output.
+test_case "a large codex stderr transcript goes to a sidecar, not the result"
+run_empty_body_fixture codex-big-stderr codex-big-stderr codex-standard || true
+big_result="$RESULTS_DIR/codex-standard-codex-big-stderr.md"
+big_sidecar="${big_result%.md}.stderr.log"
+big_done="$WORKSPACE_DIR/.octo/agents/codex-big-stderr.done"
+big_size="$(wc -c < "$big_result" 2>/dev/null | tr -d ' ')"
+if [[ -s "$big_done" && "${big_size:-0}" -lt 20000 ]] &&
+   grep -Fq 'Final review text from the last message.' "$big_result" &&
+   grep -Fq "Full stderr transcript" "$big_result" && grep -Fq "$big_sidecar" "$big_result" &&
+   [[ "$(grep -c '^exec cat src/file-' "$big_sidecar" 2>/dev/null)" -eq 600 ]] &&
+   [[ "$(stat -f '%Lp' "$big_sidecar" 2>/dev/null || stat -c '%a' "$big_sidecar")" == 600 ]] &&
+   [[ "$(grep -c '^exec cat src/file-' "$big_result")" -lt 40 ]] &&
+   tail -n 5 "$big_result" | grep -Fq 'OCTOPUS-RESULT-END'; then
+    test_pass
+else
+    test_fail "result size=${big_size:-missing} sidecar=$(wc -c < "$big_sidecar" 2>/dev/null || echo missing)"
+fi
 
 test_case "empty-body helper exempts Tangle implementers and accepts real bodies"
 empty_body_file="$TEST_TMP_DIR/empty-body.out"
