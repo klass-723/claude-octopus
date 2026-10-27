@@ -30,10 +30,12 @@ octo_project_scope_key() {
 }
 
 # A relative path that stays inside the scope root and exists there. Learned
-# paths that are absolute, climb out with "..", or name a file this project
-# does not have are never recorded or shown.
+# paths that are absolute, climb out with "..", name a file this project does
+# not have, or reach outside through a symlink (the final component, or a
+# symlinked directory on the way) are never recorded or shown. The root is the
+# physical path from octo_project_scope_root.
 octo_project_scope_has_path() {
-    local root="$1" path="$2"
+    local root="$1" path="$2" full parent
     [[ -n "$root" && -n "$path" ]] || return 1
     case "$path" in
         /*|~*) return 1 ;;
@@ -41,5 +43,11 @@ octo_project_scope_has_path() {
     case "/$path/" in
         */../*) return 1 ;;
     esac
-    [[ -e "$root/$path" ]]
+    full="$root/$path"
+    [[ -e "$full" && ! -L "$full" ]] || return 1
+    parent="$(cd "$(dirname "$full")" 2>/dev/null && pwd -P)" || return 1
+    case "$parent/" in
+        "$root"/*) return 0 ;;
+    esac
+    return 1
 }

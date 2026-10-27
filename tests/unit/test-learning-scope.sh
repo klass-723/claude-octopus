@@ -53,8 +53,25 @@ hint="$(PROJECT_ROOT="$A" build_heuristic_context "Edit skills/blocks/simplify.m
 if [[ -z "$hint" ]]; then test_pass; else test_fail "legacy hint: '$hint'"; fi
 
 test_case "a malformed line does not hide later in-scope patterns"
+# Malformed line first, then the only valid records, so a parser that stops
+# at the bad line returns nothing.
+saved_patterns="$TEST_TMP_DIR/patterns.saved"
+cp "$PATTERNS" "$saved_patterns"
+{ printf '%s\n' 'not json {'; grep -F "\"root\":\"$B_REAL\"" "$saved_patterns"; } > "$PATTERNS"
+first_line="$(head -1 "$PATTERNS")"
 hint="$(PROJECT_ROOT="$B" build_heuristic_context "Edit skills/blocks/simplify.md")"
-if [[ "$hint" == *"notes/review-prompt.md"* ]]; then test_pass; else test_fail "hint: '$hint'"; fi
+cp "$saved_patterns" "$PATTERNS"
+if [[ "$first_line" == "not json {" && "$hint" == *"notes/review-prompt.md"* ]]; then test_pass; else test_fail "hint: '$hint'"; fi
+
+test_case "a symlink that leaves the worktree is not an in-scope path"
+OUTSIDE="$TEST_TMP_DIR/outside"; mkdir -p "$OUTSIDE/dir"
+printf 'secret\n' > "$OUTSIDE/secret.md"; printf 'x\n' > "$OUTSIDE/dir/inner.md"
+ln -s "$OUTSIDE/secret.md" "$B/notes/linked.md"
+ln -s "$OUTSIDE/dir" "$B/linkdir"
+if ! octo_project_scope_has_path "$B_REAL" notes/linked.md &&
+   ! octo_project_scope_has_path "$B_REAL" linkdir/inner.md &&
+   octo_project_scope_has_path "$B_REAL" notes/review-prompt.md; then test_pass
+else test_fail "a symlinked path outside the worktree was accepted"; fi
 
 test_case "provider history from one worktree is not read in another"
 PROJECT_ROOT="$B" append_provider_history codex tangle "task" "worktree B learning"
