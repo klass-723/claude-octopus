@@ -823,6 +823,21 @@ printf '# Plan\n\n- const base = await fetchCabinPrice(cabin.id, { cache: true }
 r="$(COUNCIL_CONTEXT_FILES=("$ctx_plan"); _report "$fab")"
 if jq -e '.fabricated == true and .diff_sources == []' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# A seat's own arithmetic is a computed value, not a quote of the payload
+# (sail-cruisey #3246 CP1: codex disputed a size estimate with its own sum and
+# was marked fabricated on it).
+test_case "#3246: a seat's own arithmetic in backticks is not a quote"
+sum_resp="$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 KB` adds up.
+VERDICT: APPROVE')"
+r="$(_report "$sum_resp")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic with variables is still a code quote"
+var_resp="$(_resp 'src/pricing.ts:2 computes `const total = base + taxes * 2;` before returning.
+VERDICT: APPROVE')"
+r="$(_report "$var_resp")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"

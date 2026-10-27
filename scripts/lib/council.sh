@@ -3138,11 +3138,24 @@ for c_start, c_end, _, _ in tokens:
     units.append((line_end + 1, next_end, "bare", [line], [], ""))
 units.sort(key=lambda unit: unit[0])
 
+# A seat's own arithmetic ("8 + 10 + 0.5 = 18.5 KB") is a value it computed,
+# not a quote of the payload (sail-cruisey #3246): only numbers, optional unit
+# words right after a number, and operators, with at least one digit and one
+# operator. Any identifier ("base + taxes * 2") keeps it a code quote.
+COMPUTED_NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:\s*(?:%|[A-Za-z]{1,6}\b))?")
+def computed(text):
+    text = norm(text)
+    if not re.search(r"\d", text) or not re.search(r"[-+*/×÷=≈<>]", text):
+        return False
+    return re.sub(r"[\s\-+*/×÷=≈~<>()\[\],.]+", "", COMPUTED_NUMBER.sub("", text)) == ""
+
 def checkable(text):
-    # A quoted citation or a bare path is not a code quote.
+    # A quoted citation, a bare path or a computed value is not a code quote.
     if CITATION.search(text):
         return False
     if " " not in norm(text) and "/" in text:
+        return False
+    if computed(text):
         return False
     return specific(text)
 
