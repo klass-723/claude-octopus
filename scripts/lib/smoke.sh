@@ -847,7 +847,9 @@ smoke_test_cache_key() {
     fi
     local roster=""
     declare -f octo_preflight_roster >/dev/null 2>&1 && roster="$(octo_preflight_roster 2>/dev/null || printf 'invalid')"
-    echo "${codex_model}:${cursor_agent_model}:${cursor_agent_state}:${codex_sandbox}:claude=${claude_seat}:roster=${roster//$'\n'/,}"
+    # The roster segment appears only when one is pinned, so the default key
+    # (and every existing cache) is unchanged.
+    echo "${codex_model}:${cursor_agent_model}:${cursor_agent_state}:${codex_sandbox}:claude=${claude_seat}${roster:+:roster=${roster//$'\n'/,}}"
 }
 
 # A pinned council roster limits the smoke test to its seats.
