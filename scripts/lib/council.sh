@@ -3018,6 +3018,7 @@ DIFF_HUNK = re.compile(r"^@@ -[0-9]{1,10}(?:,([0-9]{1,10}))? \+[0-9]{1,10}(?:,([
 units = []
 fence_ranges = []
 fences = []
+closed_fence_starts = set()
 opener = None
 # A closing fence uses the same marker and at least the opening width. Scan
 # marker lines once so mismatched or unterminated fences cannot hide quotes.
@@ -3029,17 +3030,35 @@ for match in re.finditer(r"^ {0,3}(`{3,}|~{3,})([^\n]*)(?:\n|$)", resp, re.M):
     elif (marker[0] == opener.group(1)[0] and len(marker) >= len(opener.group(1))
           and not info.strip()):
         fences.append((opener.start(), match.end(), opener.group(2), resp[opener.end():match.start()]))
+        closed_fence_starts.add(opener.start())
         opener = None
 if opener is not None:
     fences.append((opener.start(), len(resp), opener.group(2), resp[opener.end():]))
+def policy_findings_block(start, info, body):
+    # The feature workflow's structured findings block is JSON, not a code
+    # quote; feature-analysis.py checks each finding by digest (sail-cruisey
+    # #3244 CP1). Only the form it reads is exempt: a closed fence labelled
+    # exactly octopus-policy-findings whose body is a findings list, or an
+    # object holding only one. Anything else stays a quote unit, so the label
+    # cannot hide an invented quote.
+    if info.strip() != "octopus-policy-findings" or start not in closed_fence_starts:
+        return False
+    try:
+        value = json.loads(body)
+    except (ValueError, RecursionError):
+        return False
+    if isinstance(value, dict):
+        if set(value) != {"findings"}:
+            return False
+        value = value["findings"]
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
 for start, end, info, body in fences:
     fence_ranges.append((start, end))
-    info = info.strip().lower()
-    # The feature workflow's structured findings block is JSON, not a code
-    # quote; feature-workflow.py checks each finding by digest (sail-cruisey
-    # #3244 CP1). Its range stays a fence so code spans inside are skipped too.
-    if info == "octopus-policy-findings":
+    # A findings block's range stays a fence so code spans inside are skipped too.
+    if policy_findings_block(start, info, body):
         continue
+    info = info.strip().lower()
     lines = body.split("\n")
     diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
     kept, removed_kept = [], []

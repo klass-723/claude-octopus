@@ -853,6 +853,38 @@ src/pricing.ts:2 has \`const base = await fetchCabinPrice(cabin.id, { cache: tru
 r="$(_report "$(_resp "$policy_fab")")"
 if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# Only a closed, exact-label block whose body is findings JSON is skipped; the
+# feature workflow reads no other form. Anything else stays a quote unit, so a
+# seat cannot hide an invented quote behind the label.
+invented='const base = await fetchCabinPrice(cabin.id, { cache: true });'
+test_case "#3244: an unterminated octopus-policy-findings fence does not hide a quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+$invented
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked >= 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: an octopus-policy-findings fence that is not findings JSON does not hide a quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+$invented
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a case-variant findings label does not hide a quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`OCTOPUS-POLICY-FINDINGS
+$invented
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
