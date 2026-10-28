@@ -520,6 +520,26 @@ VERDICT: APPROVE')"
 r="$(_report "$var_resp")"
 if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3246: a long unit word after a number still makes arithmetic a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 kilobytes` adds up.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: modulo arithmetic is a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Check: `100000 % 1000 % 100 % 10` is zero.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: a conditional expression is not taken for numbers with units"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Elsewhere it computes `100 if 1000 > 500 else 1` first.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic a seat says a cited file contains is still verified"
+r="$(_report "$(_resp 'src/pricing.ts:2 reads `1024 * 1024 * 1024 * 10`.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .quotes_attributed == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3246: an unverified quote says why, naming the cited file"
 cited_fab="$(_resp 'src/pricing.ts:2 reads `const base = await fetchCabinPrice(cabin.id, { cache: true });`.
 VERDICT: APPROVE')"

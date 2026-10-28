@@ -3175,23 +3175,27 @@ for c_start, c_end, _, _ in tokens:
 units.sort(key=lambda unit: unit[0])
 
 # A seat's own arithmetic ("8 + 10 + 0.5 = 18.5 KB") is a value it computed,
-# not a quote of the payload (sail-cruisey #3246): only numbers, optional unit
-# words right after a number, and operators, with at least one digit and one
-# operator. Any identifier ("base + taxes * 2") keeps it a code quote.
-COMPUTED_NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:\s*(?:%|[A-Za-z]{1,6}\b))?")
+# not a quote of the payload (sail-cruisey #3246): only numbers, a known unit
+# right after a number, and operators, with at least one digit and one
+# operator. Any identifier ("base + taxes * 2") or keyword ("0 if n else 1")
+# keeps it a code quote. A quote attributed to a citation is still verified.
+COMPUTED_UNIT = (r"%|(?:[kmgtp]i?)?b|bytes?|bits?|(?:kilo|mega|giga|tera)(?:bytes?|bits?)"
+                 r"|[kmgt]|ns|us|µs|ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|days?|weeks?"
+                 r"|x|tokens?|chars?|characters?|words?|lines?|files?|calls?|requests?|rows?|items?")
+COMPUTED_NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:\s*(?:" + COMPUTED_UNIT + r")(?![A-Za-z0-9_]))?", re.I)
 def computed(text):
     text = norm(text)
-    if not re.search(r"\d", text) or not re.search(r"[-+*/×÷=≈<>]", text):
+    if not re.search(r"\d", text) or not re.search(r"[-+*/×÷=≈<>%]", text):
         return False
-    return re.sub(r"[\s\-+*/×÷=≈~<>()\[\],.]+", "", COMPUTED_NUMBER.sub("", text)) == ""
+    return re.sub(r"[\s\-+*/×÷=≈~<>%()\[\],.]+", "", COMPUTED_NUMBER.sub("", text)) == ""
 
-def checkable(text):
+def checkable(text, keep_computed=False):
     # A quoted citation, a bare path or a computed value is not a code quote.
     if CITATION.search(text):
         return False
     if " " not in norm(text) and "/" in text:
         return False
-    if computed(text):
+    if not keep_computed and computed(text):
         return False
     return specific(text)
 
@@ -3276,25 +3280,25 @@ def unwrapped(variants, literal):
         return variants
     return variants + [v[1:-1].replace('\\"', '"').strip() for v in variants if STRING_LITERAL.match(v)]
 
-def specific_lines(block, table=False, literal=False):
+def specific_lines(block, table=False, literal=False, keep_computed=False):
     out = []
     for line in block:
         variants = [line.strip()]
         stripped = GUTTER.sub("", line).strip()
         if stripped != variants[0]:
             variants.append(stripped)
-        variants = [v for v in unwrapped(unescaped(variants, table), literal) if checkable(v)]
+        variants = [v for v in unwrapped(unescaped(variants, table), literal) if checkable(v, keep_computed)]
         if variants:
             out.append(variants)
     return out
 
-def unit_wholes(block):
+def unit_wholes(block, keep_computed=False):
     whole = " ".join(l.strip() for l in block)
     out = [whole] if whole else []
     unguttered = " ".join(GUTTER.sub("", l).strip() for l in block)
     if unguttered and unguttered != whole:
         out.append(unguttered)
-    return [v for v in out if checkable(v)]
+    return [v for v in out if checkable(v, keep_computed)]
 
 file_cache = {}
 def load(path):
@@ -3507,16 +3511,18 @@ def record_unverified(text, reason):
         result["unverified_reasons"].append(reason)
 
 for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
-    wholes = unit_wholes(block) if len(block) > 1 else []
+    associated, gap = association(start)
+    attributed = attribution(associated, gap)
+    # Arithmetic the seat says a cited file contains is a claim to verify.
+    keep = attributed is not None
+    wholes = unit_wholes(block, keep) if len(block) > 1 else []
     # Only an inline code span can sit in a table cell or be a string literal.
-    line_variants = specific_lines(block, kind == "inline" and in_table(start, end), kind == "inline")
+    line_variants = specific_lines(block, kind == "inline" and in_table(start, end), kind == "inline", keep)
     removed_variants = [v for v in [" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block]
-                        if v and checkable(v)]
+                        if v and checkable(v, keep)]
     if not wholes and not line_variants and not removed_variants:
         continue
     flat_variants = wholes + [v for variants in line_variants for v in variants]
-    associated, gap = association(start)
-    attributed = attribution(associated, gap)
     if associated is not None and associated[2] is None:
         # Written about a citation that names a file outside the evidence root
         # (an upstream repo, a symlinked dependency tree): unverifiable, and never
