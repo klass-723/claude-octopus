@@ -117,6 +117,8 @@ test_case "a roster with only undetectable seats passes without claiming they we
 STUB_UNREADY=""
 out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=openai-tools run_preflight)" && rc=0 || rc=$?
 if [[ "$rc" -eq 0 && ! -e "$READY_CALLS" && "$out" == *"openai-tools: not checked"* &&
+      "$out" == *"Preflight completed with unchecked council seats: openai-tools"* &&
+      "$out" != *"All 8 tentacles accounted for and ready to work!"* &&
       "$out" != *"NO AI PROVIDERS FOUND"* && "$out" != *"PROVIDERS FOUND BUT NOT READY"* ]] &&
    [[ "$(preflight_cache_read)" == 0 ]]; then test_pass
 else test_fail "rc=$rc out=$out"; fi

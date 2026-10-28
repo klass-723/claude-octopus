@@ -886,8 +886,13 @@ preflight_check() {
         return 1
     fi
 
-    log INFO "Pre-flight checks passed 🐙"
-    echo -e "${GREEN}✓${NC} All 8 tentacles accounted for and ready to work!"
+    if [[ -n "$roster_unchecked" ]]; then
+        log INFO "Pre-flight checks completed with unchecked council seats: $roster_unchecked"
+        echo -e "${YELLOW}Preflight completed with unchecked council seats: ${roster_unchecked}${NC}"
+    else
+        log INFO "Pre-flight checks passed 🐙"
+        echo -e "${GREEN}✓${NC} All 8 tentacles accounted for and ready to work!"
+    fi
 
     # v8.19: Provider smoke test (Issue #34)
     if ! provider_smoke_test "$force_check"; then
