@@ -1117,10 +1117,27 @@ _smoke_tally_result() {
             if [[ "$persist" == true ]] && declare -f octo_quota_mark_dead >/dev/null 2>&1; then
                 octo_quota_mark_dead "$provider" "${OCTOPUS_QUOTA_DEAD_TTL:-3600}"
             elif declare -f octo_quota_mark_failed_this_run >/dev/null 2>&1; then
-                octo_quota_mark_failed_this_run "$provider"
+                # A timeout is slow, not dead: excluded in this run, but it does
+                # not stop a pass from being cached.
+                if [[ "${result%%:*}" == TIMEOUT ]]; then
+                    octo_quota_mark_failed_this_run "$provider" no-recheck
+                else
+                    octo_quota_mark_failed_this_run "$provider"
+                fi
             fi
             ;;
     esac
+}
+
+# Status to cache for a passing smoke test: 0, unless a provider failed for an
+# unexplained reason. That provider is excluded only in this process, so a
+# cached pass would let the next run dispatch to it without testing it again.
+_smoke_pass_cache_status() {
+    if declare -f octo_quota_needs_recheck >/dev/null 2>&1 && octo_quota_needs_recheck; then
+        echo 1
+    else
+        echo 0
+    fi
 }
 
 # Orchestrate parallel smoke tests for all available providers
@@ -1254,7 +1271,7 @@ provider_smoke_test() {
         TIMEOUT)
             if [[ $pass_count -eq 0 && $fail_count -eq 1 ]]; then
                 log WARN "Smoke test: degraded mode (the claude CLI timed out and no other provider was tested)"
-                smoke_test_cache_write "0"
+                smoke_test_cache_write "$(_smoke_pass_cache_status)"
                 return 0
             fi
             ;;
@@ -1296,7 +1313,7 @@ provider_smoke_test() {
         else
             log INFO "Smoke test passed ($pass_count provider(s) verified)"
         fi
-        smoke_test_cache_write "0"
+        smoke_test_cache_write "$(_smoke_pass_cache_status)"
         return 0
     fi
 

@@ -33,6 +33,7 @@ skip_count=0
 reset_cache() {
     rm -f "$(octo_quota_dead_file)" "$(octo_quota_dead_meta_file)"
     _OCTO_QUOTA_RUN_DEAD=" "
+    _OCTO_QUOTA_RUN_RECHECK=" "
 }
 
 # A fresh shell that sources the libraries again: what the next preflight sees.
@@ -135,6 +136,114 @@ if jq -e --arg t "$expected_time" '.reason_code == "quota" and (.remediation | t
     test_pass
 else
     test_fail "readiness did not label the cached entry: $readiness"
+fi
+
+test_case "a run-local failure is reported as this run's failure, not a cached quota mark"
+reset_cache
+octo_quota_mark_failed_this_run codex
+readiness="$(
+    log() { :; }
+    source "$PROJECT_ROOT/scripts/lib/preflight.sh" 2>/dev/null
+    codex() { :; }
+    export "OPENAI_API_KEY=sk-test-not-a-real-key"
+    octo_provider_readiness_result codex static 2>/dev/null
+)"
+if jq -e '.status == "degraded" and .reason_code == "health-failed" and (.remediation | test("not cached")) and (.remediation | test("[Cc]ached [0-9]|quota") | not)' <<< "$readiness" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "run-local failure reported as: $readiness"
+fi
+
+test_case "a cached mark without its own timestamp is labelled cached with no time"
+reset_cache
+octo_quota_mark_dead agy 3600
+octo_quota_mark_dead codex
+readiness="$(
+    log() { :; }
+    source "$PROJECT_ROOT/scripts/lib/preflight.sh" 2>/dev/null
+    codex() { :; }
+    export "OPENAI_API_KEY=sk-test-not-a-real-key"
+    octo_provider_readiness_result codex static 2>/dev/null
+)"
+if jq -e '.reason_code == "quota" and (.remediation | test("\\(cached, not re-checked\\)"))' <<< "$readiness" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "a shared mtime was shown as codex's mark time: $readiness"
+fi
+
+# provider_smoke_test with every probe stubbed: claude passes, agy as given.
+smoke_bin="$TEST_TMP_DIR/smoke-bin"
+mkdir -p "$smoke_bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$smoke_bin/agy"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$smoke_bin/claude"
+chmod +x "$smoke_bin/agy" "$smoke_bin/claude"
+secure_tempfile() { mktemp "$TEST_TMP_DIR/${1:-tmp}.XXXXXX"; }
+STUB_AGY_RESULT="PASS"
+_smoke_test_provider() {
+    case "$1" in
+        claude) echo "PASS" > "$3" ;;
+        agy) echo "$STUB_AGY_RESULT" > "$3" ;;
+        *) echo "SKIP" > "$3" ;;
+    esac
+}
+SKIP_SMOKE_TEST=false
+SMOKE_TEST_CACHE_FILE="$WORKSPACE_DIR/.smoke-cache"
+PREFLIGHT_CACHE_TTL=3600
+run_smoke() {
+    reset_cache
+    rm -f "$SMOKE_TEST_CACHE_FILE"
+    pass_count=0 fail_count=0 skip_count=0
+    (
+        unset OCTOPUS_SKIP_PROVIDER_PROBES CLAUDE_CODE_REMOTE OCTOPUS_REMOTE_SESSION OCTOPUS_COUNCIL_DEFAULT_PROVIDERS
+        RED="" YELLOW="" GREEN="" NC="" DIM="" CYAN=""
+        PATH="$smoke_bin:/usr/bin:/bin" provider_smoke_test true >/dev/null 2>&1
+    )
+}
+
+test_case "a degraded smoke pass with an unknown failure does not cache a pass"
+STUB_AGY_RESULT="UNKNOWN:model"
+if run_smoke && [[ "$(sed -n '3p' "$SMOKE_TEST_CACHE_FILE" 2>/dev/null)" == 1 ]] && ! smoke_test_cache_valid; then
+    test_pass
+else
+    test_fail "the next process would reuse a pass: cache=$(tr '\n' '|' < "$SMOKE_TEST_CACHE_FILE" 2>/dev/null)"
+fi
+
+test_case "a timeout does not stop a smoke pass from being cached (slow is not dead)"
+STUB_AGY_RESULT="TIMEOUT:model"
+if run_smoke && [[ "$(sed -n '3p' "$SMOKE_TEST_CACHE_FILE" 2>/dev/null)" == 0 ]]; then
+    test_pass
+else
+    test_fail "cache=$(tr '\n' '|' < "$SMOKE_TEST_CACHE_FILE" 2>/dev/null)"
+fi
+
+test_case "a clean smoke pass is still cached"
+STUB_AGY_RESULT="PASS"
+if run_smoke && [[ "$(sed -n '3p' "$SMOKE_TEST_CACHE_FILE" 2>/dev/null)" == 0 ]]; then
+    test_pass
+else
+    test_fail "cache=$(tr '\n' '|' < "$SMOKE_TEST_CACHE_FILE" 2>/dev/null)"
+fi
+
+test_case "preflight does not cache a pass after an inconclusive smoke failure"
+pf_out="$(
+    log() { :; }
+    source "$PROJECT_ROOT/scripts/lib/config-display.sh" 2>/dev/null
+    source "$PROJECT_ROOT/scripts/lib/preflight.sh" 2>/dev/null
+    PREFLIGHT_CACHE_FILE="$WORKSPACE_DIR/.preflight-cache"
+    rm -f "$PREFLIGHT_CACHE_FILE"
+    RED="" YELLOW="" GREEN="" NC="" DIM="" CYAN=""
+    octo_provider_readiness_result() { printf '{"provider":"%s","status":"available","reason_code":"ready","remediation":""}\n' "$1"; }
+    check_codex_auth_freshness() { return 0; }
+    detect_enterprise_backend() { :; }
+    init_workspace() { :; }
+    provider_smoke_test() { octo_quota_mark_failed_this_run agy; return 0; }
+    preflight_check true >/dev/null 2>&1; rc=$?
+    printf '%s %s\n' "$rc" "$(preflight_cache_read 2>/dev/null)"
+)"
+if [[ "$pf_out" == "0 1" ]]; then
+    test_pass
+else
+    test_fail "rc and cached status: $pf_out"
 fi
 
 test_summary

@@ -444,7 +444,13 @@ _octo_provider_static_readiness() {
             ;;
     esac
 
-    if [[ "$status" == "available" ]] && declare -f octo_quota_is_dead >/dev/null 2>&1 && octo_quota_is_dead "$provider"; then
+    if [[ "$status" == "available" ]] && declare -f octo_quota_failed_this_run >/dev/null 2>&1 &&
+       octo_quota_failed_this_run "$provider"; then
+        # An inconclusive smoke failure in this run: excluded for now, not cached.
+        status="degraded"
+        reason_code="health-failed"
+        remediation="Failed this run's smoke test (not cached); excluded for the rest of this run."
+    elif [[ "$status" == "available" ]] && declare -f octo_quota_is_dead >/dev/null 2>&1 && octo_quota_is_dead "$provider"; then
         status="degraded"
         reason_code="quota"
         remediation="Wait for the provider quota window to reset or choose another provider."
@@ -906,6 +912,12 @@ preflight_check() {
         return 1
     fi
 
-    preflight_cache_write "0"  # Cache success
+    # A provider that failed inconclusively is excluded only in this process, so
+    # do not cache a pass that would let the next run skip checking it again.
+    if declare -f octo_quota_needs_recheck >/dev/null 2>&1 && octo_quota_needs_recheck; then
+        preflight_cache_write "1"
+    else
+        preflight_cache_write "0"  # Cache success
+    fi
     return 0
 }
