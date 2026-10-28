@@ -3090,14 +3090,31 @@ if not citations:
 GUTTER = re.compile(r"^\s*\d+\s*[:|]\s?")
 units = []
 fence_ranges = []
+def policy_findings_block(info, body):
+    # The feature workflow's structured findings block is JSON, not a code
+    # quote; feature-analysis.py checks each finding by digest (sail-cruisey
+    # #3244 CP1). Only the form it reads is exempt: a fence labelled exactly
+    # octopus-policy-findings whose body is a findings list, or an object
+    # holding only one. Anything else stays a quote unit, so the label cannot
+    # hide an invented quote.
+    if info.strip() != "octopus-policy-findings":
+        return False
+    try:
+        value = json.loads(body)
+    except (ValueError, RecursionError):
+        return False
+    if isinstance(value, dict):
+        if set(value) != {"findings"}:
+            return False
+        value = value["findings"]
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
 for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
     fence_ranges.append((match.start(), match.end()))
-    info = match.group(1).strip().lower()
-    # The feature workflow's structured findings block is JSON, not a code
-    # quote; feature-workflow.py checks each finding by digest (sail-cruisey
-    # #3244 CP1). Its range stays a fence so code spans inside are skipped too.
-    if info == "octopus-policy-findings":
+    # A findings block's range stays a fence so code spans inside are skipped too.
+    if policy_findings_block(match.group(1), match.group(2)):
         continue
+    info = match.group(1).strip().lower()
     lines = match.group(2).split("\n")
     diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
     kept, removed_kept = [], []
