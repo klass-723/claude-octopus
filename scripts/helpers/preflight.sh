@@ -44,6 +44,16 @@ if declare -F octo_preflight_sandbox >/dev/null 2>&1; then
     sandbox="$(octo_preflight_sandbox)"
 fi
 
+# Roster seats the registry cannot detect are listed as not checked rather than
+# unready; the council checks them when it dispatches.
+roster_unchecked=""
+if [[ -n "$roster" ]] && declare -F octo_preflight_seat_checkable >/dev/null 2>&1; then
+    for seat in $roster; do
+        octo_preflight_seat_checkable "$seat" || roster_unchecked="${roster_unchecked}${roster_unchecked:+ }${seat}"
+    done
+fi
+roster_unchecked_json="$(printf '%s\n' $roster_unchecked | jq -R 'select(length > 0)' | jq -cs .)"
+
 results_json="$({ octo_provider_readiness_all "$CHECK_KIND" "${roster//$'\n'/ }"; } | jq -s '.')"
 providers_ready="$(jq '[.[] | select(.status == "available")] | length' <<<"$results_json")"
 providers_degraded="$(jq '[.[] | select(.status != "available")] | length' <<<"$results_json")"
@@ -71,11 +81,13 @@ if [[ "$OUTPUT_MODE" == "json" ]]; then
         --argjson ollama_models "$ollama_json" \
         --arg check_kind "$CHECK_KIND" \
         --argjson roster "$roster_json" \
+        --argjson roster_unchecked "$roster_unchecked_json" \
         --arg sandbox "$sandbox" \
         '{providers_ready:$providers_ready,
           providers_degraded:$providers_degraded,
           check_kind:$check_kind,
           roster:$roster,
+          roster_unchecked:$roster_unchecked,
           sandbox:(if $sandbox == "" then null else $sandbox end),
           results:$results,
           versions:$versions,
@@ -102,10 +114,14 @@ echo "  Ready: $providers_ready  |  Needs attention: $providers_degraded"
 echo ""
 ready_provider_names="$(jq -r '.[] | select(.status == "available") | .provider' <<<"$results_json")"
 if [[ -n "$roster" ]]; then
-    if [[ "$providers_degraded" -eq 0 ]]; then
+    roster_not_ready="$(jq -r --arg unchecked " $roster_unchecked " '[.[] | select(.status != "available") | .provider as $p | select(($unchecked | contains(" " + $p + " ")) | not) | $p] | join(" ")' <<<"$results_json")"
+    if [[ -z "$roster_not_ready" ]]; then
         echo "  Council roster ready."
     else
-        echo "  Council roster seat(s) not ready: $(jq -r '[.[] | select(.status != "available") | .provider] | join(" ")' <<<"$results_json")"
+        echo "  Council roster seat(s) not ready: $roster_not_ready"
+    fi
+    if [[ -n "$roster_unchecked" ]]; then
+        echo "  Not checked by preflight (no provider detection; the council checks it when it dispatches): $roster_unchecked"
     fi
 elif [[ "$providers_ready" -eq 0 ]]; then
     echo "  No provider is ready. Run /octo:setup to configure one provider."

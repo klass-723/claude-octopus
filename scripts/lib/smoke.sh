@@ -1241,6 +1241,30 @@ provider_smoke_test() {
             ;;
     esac
 
+    # A pinned council roster needs every seat it launched to pass: one seat
+    # passing must not cover for another failing auth. A timeout stays
+    # degraded, as above (slow is not dead).
+    if declare -f octo_preflight_roster >/dev/null 2>&1 && [[ -n "$(octo_preflight_roster 2>/dev/null)" ]]; then
+        local roster_failed="" seat seat_result
+        for seat in codex cursor-agent agy claude; do
+            case "$seat" in
+                codex) seat_result="$codex_result" ;;
+                cursor-agent) seat_result="$cursor_agent_result" ;;
+                agy) seat_result="$agy_result" ;;
+                claude) seat_result="$claude_result" ;;
+            esac
+            case "${seat_result%%:*}" in
+                PASS|SKIP|TIMEOUT) ;;
+                *) roster_failed="${roster_failed}${roster_failed:+ }${seat}" ;;
+            esac
+        done
+        if [[ -n "$roster_failed" ]]; then
+            log ERROR "Smoke test failed: council roster seat(s) failed: ${roster_failed}"
+            smoke_test_cache_write "1"
+            return 1
+        fi
+    fi
+
     # Pass if at least one provider succeeds (consistent with v7.9.1 single-provider mode)
     if [[ $pass_count -gt 0 ]]; then
         if [[ $fail_count -gt 0 ]]; then

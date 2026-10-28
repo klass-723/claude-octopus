@@ -44,6 +44,15 @@ octo_preflight_in_roster() {
     [[ -z "$roster" ]] || grep -qxF "$1" <<< "$roster"
 }
 
+# A valid council seat the registry gives no detect capability (openai-tools:
+# an API-configured runtime with no local CLI) cannot be checked by preflight;
+# readiness reports it not-detectable on every run. Preflight lists it as not
+# checked instead of failing the roster on it; the council checks it when it
+# dispatches.
+octo_preflight_seat_checkable() {
+    octo_provider_has_capability "$1" detect 2>/dev/null
+}
+
 # The sandbox this process runs in, if any. Codex sets CODEX_SANDBOX for its
 # workspace-write and read-only sandboxes; Claude Code's Bash sandbox sets
 # SANDBOX_RUNTIME.
@@ -696,7 +705,12 @@ preflight_check() {
         candidates="$(_preflight_provider_candidates)"
     fi
 
+    local roster_unchecked=""
     for provider in $candidates; do
+        if [[ -n "$roster" ]] && ! octo_preflight_seat_checkable "$provider"; then
+            roster_unchecked="${roster_unchecked}${roster_unchecked:+ }${provider}"
+            continue
+        fi
         readiness="$(octo_provider_readiness_result "$provider" static)"
         status="$(_octo_readiness_json_field "$readiness" status)"
         reason="$(_octo_readiness_json_field "$readiness" reason_code)"
@@ -731,6 +745,9 @@ preflight_check() {
                 echo -e "  ${RED}✗${NC} ${provider}: ${status} (${candidate_reasons[$candidate_index]}) ${candidate_remediations[$candidate_index]}"
                 roster_unready="${roster_unready}${roster_unready:+ }${provider}"
             fi
+        done
+        for provider in $roster_unchecked; do
+            echo -e "  ${DIM}-${NC} ${provider}: not checked (the registry gives it no provider detection; the council checks it when it dispatches)"
         done
         if [[ -n "$roster_unready" ]]; then
             echo ""
