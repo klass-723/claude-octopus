@@ -838,6 +838,48 @@ VERDICT: APPROVE')"
 r="$(_report "$var_resp")"
 if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3246: a long unit word after a number still makes arithmetic a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 kilobytes` adds up.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: modulo arithmetic is a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Check: `100000 % 1000 % 100 % 10` is zero.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: a conditional expression is not taken for numbers with units"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Elsewhere it computes `100 if 1000 > 500 else 1` first.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic a seat says a cited file contains is still verified"
+r="$(_report "$(_resp 'src/pricing.ts:2 reads `1024 * 1024 * 1024 * 10`.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .quotes_attributed == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic followed by its citation is still verified"
+r="$(_report "$(_resp 'The cap is `1024 * 1024 * 1024 * 10` (src/pricing.ts:2).
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an arithmetic line in a fence does not lower the fence's match threshold"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback. The block:
+\`\`\`ts
+${REAL_NEAR}
+1024 * 1024 * 1024 * 10
+\`\`\`
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an arithmetic line claimed as a diff removal is still checked"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The change:
+```diff
+-1024 * 1024 * 1024 * 10
+```
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
