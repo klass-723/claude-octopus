@@ -1761,6 +1761,10 @@ ${heuristic_ctx}"
             # Filter out CLI header noise and extract actual response
             # v9.3.1: Check for CLI header separator before filtering — codex exec
             # sends clean response on stdout (no header), banner on stderr.
+            # The sidecar below needs to know whether the filtered answer, not
+            # raw stdout, has text: a banner-only stdout leaves it empty.
+            local _answer_start _answer_has_text=false
+            _answer_start="$(wc -c < "$result_file" | tr -d '[:space:]')"
             if [[ $(grep -c '^--------$' "$temp_output" 2>/dev/null || true) -gt 0 ]]; then
                 # CLI-wrapped output: strip banner and extract response
                 awk '
@@ -1785,6 +1789,9 @@ ${heuristic_ctx}"
                     -e '^Loaded cached credentials' \
                     -e '^Run /mcp' \
                     "$temp_output" >> "$result_file" 2>/dev/null || cat "$temp_output" >> "$result_file"
+            fi
+            if tail -c "+$(( ${_answer_start:-0} + 1 ))" "$result_file" | grep -q '[[:alnum:]]'; then
+                _answer_has_text=true
             fi
             # An exit-0 run with an empty/whitespace-only body is a failure,
             # not a silent success: callers read the body as the answer.
@@ -1843,14 +1850,15 @@ ${heuristic_ctx}"
 
             # Append stderr if it contains useful content (not just warnings).
             # Codex echoes every file it reads on stderr; a large transcript
-            # beside a real stdout answer goes to <result>.stderr.log with only
-            # its tail inline, so the result holds the review (sail-cruisey
-            # #3245: 294 KB of echoed files around a 2 KB review). A stdout-less
-            # run keeps it inline: its answer was recovered from stderr.
+            # beside a real answer goes to <result>.stderr.log with only its
+            # tail inline (at most 40 lines and 4 KB), so the result holds the
+            # review (sail-cruisey #3245: 294 KB of echoed files around a 2 KB
+            # review). A run whose filtered answer is empty keeps it inline:
+            # its answer may be on stderr.
             if [[ -s "$temp_errors" ]] && ! grep -q "^mcp startup:" "$temp_errors"; then
                 local _stderr_bytes _stderr_sidecar=""
                 _stderr_bytes="$(wc -c < "$temp_errors" | tr -d '[:space:]')"
-                if [[ "${_stderr_bytes:-0}" -gt 16384 ]] && grep -q '[[:alnum:]]' "$temp_output" 2>/dev/null; then
+                if [[ "${_stderr_bytes:-0}" -gt 16384 && "$_answer_has_text" == true ]]; then
                     _stderr_sidecar="${result_file%.md}.stderr.log"
                     if ! ( umask 077 && cp "$temp_errors" "$_stderr_sidecar" ); then
                         _stderr_sidecar=""
@@ -1863,7 +1871,8 @@ ${heuristic_ctx}"
                 fi
                 echo '```' >> "$result_file"
                 if [[ -n "$_stderr_sidecar" ]]; then
-                    tail -n 40 "$temp_errors" >> "$result_file"
+                    tail -n 40 "$temp_errors" | tail -c 4096 >> "$result_file"
+                    echo "" >> "$result_file"
                 else
                     cat "$temp_errors" >> "$result_file"
                 fi
@@ -1872,7 +1881,7 @@ ${heuristic_ctx}"
                     echo "<!-- END-UNTRUSTED:provider=${agent_type}:stream=stderr:nonce=${_untrusted_nonce} -->" >> "$result_file"
                 fi
                 if [[ -n "$_stderr_sidecar" ]]; then
-                    echo "(Last 40 lines shown. Full stderr transcript, ${_stderr_bytes} bytes: ${_stderr_sidecar})" >> "$result_file"
+                    echo "(Last 40 lines, at most 4 KB, shown. Full stderr transcript, ${_stderr_bytes} bytes: ${_stderr_sidecar})" >> "$result_file"
                 fi
             fi
 

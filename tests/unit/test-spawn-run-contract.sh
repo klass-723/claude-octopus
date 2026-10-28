@@ -234,6 +234,8 @@ printf '%s\n' '#!/usr/bin/env bash' \
     '  codex-tokens-only) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "exec" "ls" "tokens used" "1,234" >&2 ;;' \
     '  codex-stderr-answer) printf "%s\n" "OpenAI Codex" "--------" "user" "$prompt_text" "codex" "Substantive answer emitted on stderr." "tokens used" "1,234" >&2 ;;' \
     '  codex-big-stderr) printf "%s\n" "Final review text from the last message."; { printf "%s\n" "OpenAI Codex" "user" "$prompt_text"; for n in $(seq 1 600); do printf "exec cat src/file-%s.ts\nconst echoedLine%s = readRepoFile(%s);\n" "$n" "$n" "$n"; done; printf "%s\n" "codex" "Final review text from the last message." "tokens used" "9,999"; } >&2 ;;' \
+    '  banner-big-stderr) printf "%s\n" "Provider banner v1" "--------" "workdir: /tmp/banner"; for n in $(seq 1 1000); do printf "exec cat src/file-%s.ts\n" "$n"; done >&2; printf "%s\n" "Answer carried on stderr." >&2 ;;' \
+    '  long-line-stderr) printf "%s\n" "Final review text from the last message."; { for n in $(seq 1 300); do printf "exec cat src/file-%s.ts\n" "$n"; done; head -c 60000 /dev/zero | tr "\\0" "x"; printf "\n"; } >&2 ;;' \
     'esac' > "$fake_provider"
 chmod +x "$fake_provider"
 
@@ -1107,12 +1109,35 @@ if [[ -s "$big_done" && "${big_size:-0}" -lt 20000 ]] &&
    grep -Fq 'Final review text from the last message.' "$big_result" &&
    grep -Fq "Full stderr transcript" "$big_result" && grep -Fq "$big_sidecar" "$big_result" &&
    [[ "$(grep -c '^exec cat src/file-' "$big_sidecar" 2>/dev/null)" -eq 600 ]] &&
-   [[ "$(stat -f '%Lp' "$big_sidecar" 2>/dev/null || stat -c '%a' "$big_sidecar")" == 600 ]] &&
+   [[ "$(stat -c '%a' "$big_sidecar" 2>/dev/null || stat -f '%Lp' "$big_sidecar")" == 600 ]] &&
    [[ "$(grep -c '^exec cat src/file-' "$big_result")" -lt 40 ]] &&
    tail -n 5 "$big_result" | grep -Fq 'OCTOPUS-RESULT-END'; then
     test_pass
 else
     test_fail "result size=${big_size:-missing} sidecar=$(wc -c < "$big_sidecar" 2>/dev/null || echo missing)"
+fi
+
+test_case "a large stderr stays inline when the filtered answer is empty"
+run_external_fixture banner-big-stderr banner-big-stderr fake-api reviewer review
+banner_result="$RESULTS_DIR/fake-api-banner-big-stderr.md"
+if grep -Fq 'Answer carried on stderr.' "$banner_result" &&
+   [[ "$(grep -c '^exec cat src/file-' "$banner_result")" -eq 1000 ]] &&
+   ! grep -Fq 'Full stderr transcript' "$banner_result" &&
+   [[ ! -e "${banner_result%.md}.stderr.log" ]]; then
+    test_pass
+else
+    test_fail "stderr moved out although the Output block was empty: $(grep -c '^exec cat src/file-' "$banner_result") inline lines"
+fi
+
+test_case "the inline stderr tail is bounded by bytes as well as lines"
+run_external_fixture long-line-stderr long-line-stderr fake-api reviewer review
+long_result="$RESULTS_DIR/fake-api-long-line-stderr.md"
+long_size="$(wc -c < "$long_result" 2>/dev/null | tr -d ' ')"
+if [[ "${long_size:-0}" -lt 12000 ]] && grep -Fq 'Full stderr transcript' "$long_result" &&
+   [[ "$(wc -c < "${long_result%.md}.stderr.log" | tr -d ' ')" -gt 60000 ]]; then
+    test_pass
+else
+    test_fail "result size=${long_size:-missing}"
 fi
 
 test_case "empty-body helper exempts Tangle implementers and accepts real bodies"
