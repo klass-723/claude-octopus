@@ -70,6 +70,18 @@ expected=" $(_preflight_provider_candidates | tr '\n' ' ')"
 if [[ "$rc" -eq 0 && "$calls" == "$expected" && "$calls" != *" claude "* && "$out" != *"council roster"* ]]; then test_pass
 else test_fail "rc=$rc calls='$calls' expected='$expected'"; fi
 
+for blocked_status in missing degraded; do
+    test_case "without a roster, $blocked_status providers still fail preflight"
+    out="$(
+        octo_provider_readiness_result() {
+            printf '{"provider":"%s","status":"%s","reason_code":"test-unready","remediation":"Configure provider."}\n' "$1" "$blocked_status"
+        }
+        run_preflight
+    )" && rc=0 || rc=$?
+    if [[ "$rc" -ne 0 && "$(preflight_cache_read)" == 1 ]]; then test_pass
+    else test_fail "rc=$rc out=$out"; fi
+done
+
 test_case "a cached pass is reused only for the same roster"
 STUB_UNREADY=""
 rm -f "$PREFLIGHT_CACHE_FILE"
@@ -99,6 +111,14 @@ test_case "an undetectable seat does not hide an unready one"
 STUB_UNREADY="claude"
 out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=claude,openai-tools run_preflight)" && rc=0 || rc=$?
 if [[ "$rc" -ne 0 && "$out" == *"seat(s) not ready: claude"* && "$out" != *"not ready: claude openai-tools"* ]]; then test_pass
+else test_fail "rc=$rc out=$out"; fi
+
+test_case "a roster with only undetectable seats passes without claiming they were checked"
+STUB_UNREADY=""
+out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=openai-tools run_preflight)" && rc=0 || rc=$?
+if [[ "$rc" -eq 0 && ! -e "$READY_CALLS" && "$out" == *"openai-tools: not checked"* &&
+      "$out" != *"NO AI PROVIDERS FOUND"* && "$out" != *"PROVIDERS FOUND BUT NOT READY"* ]] &&
+   [[ "$(preflight_cache_read)" == 0 ]]; then test_pass
 else test_fail "rc=$rc out=$out"; fi
 
 # Static readiness accepts codex from ~/.codex/auth.json alone; the OAuth

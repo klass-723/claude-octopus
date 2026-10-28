@@ -758,8 +758,9 @@ preflight_check() {
         fi
     fi
 
-    # v7.9.1: Only need ONE provider to work
-    if [[ "$providers_found" -eq 0 ]]; then
+    # Without a pinned roster, at least one detectable provider must work.
+    # Pinned rosters were checked above; unchecked seats stay unchecked.
+    if [[ -z "$roster" && "$providers_found" -eq 0 ]]; then
         echo ""
         echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${RED}║  ❌ NO AI PROVIDERS FOUND                                     ║${NC}"
@@ -785,7 +786,7 @@ preflight_check() {
     fi
 
     # Check if at least one provider is authenticated
-    if [[ "$ready_provider_count" -eq 0 ]]; then
+    if [[ -z "$roster" && "$ready_provider_count" -eq 0 ]]; then
         echo ""
         echo -e "${YELLOW}╔═══════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${YELLOW}║  ⚠️  PROVIDERS FOUND BUT NOT READY                            ║${NC}"
