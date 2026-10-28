@@ -63,6 +63,42 @@ octo_quota_mark_dead() {
     return 0
 }
 
+# Providers that failed a check in this process for a reason that says nothing
+# about the next run: an unknown error, a timeout, a sandbox denial. They stay
+# excluded for the rest of this run (#840) but are never written to the cache,
+# so a later preflight checks them again (sail-cruisey #2905).
+_OCTO_QUOTA_RUN_DEAD="${_OCTO_QUOTA_RUN_DEAD:- }"
+
+octo_quota_mark_failed_this_run() {
+    local provider="$1"
+    [[ -n "$provider" ]] || return 0
+    [[ "$_OCTO_QUOTA_RUN_DEAD" == *" ${provider} "* ]] || _OCTO_QUOTA_RUN_DEAD+="${provider} "
+    return 0
+}
+
+# A check that ran inside a Codex or Claude Code sandbox can fail for reasons the
+# sandbox imposes (keychain, network, files outside the workspace), so its
+# failures are not cached as the provider's own.
+octo_quota_in_sandbox() {
+    [[ -n "${CODEX_SANDBOX:-}" || -n "${SANDBOX_RUNTIME:-}" ]]
+}
+
+# octo_quota_dead_marked_at <provider> — epoch seconds when the provider was
+# cached as dead: its own metadata line, else the marker file's mtime.
+octo_quota_dead_marked_at() {
+    local provider="$1" meta line marked
+    meta="$(octo_quota_dead_meta_file)"
+    if [[ -f "$meta" ]]; then
+        line="$(grep "^${provider}	" "$meta" 2>/dev/null | tail -1)" || line=""
+        marked="$(printf '%s\n' "$line" | cut -f2)"
+        if [[ "$marked" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$marked"
+            return 0
+        fi
+    fi
+    _octo_quota_file_mtime "$(octo_quota_dead_file)"
+}
+
 # octo_quota_clear_dead <provider>
 # A successful health probe is stronger evidence than a cached failure. Remove
 # both the compatibility marker and any per-provider expiry metadata so a
@@ -70,6 +106,7 @@ octo_quota_mark_dead() {
 octo_quota_clear_dead() {
     local provider="$1"
     [[ -n "$provider" ]] || return 0
+    _OCTO_QUOTA_RUN_DEAD="${_OCTO_QUOTA_RUN_DEAD// ${provider} / }"
 
     local f meta tmp
     f="$(octo_quota_dead_file)"
@@ -136,6 +173,7 @@ _octo_quota_file_mtime() {
 octo_quota_is_dead() {
     local provider="$1"
     [[ -n "$provider" ]] || return 1
+    [[ "${_OCTO_QUOTA_RUN_DEAD:- }" == *" ${provider} "* ]] && return 0
     local f
     f="$(octo_quota_dead_file)"
     [[ -f "$f" ]] || return 1

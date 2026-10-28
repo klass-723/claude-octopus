@@ -448,6 +448,17 @@ _octo_provider_static_readiness() {
         status="degraded"
         reason_code="quota"
         remediation="Wait for the provider quota window to reset or choose another provider."
+        # The mark is cached from an earlier quota or auth failure; say so, so a
+        # lead does not report it as a live quota error.
+        local _quota_marked_at _quota_marked_time=""
+        if declare -f octo_quota_dead_marked_at >/dev/null 2>&1; then
+            _quota_marked_at="$(octo_quota_dead_marked_at "$provider" 2>/dev/null)" || _quota_marked_at=""
+            if [[ "$_quota_marked_at" =~ ^[0-9]+$ ]]; then
+                _quota_marked_time="$(date -r "$_quota_marked_at" +%H:%M 2>/dev/null ||
+                    date -d "@$_quota_marked_at" +%H:%M 2>/dev/null)" || _quota_marked_time=""
+            fi
+            remediation="Quota or auth failure (cached${_quota_marked_time:+ ${_quota_marked_time}}, not re-checked). A passing smoke test clears it; otherwise wait for the provider quota window to reset or choose another provider."
+        fi
     fi
 
     printf '%s|%s|%s\n' "$status" "$reason_code" "$remediation"
