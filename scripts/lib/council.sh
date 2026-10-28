@@ -3510,18 +3510,31 @@ def record_unverified(text, reason):
         result["unverified_samples"].append(norm(text)[:120])
         result["unverified_reasons"].append(reason)
 
+def unit_variants(start, end, kind, block, removed_block, keep_computed):
+    wholes = unit_wholes(block, keep_computed) if len(block) > 1 else []
+    # Only an inline code span can sit in a table cell or be a string literal.
+    line_variants = specific_lines(block, kind == "inline" and in_table(start, end), kind == "inline", keep_computed)
+    removed_variants = [v for v in [" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block]
+                        if v and checkable(v, keep_computed)]
+    if not wholes and not line_variants and not removed_variants:
+        return None
+    return wholes, line_variants, removed_variants
+
 for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
+    # Filter before resolving attribution, which is the costly step: most
+    # units are short spans that no rule checks.
+    variants = unit_variants(start, end, kind, block, removed_block, True)
+    if variants is None:
+        continue
     associated, gap = association(start)
     attributed = attribution(associated, gap)
-    # Arithmetic the seat says a cited file contains is a claim to verify.
-    keep = attributed is not None
-    wholes = unit_wholes(block, keep) if len(block) > 1 else []
-    # Only an inline code span can sit in a table cell or be a string literal.
-    line_variants = specific_lines(block, kind == "inline" and in_table(start, end), kind == "inline", keep)
-    removed_variants = [v for v in [" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block]
-                        if v and checkable(v, keep)]
-    if not wholes and not line_variants and not removed_variants:
-        continue
+    # Arithmetic the seat says a cited file contains is a claim to verify;
+    # the seat's own arithmetic is not.
+    if attributed is None:
+        variants = unit_variants(start, end, kind, block, removed_block, False)
+        if variants is None:
+            continue
+    wholes, line_variants, removed_variants = variants
     flat_variants = wholes + [v for variants in line_variants for v in variants]
     if associated is not None and associated[2] is None:
         # Written about a citation that names a file outside the evidence root
