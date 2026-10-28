@@ -3178,7 +3178,8 @@ units.sort(key=lambda unit: unit[0])
 # not a quote of the payload (sail-cruisey #3246): only numbers, a known unit
 # right after a number, and operators, with at least one digit and one
 # operator. Any identifier ("base + taxes * 2") or keyword ("0 if n else 1")
-# keeps it a code quote. A quote attributed to a citation is still verified.
+# keeps it a code quote. Only a whole inline span is exempt, and only when no
+# citation claims it: fence lines and diff removals assert source content.
 COMPUTED_UNIT = (r"%|(?:[kmgtp]i?)?b|bytes?|bits?|(?:kilo|mega|giga|tera)(?:bytes?|bits?)"
                  r"|[kmgt]|ns|us|µs|ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|days?|weeks?"
                  r"|x|tokens?|chars?|characters?|words?|lines?|files?|calls?|requests?|rows?|items?")
@@ -3189,13 +3190,11 @@ def computed(text):
         return False
     return re.sub(r"[\s\-+*/×÷=≈~<>%()\[\],.]+", "", COMPUTED_NUMBER.sub("", text)) == ""
 
-def checkable(text, keep_computed=False):
-    # A quoted citation, a bare path or a computed value is not a code quote.
+def checkable(text):
+    # A quoted citation or a bare path is not a code quote.
     if CITATION.search(text):
         return False
     if " " not in norm(text) and "/" in text:
-        return False
-    if not keep_computed and computed(text):
         return False
     return specific(text)
 
@@ -3280,25 +3279,25 @@ def unwrapped(variants, literal):
         return variants
     return variants + [v[1:-1].replace('\\"', '"').strip() for v in variants if STRING_LITERAL.match(v)]
 
-def specific_lines(block, table=False, literal=False, keep_computed=False):
+def specific_lines(block, table=False, literal=False):
     out = []
     for line in block:
         variants = [line.strip()]
         stripped = GUTTER.sub("", line).strip()
         if stripped != variants[0]:
             variants.append(stripped)
-        variants = [v for v in unwrapped(unescaped(variants, table), literal) if checkable(v, keep_computed)]
+        variants = [v for v in unwrapped(unescaped(variants, table), literal) if checkable(v)]
         if variants:
             out.append(variants)
     return out
 
-def unit_wholes(block, keep_computed=False):
+def unit_wholes(block):
     whole = " ".join(l.strip() for l in block)
     out = [whole] if whole else []
     unguttered = " ".join(GUTTER.sub("", l).strip() for l in block)
     if unguttered and unguttered != whole:
         out.append(unguttered)
-    return [v for v in out if checkable(v, keep_computed)]
+    return [v for v in out if checkable(v)]
 
 file_cache = {}
 def load(path):
@@ -3510,31 +3509,28 @@ def record_unverified(text, reason):
         result["unverified_samples"].append(norm(text)[:120])
         result["unverified_reasons"].append(reason)
 
-def unit_variants(start, end, kind, block, removed_block, keep_computed):
-    wholes = unit_wholes(block, keep_computed) if len(block) > 1 else []
-    # Only an inline code span can sit in a table cell or be a string literal.
-    line_variants = specific_lines(block, kind == "inline" and in_table(start, end), kind == "inline", keep_computed)
-    removed_variants = [v for v in [" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block]
-                        if v and checkable(v, keep_computed)]
-    if not wholes and not line_variants and not removed_variants:
-        return None
-    return wholes, line_variants, removed_variants
+def cited_after(end):
+    # "`1024 * 10` (src/pricing.ts:2)": a citation right after the span.
+    following = [t for t in tokens if t[0] >= end]
+    if not following:
+        return False
+    token = min(following, key=lambda t: t[0])
+    return re.fullmatch(r"[ \t]*(?:[(\[]|[:,\u2013\u2014-]|in|at|from)?[ \t]*", resp[end:token[0]], re.I) is not None
 
 for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
-    # Filter before resolving attribution, which is the costly step: most
-    # units are short spans that no rule checks.
-    variants = unit_variants(start, end, kind, block, removed_block, True)
-    if variants is None:
+    wholes = unit_wholes(block) if len(block) > 1 else []
+    # Only an inline code span can sit in a table cell or be a string literal.
+    line_variants = specific_lines(block, kind == "inline" and in_table(start, end), kind == "inline")
+    removed_variants = [v for v in [" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block]
+                        if v and checkable(v)]
+    if not wholes and not line_variants and not removed_variants:
         continue
     associated, gap = association(start)
     attributed = attribution(associated, gap)
-    # Arithmetic the seat says a cited file contains is a claim to verify;
-    # the seat's own arithmetic is not.
-    if attributed is None:
-        variants = unit_variants(start, end, kind, block, removed_block, False)
-        if variants is None:
-            continue
-    wholes, line_variants, removed_variants = variants
+    # A seat's own arithmetic in an inline span is a value it computed, unless a
+    # citation claims it: then it is a claim about the cited file to verify.
+    if kind == "inline" and attributed is None and computed(block[0]) and not cited_after(end):
+        continue
     flat_variants = wholes + [v for variants in line_variants for v in variants]
     if associated is not None and associated[2] is None:
         # Written about a citation that names a file outside the evidence root

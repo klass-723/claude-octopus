@@ -669,6 +669,28 @@ else
     test_fail "blind=$blind report: $r"
 fi
 
+test_case "#3246: arithmetic followed by its citation is still verified"
+r="$(_report "$(_resp 'The cap is `1024 * 1024 * 1024 * 10` (src/pricing.ts:2).
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an arithmetic line in a fence does not lower the fence's match threshold"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback. The block:
+\`\`\`ts
+${REAL_NEAR}
+1024 * 1024 * 1024 * 10
+\`\`\`
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an arithmetic line claimed as a diff removal is still checked"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The change:
+```diff
+-1024 * 1024 * 1024 * 10
+```
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3032: without the context file the ambiguous bare plan name stays unresolved, never fabricated"
 r="$(_hreport "$plancite")"
 if jq -e '.citations == 1 and .citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
