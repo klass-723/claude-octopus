@@ -824,6 +824,15 @@ preflight_check() {
     # Warn early if token is expired/expiring — saves a failed smoke test round-trip
     if [[ "$codex_auth" == "true" ]]; then
         if ! check_codex_auth_freshness; then
+            # A pinned codex seat needs a live token; another ready seat is no
+            # substitute. Without a roster, degrade gracefully as before.
+            if [[ -n "$roster" ]]; then
+                echo ""
+                echo -e "${YELLOW}Council roster seat(s) not ready: codex (OAuth token expired; run: codex login)${NC}"
+                octo_preflight_sandbox_note
+                preflight_cache_write "1"
+                return 1
+            fi
             # Token expired but another authenticated provider may still work — degrade gracefully
             if [[ "$ready_provider_count" -gt 1 ]]; then
                 log WARN "Codex OAuth expired; continuing with other ready providers: $other_ready_providers"

@@ -101,6 +101,17 @@ out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=claude,openai-tools run_preflight)" && 
 if [[ "$rc" -ne 0 && "$out" == *"seat(s) not ready: claude"* && "$out" != *"not ready: claude openai-tools"* ]]; then test_pass
 else test_fail "rc=$rc out=$out"; fi
 
+# Static readiness accepts codex from ~/.codex/auth.json alone; the OAuth
+# freshness check is what catches an expired token. A pinned seat must not be
+# waved through because another seat is ready.
+test_case "an expired Codex token fails a roster that pins codex"
+STUB_UNREADY=""
+check_codex_auth_freshness() { return 1; }
+out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=codex,agy run_preflight)" && rc=0 || rc=$?
+check_codex_auth_freshness() { return 0; }
+if [[ "$rc" -ne 0 && "$out" == *"seat(s) not ready: codex"* && "$out" == *"codex login"* ]]; then test_pass
+else test_fail "rc=$rc out=$out"; fi
+
 test_case "the readiness loop does not redirect through /dev/fd (denied in macOS sandboxes)"
 if ! grep -nE '^[^#]*[0-9]?> >\(' "$PROJECT_ROOT/scripts/lib/preflight.sh" >/dev/null; then test_pass
 else test_fail "process-substitution redirect found"; fi
@@ -117,8 +128,9 @@ else test_fail "json=$(jq -c '{roster,p:[.results[].provider]}' <<< "$json")"; f
 test_case "the dashboard lists an undetectable roster seat as not checked, not as unready"
 txt="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=openai-tools bash "$PROJECT_ROOT/scripts/helpers/preflight.sh" 2>/dev/null)"
 json="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=openai-tools bash "$PROJECT_ROOT/scripts/helpers/preflight.sh" --json 2>/dev/null)"
-if [[ "$txt" == *"Council roster ready"* && "$txt" == *"Not checked by preflight"*"openai-tools"* && "$txt" != *"not ready: openai-tools"* ]] &&
-   jq -e '.roster_unchecked == ["openai-tools"]' <<< "$json" >/dev/null; then test_pass
+if [[ "$txt" == *"Council roster ready"* && "$txt" == *"Not checked by preflight"*"openai-tools"* && "$txt" != *"not ready: openai-tools"* &&
+      "$txt" != *"Needs attention: 1"* ]] &&
+   jq -e '.roster_unchecked == ["openai-tools"] and .providers_degraded == 0 and (.results | length) == 0' <<< "$json" >/dev/null; then test_pass
 else test_fail "txt=$txt json=$(jq -c '{roster,roster_unchecked}' <<< "$json")"; fi
 
 test_case "the smoke test skips providers outside the roster"

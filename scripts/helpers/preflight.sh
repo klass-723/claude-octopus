@@ -54,7 +54,16 @@ if [[ -n "$roster" ]] && declare -F octo_preflight_seat_checkable >/dev/null 2>&
 fi
 roster_unchecked_json="$(printf '%s\n' $roster_unchecked | jq -R 'select(length > 0)' | jq -cs .)"
 
-results_json="$({ octo_provider_readiness_all "$CHECK_KIND" "${roster//$'\n'/ }"; } | jq -s '.')"
+# Unchecked seats are listed separately, never counted as ready or degraded.
+roster_checked=""
+for seat in $roster; do
+    [[ " $roster_unchecked " == *" $seat "* ]] || roster_checked="${roster_checked}${roster_checked:+ }${seat}"
+done
+if [[ -n "$roster" && -z "$roster_checked" ]]; then
+    results_json='[]'
+else
+    results_json="$({ octo_provider_readiness_all "$CHECK_KIND" "$roster_checked"; } | jq -s '.')"
+fi
 providers_ready="$(jq '[.[] | select(.status == "available")] | length' <<<"$results_json")"
 providers_degraded="$(jq '[.[] | select(.status != "available")] | length' <<<"$results_json")"
 
