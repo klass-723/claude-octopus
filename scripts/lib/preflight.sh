@@ -35,6 +35,8 @@ octo_preflight_roster() {
         seen="${seen}${provider} "
         printf '%s\n' "$provider"
     done
+    # A separator-only policy can validate without yielding a council seat.
+    [[ "$seen" != " " ]] || return 2
 }
 
 # True when no roster is pinned, or the provider is on it.
@@ -887,8 +889,7 @@ preflight_check() {
     fi
 
     if [[ -n "$roster_unchecked" ]]; then
-        log INFO "Pre-flight checks completed with unchecked council seats: $roster_unchecked"
-        echo -e "${YELLOW}Preflight completed with unchecked council seats: ${roster_unchecked}${NC}"
+        log INFO "Preflight completed with unchecked council seats: $roster_unchecked"
     else
         log INFO "Pre-flight checks passed 🐙"
         echo -e "${GREEN}✓${NC} All 8 tentacles accounted for and ready to work!"
