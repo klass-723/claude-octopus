@@ -3147,7 +3147,7 @@ units.sort(key=lambda unit: unit[0])
 COMPUTED_UNIT = (r"%|(?:[kmgtp]i?)?b|bytes?|bits?|(?:kilo|mega|giga|tera)(?:bytes?|bits?)"
                  r"|[kmgt]|ns|us|µs|ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|days?|weeks?"
                  r"|x|tokens?|chars?|characters?|words?|lines?|files?|calls?|requests?|rows?|items?")
-COMPUTED_NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:e[+-]?\d+)?(?:\s*(?:" + COMPUTED_UNIT + r")(?![A-Za-z0-9_]))?", re.I)
+COMPUTED_NUMBER = re.compile(r"\d+(?:_\d+)*(?:[.,]\d+(?:_\d+)*)*(?:e[+-]?\d+)?(?:\s*(?:" + COMPUTED_UNIT + r")(?![A-Za-z0-9_]))?", re.I)
 def computed(text):
     text = norm(text)
     if not re.search(r"\d", text) or not re.search(r"[-+*/×÷=≈<>%]", text):
@@ -3395,7 +3395,7 @@ GAP_WORDS = {"reads", "read", "shows", "show", "contains", "contain", "has", "sa
              "defines", "define", "defined", "declares", "declare", "declared",
              "line", "lines", "source", "code", "verbatim", "quote", "quoted", "excerpt",
              "current", "currently", "actual", "l"}
-SOURCE_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|is|defines?|defined|declares?|declared)\b", re.I)
+SOURCE_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|is|defines?|defined|declares?|declared|computes?)\b", re.I)
 SOURCE_ABSENCE = re.compile(
     r"\b(?:(?:does|do|did)\s+not|(?:doesn|don|didn)['’]t)\s+"
     r"(?:currently\s+)?(?:contain|show|read|say|define|declare|have)\b", re.I)
