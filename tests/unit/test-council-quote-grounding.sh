@@ -611,6 +611,33 @@ $indented_block
 VERDICT: REVISE")")"
 if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3244: quotes after an indented findings block with an unindented closer are still checked"
+mixed_block='    ```octopus-policy-findings
+    {"findings": [{"source": "RULES.md", "line_start": 3, "quote": "run the audit"}]}
+```'
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+$mixed_block
+
+src/pricing.ts:2 reads \`$invented\`.
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a fence after an indented findings block with an unindented closer is still checked"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+$mixed_block
+
+src/pricing.ts:2 reads:
+
+\`\`\`ts
+$invented
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3244: a findings fence closed by a wider marker stays a quote unit"
 r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
 
