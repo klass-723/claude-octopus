@@ -3018,20 +3018,6 @@ DIFF_HUNK = re.compile(r"^@@ -[0-9]{1,10}(?:,([0-9]{1,10}))? \+[0-9]{1,10}(?:,([
 units = []
 fence_ranges = []
 fences = []
-opener = None
-# A closing fence uses the same marker and at least the opening width. Scan
-# marker lines once so mismatched or unterminated fences cannot hide quotes.
-# Treat malformed info strings as openers too, matching the verdict parser.
-for match in re.finditer(r"^ {0,3}(`{3,}|~{3,})([^\n]*)(?:\n|$)", resp, re.M):
-    marker, info = match.groups()
-    if opener is None:
-        opener = match
-    elif (marker[0] == opener.group(1)[0] and len(marker) >= len(opener.group(1))
-          and not info.strip()):
-        fences.append((opener.start(), match.end(), opener.group(2), resp[opener.end():match.start()]))
-        opener = None
-if opener is not None:
-    fences.append((opener.start(), len(resp), opener.group(2), resp[opener.end():]))
 def policy_findings_blocks():
     # The feature workflow's structured findings block is JSON, not a code
     # quote; feature-analysis.py checks each finding by digest (sail-cruisey
@@ -3086,11 +3072,27 @@ def in_policy_block(start):
     i = bisect_right(policy_starts, start) - 1
     return i >= 0 and policy_ranges[i][1] > start
 
+opener = None
+# A closing fence uses the same marker and at least the opening width. Scan
+# marker lines once so mismatched or unterminated fences cannot hide quotes.
+# Treat malformed info strings as openers too, matching the verdict parser.
+for match in re.finditer(r"^ {0,3}(`{3,}|~{3,})([^\n]*)(?:\n|$)", resp, re.M):
+    marker, info = match.groups()
+    if opener is None:
+        # Findings-block markers belong to that block, whose range is added
+        # below; an indented opener with an unindented closer must not leave
+        # the closer open as a fence that runs to the end of the response.
+        if in_policy_block(match.start()):
+            continue
+        opener = match
+    elif (marker[0] == opener.group(1)[0] and len(marker) >= len(opener.group(1))
+          and not info.strip()):
+        fences.append((opener.start(), match.end(), opener.group(2), resp[opener.end():match.start()]))
+        opener = None
+if opener is not None:
+    fences.append((opener.start(), len(resp), opener.group(2), resp[opener.end():]))
 for start, end, info, body in fences:
     fence_ranges.append((start, end))
-    # A findings block is skipped as a unit; its range still hides code spans.
-    if in_policy_block(start):
-        continue
     info = info.strip().lower()
     lines = body.split("\n")
     diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
@@ -3128,8 +3130,8 @@ for start, end, info, body in fences:
             kept.append(line)
     units.append((start, end, "fence", kept, removed_kept, info))
 
-# Indented findings blocks are not CommonMark fences, so add their ranges and
-# merge any overlap. Fence ranges are then sorted and disjoint: only the last
+# The fence scan skips findings blocks, so add their ranges (which also hide
+# code spans inside them) and merge any overlap. Fence ranges are then sorted and disjoint: only the last
 # fence starting before the span ends can overlap it. A bisect keeps a
 # response with many fences and spans linear-log instead of quadratic.
 merged = []
