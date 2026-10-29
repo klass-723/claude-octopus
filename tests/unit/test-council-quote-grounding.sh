@@ -524,6 +524,21 @@ r="$(_report "$(_resp 'src/pricing.ts:2 computes `const total = 1.5e6 + base * 2
 VERDICT: APPROVE')")"
 if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3246: arithmetic with digit-group underscores is a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `1_000_000 * 3 = 3_000_000 rows` adds up.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an underscore identifier beside a grouped number is still a code quote"
+r="$(_report "$(_resp 'src/pricing.ts:2 computes `const cap = max_rows * 1_000;` before returning.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic a citation computes is still checked"
+r="$(_report "$(_resp 'src/pricing.ts:2 computes `1024 * 1024 * 1024 * 10 x` for the cap.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3246: arithmetic with variables is still a code quote"
 var_resp="$(_resp 'src/pricing.ts:2 computes `const total = base + taxes * 2;` before returning.
 VERDICT: APPROVE')"

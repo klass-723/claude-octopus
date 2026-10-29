@@ -3227,7 +3227,7 @@ units.sort(key=lambda unit: unit[0])
 COMPUTED_UNIT = (r"%|(?:[kmgtp]i?)?b|bytes?|bits?|(?:kilo|mega|giga|tera)(?:bytes?|bits?)"
                  r"|[kmgt]|ns|us|µs|ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|days?|weeks?"
                  r"|x|tokens?|chars?|characters?|words?|lines?|files?|calls?|requests?|rows?|items?")
-COMPUTED_NUMBER = re.compile(r"\d+(?:[.,]\d+)*(?:e[+-]?\d+)?(?:\s*(?:" + COMPUTED_UNIT + r")(?![A-Za-z0-9_]))?", re.I)
+COMPUTED_NUMBER = re.compile(r"\d+(?:_\d+)*(?:[.,]\d+(?:_\d+)*)*(?:e[+-]?\d+)?(?:\s*(?:" + COMPUTED_UNIT + r")(?![A-Za-z0-9_]))?", re.I)
 def computed(text):
     text = norm(text)
     if not re.search(r"\d", text) or not re.search(r"[-+*/×÷=≈<>%]", text):
@@ -3511,6 +3511,7 @@ SHELL_FENCES = {"sh", "bash", "shell", "console", "zsh", "terminal", "shell-sess
 # when other quotes verify. A proposal on the citation's line ("change x.ts:12
 # to:") is not a claim about current content.
 GAP_WORDS = {"reads", "read", "shows", "show", "contains", "contain", "has", "says", "is", "at",
+             "computes", "compute",
              "line", "lines", "source", "code", "verbatim", "quote", "quoted", "excerpt",
              "current", "currently", "actual", "l"}
 PROPOSAL = re.compile(r"\b(should|propos\w*|suggest\w*|recommend\w*|replace with|instead|would|could|change (?:it |this )?to|rewrit\w*|becomes?|example|e\.g\.|such as|consider|cover|prefer\w*|expected|want)\b", re.I)
