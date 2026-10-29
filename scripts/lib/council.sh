@@ -3090,29 +3090,64 @@ if not citations:
 GUTTER = re.compile(r"^\s*\d+\s*[:|]\s?")
 units = []
 fence_ranges = []
-def policy_findings_block(info, body):
+def policy_findings_blocks():
     # The feature workflow's structured findings block is JSON, not a code
     # quote; feature-analysis.py checks each finding by digest (sail-cruisey
-    # #3244 CP1). Only the form it reads is exempt: a fence labelled exactly
-    # octopus-policy-findings whose body is a findings list, or an object
-    # holding only one. Anything else stays a quote unit, so the label cannot
-    # hide an invented quote.
-    if info.strip() != "octopus-policy-findings":
-        return False
-    try:
-        value = json.loads(body)
-    except (ValueError, RecursionError):
-        return False
-    if isinstance(value, dict):
-        if set(value) != {"findings"}:
-            return False
-        value = value["findings"]
-    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+    # #3244 CP1). Mirror its fences() reader so only blocks it reads are
+    # exempt: a line of only a marker and the label (any indentation), closed
+    # by the same marker, skipping other fences, with a body that parses as a
+    # findings list or an object whose "findings" is one. Anything else stays
+    # a quote unit, so the label cannot hide an invented quote.
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError("duplicate JSON key")
+            value[key] = item
+        return value
+    def nonfinite(_):
+        raise ValueError("nonfinite JSON number")
+    lines, offsets, offset = resp.split("\n"), [], 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line) + 1
+    blocks, index = [], 0
+    while index < len(lines):
+        match = re.fullmatch(r"\s*(`{3,}|~{3,})octopus-policy-findings\s*", lines[index])
+        marker = match.group(1) if match else None
+        if not match:
+            other = re.match(r"^\s*(`{3,}|~{3,})", lines[index])
+            marker = other.group(1) if other else None
+        first = index + 1
+        index += 1
+        if marker is None:
+            continue
+        while index < len(lines) and not re.fullmatch(r"\s*" + re.escape(marker) + r"\s*", lines[index]):
+            index += 1
+        if match and index < len(lines):
+            try:
+                value = json.loads("\n".join(lines[first:index]), object_pairs_hook=pairs,
+                                   parse_constant=nonfinite)
+            except (ValueError, RecursionError):
+                value = None
+            if isinstance(value, dict):
+                value = value.get("findings")
+            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+                blocks.append((offsets[first - 1], offsets[index] + len(lines[index])))
+        index += 1
+    return blocks
+
+policy_ranges = policy_findings_blocks()
+policy_starts = [p_start for p_start, _ in policy_ranges]
+
+def in_policy_block(start):
+    i = bisect_right(policy_starts, start) - 1
+    return i >= 0 and policy_ranges[i][1] > start
 
 for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
     fence_ranges.append((match.start(), match.end()))
-    # A findings block's range stays a fence so code spans inside are skipped too.
-    if policy_findings_block(match.group(1), match.group(2)):
+    # A findings block is skipped as a unit; its range still hides code spans.
+    if in_policy_block(match.start()):
         continue
     info = match.group(1).strip().lower()
     lines = match.group(2).split("\n")
@@ -3133,9 +3168,18 @@ for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
             kept.append(line)
     units.append((match.start(), match.end(), "fence", kept, removed_kept, info))
 
-# Fences come from one finditer pass, so they are sorted and disjoint: only the
-# last fence starting before the span ends can overlap it. A bisect keeps a
-# response with many fences and spans linear-log instead of quadratic.
+# Findings blocks follow feature-analysis.py, not this fence pass, so add
+# their ranges and merge any overlap. Fence ranges are then sorted and
+# disjoint: only the last fence starting before the span ends can overlap it.
+# A bisect keeps a response with many fences and spans linear-log instead of
+# quadratic.
+merged = []
+for f_start, f_end in sorted(fence_ranges + policy_ranges):
+    if merged and f_start < merged[-1][1]:
+        merged[-1] = (merged[-1][0], max(merged[-1][1], f_end))
+    else:
+        merged.append((f_start, f_end))
+fence_ranges = merged
 fence_starts = [f_start for f_start, _ in fence_ranges]
 
 def in_fence(start, end):
