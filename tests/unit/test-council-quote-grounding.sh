@@ -832,6 +832,16 @@ VERDICT: APPROVE')"
 r="$(_report "$sum_resp")"
 if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3246: arithmetic in scientific notation is a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `1.5e6 + 2.5E+6 = 4.0e6 tokens` adds up.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an identifier beside scientific notation is still a code quote"
+r="$(_report "$(_resp 'src/pricing.ts:2 computes `const total = 1.5e6 + base * 2e3;` before returning.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3246: arithmetic with variables is still a code quote"
 var_resp="$(_resp 'src/pricing.ts:2 computes `const total = base + taxes * 2;` before returning.
 VERDICT: APPROVE')"
