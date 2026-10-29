@@ -2911,7 +2911,7 @@ print(json.dumps(validated, separators=(",", ":")))
 PY
 }
 
-COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_verified_in_context":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"diff_sources":[],"fabricated":false,"unverified_samples":[],"unverified_reasons":[]}'
+COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_verified_in_context":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"quotes_partial":0,"partial_samples":[],"diff_sources":[],"fabricated":false,"unverified_samples":[],"unverified_reasons":[]}'
 
 council_response_quote_verification_json() {
     # Verify the code a seat QUOTES next to its `path:line` citations (sail-cruisey
@@ -2977,7 +2977,8 @@ result = {"citations": 0, "citations_unresolved": 0, "quotes_checked": 0, "quote
           "quotes_verified_in_diff_removed": 0, "quotes_verified_in_diff_added": 0,
           "quotes_verified_in_context": 0, "quotes_unverified": 0, "quotes_unverifiable": 0,
           "quotes_unverifiable_claimed_removed": 0, "quotes_unverifiable_unresolved_citation": 0,
-          "quotes_unverifiable_command": 0, "quotes_unverifiable_proposed": 0, "diff_sources": [],
+          "quotes_unverifiable_command": 0, "quotes_unverifiable_proposed": 0,
+          "quotes_partial": 0, "partial_samples": [], "diff_sources": [],
           "fabricated": False, "unverified_samples": [], "unverified_reasons": []}
 
 def emit():
@@ -3441,24 +3442,29 @@ def match_variant(text, entry):
             return piece_lines[0]
     return []
 
-def match_unit(wholes, line_variants, entry):
+def match_unit(wholes, line_variants, entry, misses=None):
     # A multi-line block verifies as a whole or when at least two thirds of its
     # specific lines are in the file. One generic real line (a signature, an
-    # "if (flag) {") can no longer carry an otherwise invented block.
+    # "if (flag) {") can no longer carry an otherwise invented block. When the
+    # threshold carries it, the lines it did not find are appended to misses.
     for variant in wholes:
         lines = match_variant(variant, entry)
         if lines:
             return lines
     if not line_variants:
         return []
-    found = []
+    found, missing = [], []
     for variants in line_variants:
         for variant in variants:
             lines = match_variant(variant, entry)
             if lines:
                 found.append(lines)
                 break
+        else:
+            missing.append(variants[0])
     if found and len(found) * 3 >= len(line_variants) * 2:
+        if misses is not None:
+            misses.extend(missing)
         return found[0]
     return []
 
@@ -3568,7 +3574,7 @@ GAP_WORDS = {"reads", "read", "shows", "show", "contains", "contain", "has", "sa
              "computes", "compute",
              "line", "lines", "source", "code", "verbatim", "quote", "quoted", "excerpt",
              "current", "currently", "actual", "l"}
-PROPOSAL = re.compile(r"\b(should|propos\w*|suggest\w*|recommend\w*|replace with|instead|would|could|change (?:it |this )?to|rewrit\w*|becomes?|example|e\.g\.|such as|consider|cover|prefer\w*|expected|want)\b", re.I)
+PROPOSAL = re.compile(r"\b(should|propos\w*|suggest\w*|recommend\w*|replace with|instead|would|could|change (?:it |this )?to|rewrit\w*|becomes?|example|e\.g\.|such as|consider|cover|prefer\w*|expected|want|(?:constructed|built|crafted) as)\b", re.I)
 
 def association(start):
     # The citation a quote is written about: the nearest one before it in the
@@ -3655,16 +3661,19 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     # readable neighbor cannot stand in for an oversized or unreadable bound file.
     readable = True
     verified = near = False
+    partial_lines = []
     for path in bound_paths + [p for p in all_cited if p not in bound_paths]:
         entry = load(path)
         if entry is None:
             if path in bound_paths:
                 readable = False
             continue
-        lines = match_unit(wholes, line_variants, entry)
+        misses = []
+        lines = match_unit(wholes, line_variants, entry, misses)
         if not lines:
             continue
         verified = True
+        partial_lines = misses
         cited_lines = [line for p, line in bound if p == path]
         near = any(abs(found - cited) <= NEAR_LINES for found in lines for cited in cited_lines)
         break
@@ -3700,6 +3709,13 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
         result["quotes_verified"] += 1
         if near:
             result["quotes_near_line"] += 1
+        # sail-cruisey #3247: a mostly real fence can carry an invented line.
+        # Report it with the missing lines; the threshold still decides.
+        if partial_lines:
+            result["quotes_partial"] += 1
+            for line in partial_lines:
+                if len(result["partial_samples"]) < 3:
+                    result["partial_samples"].append(norm(line)[:120])
     elif diff_side_hit:
         result["quotes_verified"] += 1
         result["quotes_verified_in_diff_" + diff_side_hit] += 1
