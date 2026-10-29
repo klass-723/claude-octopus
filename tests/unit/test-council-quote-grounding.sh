@@ -885,6 +885,58 @@ $invented
 VERDICT: APPROVE")")"
 if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# The exempt form follows feature-analysis.py's fences(): any indentation, the
+# label right after the marker, a closing marker of the same width, and a
+# findings list or an object whose "findings" is one.
+findings_json='{
+  "findings": [
+    {"source": "RULES.md", "line_start": 3, "quote": "run `/octo:security` first", "recommendation": "Run the audit."}
+  ],
+  "summary": "one gap"
+}'
+test_case "#3244: a findings object with other keys is not a code quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+$findings_json
+\`\`\`
+
+VERDICT: REVISE")")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: an indented octopus-policy-findings block is not a code quote"
+indented_block='- Policy:
+
+    ```octopus-policy-findings
+    {"findings": [{"source": "RULES.md", "line_start": 3, "quote": "run `/octo:security` first"}]}
+    ```'
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+$indented_block
+
+VERDICT: REVISE")")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a findings fence closed by a wider marker stays a quote unit"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+[{\"quote\": \"$invented\"}]
+\`\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked >= 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a findings label after a space stays a quote unit"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\` octopus-policy-findings
+[{\"quote\": \"$invented\"}]
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked >= 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
