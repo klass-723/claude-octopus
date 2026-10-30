@@ -3406,6 +3406,9 @@ def short_lines(block):
     out = []
     for line in block:
         variants = [line.strip(), GUTTER.sub("", line).strip()]
+        # An elision marker stands for omitted source; it is never a miss.
+        if ELLIPSIS.fullmatch(variants[-1]) or ELLIPSIS.fullmatch(variants[0]):
+            continue
         if line.strip() and not any(checkable(v) for v in variants):
             normed = [norm(v) for v in dict.fromkeys(variants) if norm(v)]
             if normed:
@@ -3468,27 +3471,36 @@ def match_unit(wholes, line_variants, entry, misses=None, short=()):
     # A multi-line block verifies as a whole or when at least two thirds of its
     # specific lines are in the file. One generic real line (a signature, an
     # "if (flag) {") can no longer carry an otherwise invented block. When the
-    # threshold carries it, the lines it did not find, short ones included, are
-    # appended to misses.
+    # threshold or elision carries it, the lines it did not find, short ones
+    # included, are appended to misses.
+    hay = entry[0]
+    def scan():
+        found, missing = [], []
+        for variants in line_variants:
+            for variant in variants:
+                lines = match_variant(variant, entry)
+                if lines:
+                    found.append(lines)
+                    break
+            else:
+                missing.append(variants[0])
+        return found, missing
+    def record_misses(missing):
+        if misses is not None:
+            misses.extend(missing)
+            misses.extend(variants[0] for variants in short if not any(v in hay for v in variants))
     for variant in wholes:
         lines = match_variant(variant, entry)
         if lines:
+            if misses is not None and norm(variant) not in hay:
+                # Elided fragments matched; a line between them may be invented.
+                record_misses(scan()[1])
             return lines
     if not line_variants:
         return []
-    found, missing = [], []
-    for variants in line_variants:
-        for variant in variants:
-            lines = match_variant(variant, entry)
-            if lines:
-                found.append(lines)
-                break
-        else:
-            missing.append(variants[0])
+    found, missing = scan()
     if found and len(found) * 3 >= len(line_variants) * 2:
-        if misses is not None:
-            misses.extend(missing)
-            misses.extend(variants[0] for variants in short if not any(v in entry[0] for v in variants))
+        record_misses(missing)
         return found[0]
     return []
 
@@ -3753,7 +3765,7 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
             result["quotes_near_line"] += 1
         # sail-cruisey #3247: a mostly real fence can carry an invented line.
         # Report it with the missing lines; the threshold still decides.
-        if partial_lines:
+        if kind == "fence" and partial_lines:
             result["quotes_partial"] += 1
             for line in partial_lines:
                 if len(result["partial_samples"]) < 3:

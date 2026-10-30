@@ -606,6 +606,43 @@ r="$(_report "$(_resp "src/pricing.ts:1 reads:
 VERDICT: APPROVE")")"
 if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3247: an invented short line between elision markers is counted as partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  ...
+  return true;
+  ...
+  return applyTaxes(base, sailing.portFees);
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an elided fence of real lines is not partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  ...
+  return applyTaxes(base, sailing.portFees);
+}
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: a blockquote with an unmatched line is not a partial fence"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+> const base = cabin.basePrice ?? sailing.defaultPrice;
+> const invented = fetchUnknownReservations(sailing);
+> return applyTaxes(base, sailing.portFees);
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3247: a fence complete in a later cited file is not partial"
 PROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-partial.XXXXXX")"
 mkdir -p "$PROOT/src"
