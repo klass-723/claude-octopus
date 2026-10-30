@@ -3390,6 +3390,18 @@ def specific_lines(block, table=False, literal=False):
             out.append(variants)
     return out
 
+def short_lines(block):
+    # Nonempty lines too short to check on their own. They never count toward
+    # the two-thirds threshold, but an invented one still makes a fence partial.
+    out = []
+    for line in block:
+        variants = [line.strip(), GUTTER.sub("", line).strip()]
+        if line.strip() and not any(checkable(v) for v in variants):
+            normed = [norm(v) for v in dict.fromkeys(variants) if norm(v)]
+            if normed:
+                out.append(normed)
+    return out
+
 def unit_wholes(block):
     whole = " ".join(l.strip() for l in block)
     out = [whole] if whole else []
@@ -3442,11 +3454,12 @@ def match_variant(text, entry):
             return piece_lines[0]
     return []
 
-def match_unit(wholes, line_variants, entry, misses=None):
+def match_unit(wholes, line_variants, entry, misses=None, short=()):
     # A multi-line block verifies as a whole or when at least two thirds of its
     # specific lines are in the file. One generic real line (a signature, an
     # "if (flag) {") can no longer carry an otherwise invented block. When the
-    # threshold carries it, the lines it did not find are appended to misses.
+    # threshold carries it, the lines it did not find, short ones included, are
+    # appended to misses.
     for variant in wholes:
         lines = match_variant(variant, entry)
         if lines:
@@ -3465,6 +3478,7 @@ def match_unit(wholes, line_variants, entry, misses=None):
     if found and len(found) * 3 >= len(line_variants) * 2:
         if misses is not None:
             misses.extend(missing)
+            misses.extend(variants[0] for variants in short if not any(v in entry[0] for v in variants))
         return found[0]
     return []
 
@@ -3574,6 +3588,21 @@ GAP_WORDS = {"reads", "read", "shows", "show", "contains", "contain", "has", "sa
              "computes", "compute",
              "line", "lines", "source", "code", "verbatim", "quote", "quoted", "excerpt",
              "current", "currently", "actual", "l"}
+# A content verb before "built as" keeps the claim about the file ("x.ts:2
+# contains the code built as `...`"); a first-person subject after it marks the
+# seat's own input ("x.ts:2 reads a row I constructed as `...`").
+OWN_INPUT = re.compile(r"(?:constructed|built|crafted) as", re.I)
+CONTENT_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|defines?|defined|declares?|declared)\b", re.I)
+FIRST_PERSON = re.compile(r"\b(?:I|[Ww]e|[Mm]y|[Oo]ur|[Mm]e|[Uu]s)\b")
+def proposes(text):
+    for match in PROPOSAL.finditer(text):
+        # A citation's own dots ("x.ts:2") do not end the clause.
+        if OWN_INPUT.fullmatch(match.group(0)) and not re.search(r"[.!?;]", CITATION.sub("", text[:match.start()])):
+            verbs = list(CONTENT_VERB.finditer(text, 0, match.start()))
+            if verbs and not FIRST_PERSON.search(text, verbs[-1].end(), match.start()):
+                continue
+        return True
+    return False
 PROPOSAL = re.compile(r"\b(should|propos\w*|suggest\w*|recommend\w*|replace with|instead|would|could|change (?:it |this )?to|rewrit\w*|becomes?|example|e\.g\.|such as|consider|cover|prefer\w*|expected|want|(?:constructed|built|crafted) as)\b", re.I)
 
 def association(start):
@@ -3604,7 +3633,7 @@ def proposed(start):
     line_start = resp.rfind("\n", 0, start) + 1
     if resp[line_start:start].strip(" \t>`") == "":
         line_start = resp.rfind("\n", 0, max(0, line_start - 1)) + 1
-    return bool(PROPOSAL.search(LINK_TARGET.sub("", resp[line_start:start])))
+    return proposes(LINK_TARGET.sub("", resp[line_start:start]))
 
 def record_unverified(text, reason):
     # Each sample carries why it failed, so a lead can tell an invented quote
@@ -3669,14 +3698,17 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
                 readable = False
             continue
         misses = []
-        lines = match_unit(wholes, line_variants, entry, misses)
+        lines = match_unit(wholes, line_variants, entry, misses, short_lines(block))
         if not lines:
             continue
+        cited_lines = [line for p, line in bound if p == path]
+        near = near or any(abs(found - cited) <= NEAR_LINES for found in lines for cited in cited_lines)
+        # A partial match may be complete in a later cited file; keep looking
+        # for the report. The first match already decides the verdict.
         verified = True
         partial_lines = misses
-        cited_lines = [line for p, line in bound if p == path]
-        near = any(abs(found - cited) <= NEAR_LINES for found in lines for cited in cited_lines)
-        break
+        if not partial_lines:
+            break
     if kind == "bare":
         # Positive evidence only: a matched bare line is a verified quote; an
         # unmatched one may be the seat's own prose and is not counted.

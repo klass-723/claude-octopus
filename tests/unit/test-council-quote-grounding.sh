@@ -569,6 +569,61 @@ export function priceFor(cabin, sailing) {
 VERDICT: APPROVE")")"
 if jq -e --arg fake "$FAKE" '.quotes_verified == 1 and .quotes_partial == 1 and .partial_samples == [$fake] and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# A content verb before the proposal wording is a claim about the file, so
+# the span is checked. A first-person subject between them still marks the
+# seat's own input.
+test_case "#3247: code a citation contains, built as an invented quote, is checked"
+r="$(_report "$(_resp "src/pricing.ts:2 contains the code built as \`$FAKE\` today.
+VERDICT: REVISE")")"
+if jq -e '.quotes_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an input the seat itself built after a content verb stays its own"
+r="$(_report "$(_resp 'src/pricing.ts:2 reads the base price from a row I constructed as `"Order total $5.00".padEnd(80, " ") + "invalid".repeat(40)` for this test.
+VERDICT: REVISE')")"
+if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an invented short line in a fence that verifies is counted as partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  return true;
+  return applyTaxes(base, sailing.portFees);
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 1 and (.partial_samples | index("return true;")) and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: a real short line in a fence that verifies is not partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  return applyTaxes(base, sailing.portFees);
+}
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: a fence complete in a later cited file is not partial"
+PROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-partial.XXXXXX")"
+mkdir -p "$PROOT/src"
+printf '%s\n' 'export function priceFor(cabin, sailing) {' '  const base = cabin.basePrice ?? sailing.defaultPrice;' \
+    '  return applyTaxes(base, sailing.portFees);' '}' > "$PROOT/src/a.ts"
+printf '%s\n' 'export function priceFor(cabin, sailing) {' '  const base = cabin.basePrice ?? sailing.defaultPrice;' \
+    '  const fees = sailing.portFees.filter(Boolean);' '  return applyTaxes(base, sailing.portFees);' '}' > "$PROOT/src/b.ts"
+r="$(council_response_quote_verification_json "$(_resp "src/a.ts:1 and src/b.ts:1 read:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  const fees = sailing.portFees.filter(Boolean);
+  return applyTaxes(base, sailing.portFees);
+\`\`\`
+
+VERDICT: APPROVE")" "$PROOT")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3247: an exact fence is not partial"
 r="$(_report "$(_resp "src/pricing.ts:1 reads:
 
