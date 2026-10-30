@@ -1127,6 +1127,63 @@ else
     test_fail "verifier did not finish inside 10s or misreported: ${r:0:200}"
 fi
 
+# sail-cruisey #3340: a seat that ran the code under review names the INPUT it
+# fed in. That string is the seat's own, not a quote of a file, so it is
+# unverifiable rather than fabricated.
+probe_cases=(
+    'At `src/pricing.ts:2`, the fallback runs first. Direct probing returns `[]` for `## Review record\n- Residual: no follow-ups were filed`.'
+    'The prefix check at `src/pricing.ts:3` lets `## Disclosures\n- None of the failed imports are purged` pass.'
+    'Likewise, `- Nothing prevents duplicate charges here` and `- None of the failed imports are purged` pass through the matcher at src/pricing.ts:3.'
+    'The check at src/pricing.ts:3 is too broad. I reproduced both `## Disclosures - Nothing prevents duplicate charges` and `## Disclosures - None of the failed imports are purged`: the validator returns `[]`.'
+    'Heading detection at `src/pricing.ts:2` is loose. A read-only probe showed it: synthetic heading `## Bug: confirmation emails not delivered after rebooking` followed by `- Restore confirmation email dispatch after rebooking.` becomes an offender.'
+)
+for probe in "${probe_cases[@]}"; do
+    test_case "#3340: a seat's probe input is not a fabricated quote: ${probe:0:60}"
+    r="$(_report "$(_resp "$probe
+VERDICT: REVISE")")"
+    if jq -e '.quotes_unverified == 0 and .quotes_unverifiable_proposed >= 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+test_case "#3340: an invented quote the citation reads is still fabricated beside a probe"
+r="$(_report "$(_resp "src/pricing.ts:2 reads \`$FAKE\`. Probing returns \`[]\` for \`## Disclosures\\n- None of the failed imports are purged\`.
+VERDICT: REVISE")")"
+if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3340: an invented unattributed quote with no probe wording is still fabricated"
+r="$(_report "$(_resp "The guard near src/pricing.ts:2 uses \`$FAKE\` to load the price.
+VERDICT: REVISE")")"
+if jq -e '.quotes_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# sail-cruisey #3311: what a command the seat ran printed is not file content.
+tool_cases=(
+    'The guard at src/pricing.ts:3 looks right. Test execution was unavailable: the targeted Vitest command exited with `vitest: command not found`.'
+    'The guard at src/pricing.ts:3 looks right. Targeted execution was unavailable because dependencies are absent (`vitest: command not found`).'
+    'The guard at src/pricing.ts:3 looks right. The suite could not start: `Cannot find package '"'"'vite'"'"' imported from the config`.'
+)
+for tool in "${tool_cases[@]}"; do
+    test_case "#3311: a seat's tool output is not a fabricated quote: ${tool:60:50}"
+    r="$(_report "$(_resp "$tool
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_unverified == 0 and .quotes_unverifiable_command == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+# sail-cruisey #3316: a seat joins a multi-line condition onto one line. The
+# tokens are the file's; only the whitespace around punctuation differs.
+WROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-joined.XXXXXX")"
+mkdir -p "$WROOT/src"
+printf '%s\n' 'export async function handle(request) {' '  // 3.5. Rate limiting' '  if (' \
+    '    request.method !== "OPTIONS" &&' '    !request.headers.get("x-nf-scheduled")' '  ) {' \
+    '    await limit(request);' '  }' '}' > "$WROOT/src/handler.ts"
+test_case "#3316: a multi-line condition joined onto one line verifies"
+r="$(council_response_quote_verification_json "$(_resp '`src/handler.ts:3-6` is `if (request.method !== "OPTIONS" && !request.headers.get("x-nf-scheduled"))`. It wraps the whole limiter.
+VERDICT: APPROVE')" "$WROOT")"
+if jq -e '.quotes_verified == 1 and .quotes_attributed_unverified == 0 and .quotes_near_line == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3316: joining words that the file separates does not verify"
+r="$(council_response_quote_verification_json "$(_resp '`src/handler.ts:3-6` is `!request.headers.get("x-nf-scheduled") ) { awaitlimit(request);`.
+VERDICT: APPROVE')" "$WROOT")"
+if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "a chair-fallback seat record carries grounding like an advice seat"
 fbdir="$(mktemp -d "$TEST_TMP_DIR/fallback-grounding.XXXXXX")"; mkdir -p "$fbdir/responses"
 COUNCIL_RUN_DIR="$fbdir"; COUNCIL_FIXTURE=""; COUNCIL_SEAT_RECORDS_JSON='[]'

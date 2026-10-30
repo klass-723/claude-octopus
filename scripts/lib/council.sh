@@ -2963,7 +2963,7 @@ import os
 import re
 import subprocess
 import sys
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 
 MAX_RESPONSE_BYTES = 1_048_576
@@ -3453,6 +3453,21 @@ def find_lines(hay, starts, line_numbers, needle, limit=50):
         at = hay.find(needle, at + 1)
     return found
 
+# sail-cruisey #3316: a seat joins "if (" / "a &&" / "b" / ") {" onto one line
+# as "if (a && b)". A space next to punctuation is layout, not content, so a
+# quote that misses only on that verifies. A space between two words still
+# counts: "await limit" is never "awaitlimit".
+LAYOUT_SPACE = re.compile(r" (?=[^\w ])|(?<=[^\w ]) ")
+tight_cache = {}
+def tight_entry(entry):
+    hay, starts, line_numbers = entry
+    got = tight_cache.get(hay)
+    if got is None:
+        removed = [m.start() for m in LAYOUT_SPACE.finditer(hay)]
+        got = (LAYOUT_SPACE.sub("", hay), [s - bisect_left(removed, s) for s in starts], line_numbers)
+        tight_cache[hay] = got
+    return got
+
 def match_variant(text, entry):
     hay, starts, line_numbers = entry
     needle = norm(text)
@@ -3465,6 +3480,8 @@ def match_variant(text, entry):
         piece_lines = [find_lines(hay, starts, line_numbers, p) for p in pieces]
         if all(piece_lines):
             return piece_lines[0]
+    if specific(needle):
+        return find_lines(*tight_entry(entry), LAYOUT_SPACE.sub("", needle))
     return []
 
 def match_unit(wholes, line_variants, entry, misses=None, short=()):
@@ -3600,6 +3617,16 @@ REMOVAL_WORDS = re.compile(r"\b(remov(?:e|ed|es|ing|al)|delet(?:e|ed|es|ing|ion)
 # content. If it is not in the cited file, it is unverifiable, never fabricated.
 COMMAND = re.compile(r"^\$?\s*(?:npm|npx|pnpm|yarn|node|deno|bun|git|gh|make|bash|sh|zsh|cd|ls|cat|grep|rg|sed|awk|curl|python3?|pip|uv|cargo|go|tsc|vitest|jest|pytest|docker|kubectl|psql|netlify|supabase|env)\s")
 SHELL_FENCES = {"sh", "bash", "shell", "console", "zsh", "terminal", "shell-session"}
+# What a command the seat ran printed ("exited with `vitest: command not found`")
+# is not file content either (sail-cruisey #3311).
+TOOL_OUTPUT = re.compile(r"(?:: command not found|: No such file or directory|: Permission denied)$"
+                         r"|^Cannot find (?:module|package) \S+", re.I)
+TOOL_OUTPUT_BEFORE = re.compile(r"\b(?:exit(?:s|ed)? with|fail(?:s|ed)? with|errors? with|errored with|printed|prints|output|stderr:?)\s*$", re.I)
+def tool_output(kind, start, block):
+    if kind != "inline":
+        return False
+    line_start = resp.rfind("\n", 0, start) + 1
+    return bool(TOOL_OUTPUT.search(norm(block[0])) or TOOL_OUTPUT_BEFORE.search(resp[max(line_start, start - 80):start]))
 # A unit is ATTRIBUTED when it sits directly under or after a citation, with only
 # markup or a reading verb between them ("x.ts:12 reads `...`", "x.ts:12:" then a
 # fence). That is the seat stating the cited file contains this code, so the
@@ -3656,6 +3683,32 @@ def proposed(start):
     if resp[line_start:start].strip(" \t>`") == "":
         line_start = resp.rfind("\n", 0, max(0, line_start - 1)) + 1
     return proposes(LINK_TARGET.sub("", resp[line_start:start]))
+
+# sail-cruisey #3340: a seat that ran the code under review names the input it
+# fed in ("probing returns `[]` for `## Disclosures\n- none`", "`- a` and `- b`
+# pass through the matcher"). An unattributed inline span next to that wording,
+# alone or in a run of spans joined by "and", "or" or "followed by", is the
+# seat's own string, not a quote of a file.
+inline_spans = sorted((u[0], u[1]) for u in units if u[2] == "inline")
+SPAN_JOIN = re.compile(r"\s*(?:,\s*(?:and|or)?|and|or|followed by|then)\s*", re.I)
+PROBE_BEFORE = re.compile(r"(?:\b(?:reproduc\w*|fed|feeding|passing|called with|for input|inputs?|synthetic [\w-]+|lets)"
+                          r"|\breturns? `[^`\n]*` for)(?: both| either)?\s*$", re.I)
+PROBE_AFTER = re.compile(r"^\s*(?:returns?|yields?|produces?|pass(?:es)?|still pass\w*|(?:is|are) (?:flagged|rejected|accepted|ignored)"
+                         r"|becomes? an?)\b", re.I)
+def probe_input(start, end):
+    i = bisect_left(inline_spans, (start, end))
+    if i >= len(inline_spans) or inline_spans[i][0] != start:
+        return False
+    first = last = i
+    while first > 0 and SPAN_JOIN.fullmatch(resp[inline_spans[first - 1][1]:inline_spans[first][0]]):
+        first -= 1
+    while last + 1 < len(inline_spans) and SPAN_JOIN.fullmatch(resp[inline_spans[last][1]:inline_spans[last + 1][0]]):
+        last += 1
+    line_start = resp.rfind("\n", 0, inline_spans[first][0]) + 1
+    line_end = resp.find("\n", inline_spans[last][1])
+    before = resp[max(line_start, inline_spans[first][0] - 200):inline_spans[first][0]]
+    after = resp[inline_spans[last][1]:line_end if line_end >= 0 else len(resp)]
+    return bool(PROBE_BEFORE.search(before) or PROBE_AFTER.match(after))
 
 def record_unverified(text, reason):
     # Each sample carries why it failed, so a lead can tell an invented quote
@@ -3783,10 +3836,11 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
         # No diff to check a claimed removal against: unverifiable, not fabricated.
         result["quotes_unverifiable"] += 1
         result["quotes_unverifiable_claimed_removed"] += 1
-    elif info in SHELL_FENCES or all(COMMAND.match(norm(l) + " ") for l in block):
+    elif info in SHELL_FENCES or all(COMMAND.match(norm(l) + " ") for l in block) or (
+            attributed is None and tool_output(kind, start, block)):
         result["quotes_unverifiable"] += 1
         result["quotes_unverifiable_command"] += 1
-    elif proposed(start):
+    elif proposed(start) or (kind == "inline" and attributed is None and probe_input(start, end)):
         result["quotes_unverifiable"] += 1
         result["quotes_unverifiable_proposed"] += 1
     elif readable:
