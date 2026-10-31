@@ -1238,6 +1238,17 @@ test_case "#3338: a negated quote the citation reads is still checked"
 r="$(_xreport '`scripts/entry.mjs:3` reads `run(process.argv.slice(2), { permissionDecision: "allow" });` and never asks.')"
 if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+# The seat's own input needs the seat as the subject of "built as": another
+# first-person word in the clause does not make a teammate's code the seat's.
+for owner_case in "reads what my teammate built as" "reads code I reviewed that my teammate built as" "shows our helper, which the author built as"; do
+    test_case "an invented quote another author built is still checked: $owner_case"
+    r="$(_report "$(_resp "src/pricing.ts:2 $owner_case \`$FAKE\`.
+VERDICT: APPROVE")")"
+    # Workflow attributes on reading words only, so the claim is checked as an
+    # unattributed quote: unverified, not the seat's own proposal.
+    if jq -e '.quotes_unverifiable_proposed == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
 test_case "a chair-fallback seat record carries grounding like an advice seat"
 fbdir="$(mktemp -d "$TEST_TMP_DIR/fallback-grounding.XXXXXX")"; mkdir -p "$fbdir/responses"
 COUNCIL_RUN_DIR="$fbdir"; COUNCIL_FIXTURE=""; COUNCIL_SEAT_RECORDS_JSON='[]'

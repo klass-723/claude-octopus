@@ -3711,17 +3711,18 @@ GAP_WORDS = {"reads", "read", "shows", "show", "contains", "contain", "has", "sa
              "line", "lines", "source", "code", "verbatim", "quote", "quoted", "excerpt",
              "current", "currently", "actual", "l"}
 # A content verb before "built as" keeps the claim about the file ("x.ts:2
-# contains the code built as `...`"); a first-person subject after it marks the
-# seat's own input ("x.ts:2 reads a row I constructed as `...`").
+# contains the code built as `...`"); "I" or "we" as the subject of "built as"
+# marks the seat's own input ("x.ts:2 reads a row I constructed as `...`").
+# Another first-person word does not: "reads what my teammate built as" is a claim.
 OWN_INPUT = re.compile(r"(?:constructed|built|crafted) as", re.I)
 CONTENT_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|defines?|defined|declares?|declared)\b", re.I)
-FIRST_PERSON = re.compile(r"\b(?:I|[Ww]e|[Mm]y|[Oo]ur|[Mm]e|[Uu]s)\b")
+FIRST_PERSON_SUBJECT = re.compile(r"\b(?:I|[Ww]e)\s+(?:constructed|built|crafted)\s+as\b")
 def proposes(text):
     for match in PROPOSAL.finditer(text):
         # A citation's own dots ("x.ts:2") do not end the clause.
         if OWN_INPUT.fullmatch(match.group(0)) and not re.search(r"[.!?;]", CITATION.sub("", text[:match.start()])):
             verbs = list(CONTENT_VERB.finditer(text, 0, match.start()))
-            if verbs and not FIRST_PERSON.search(text, verbs[-1].end(), match.start()):
+            if verbs and not FIRST_PERSON_SUBJECT.search(text, verbs[-1].end(), match.end()):
                 continue
         return True
     return False
