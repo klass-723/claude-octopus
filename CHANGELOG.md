@@ -4,30 +4,6 @@
 
 ### Fixed
 
-- Two code reviews started in the same second without an `artifactId` no
-  longer share a run id. The default id was the epoch second alone, and every
-  run in a Claude Code session writes to one results directory. The second
-  run could not plan its seats' execution contracts ("Unable to persist planned
-  execution contract"), so none of its seats spawned, and both runs read and
-  overwrote one `review-findings-*.json`, `review-round1-findings-*.json` and
-  `review-debate-*.json`. The default id is now the epoch second plus a suffix
-  reserved with `mktemp` in the spawn layer's task-id reservation directory.
-  If no id can be reserved, the review stops before writing anything. A dry
-  run spawns no seats, so it keeps the plain epoch second and reserves no id.
-  Ids built from an `artifactId` are unchanged.
-
-- Two Octopus runs in one Claude Code session no longer write into one proof
-  packet. The run id was the session id whenever `CLAUDE_CODE_SESSION_ID` was
-  set, which is always the case inside Claude Code, so every run in a session
-  wrote to `~/.claude-octopus/runs/<session-id>/`. Two `/octo:review` runs
-  launched in parallel interleaved their events in one `proof.jsonl` and shared
-  one `state.json` and `summary.md`. The surviving summary listed both runs'
-  artifacts under a single goal and finding count, and the other run's summary
-  was lost. A later review in the same session truncated the earlier review's
-  `proof.jsonl`. The session id is now a prefix, followed by the workflow, a UTC
-  timestamp, the process id and `$RANDOM`. `OCTOPUS_PROOF_RUN_ID` still sets
-  the whole run id. `run.json` and `seats.json` stay in `runs/<session-id>/`.
-
 - A council seat is no longer marked fabricated for a test input it built
   itself (sail-cruisey #3247). A span introduced as "constructed as", "built
   as" or "crafted as" is the seat's own proposal, like one introduced by
@@ -39,6 +15,31 @@
   threshold, in a cited file or the reviewed diff, but contain a line found
   nowhere, short lines included. A fence complete in a later cited file is not
   partial. It does not change the verdict.
+
+## [11.15.3] - 2026-10-30
+
+### Fixed
+
+- Reviews started in the same second without an `artifactId` now reserve
+  separate run IDs before starting seats. Their findings no longer overwrite
+  each other, and one review cannot block another's execution contracts by
+  reusing its ID. If no ID can be reserved, the review stops before writing
+  findings. Explicit `artifactId` values and dry-run behavior are preserved.
+  [#1239](https://github.com/nyldn/claude-octopus/pull/1239).
+- By default, repeated and concurrent workflows within one Claude Code session
+  now write separate proof packets, keeping events, findings and summaries
+  separate. `OCTOPUS_PROOF_RUN_ID` still overrides the complete run ID. Use a
+  unique override per run; reusing one shares the directory and can overwrite
+  the earlier packet.
+  [#1238](https://github.com/nyldn/claude-octopus/pull/1238).
+- Council grounding and quote verification accept a bare filename or path
+  suffix when exactly one eligible file matches. Nested checkout copies no
+  longer make names ambiguous. Grounding rejects missing, ambiguous and unsafe
+  paths, and line numbers past the end of a file. Quote verification checks
+  uniquely matching attached context before repository suffixes and can verify
+  matching file text even when the cited line number is out of range.
+  An unsafe existing path cannot fall back to a different file.
+  [#1236](https://github.com/nyldn/claude-octopus/pull/1236).
 
 ## [11.15.2] - 2026-10-28
 
