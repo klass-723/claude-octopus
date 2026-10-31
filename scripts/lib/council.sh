@@ -3144,6 +3144,26 @@ for match in CITATION.finditer(resp):
     tokens.append(token)
     if candidate is not None:
         citations.append(token)
+# sail-cruisey #3338: a file with no extension (".githooks/pre-commit:48",
+# "Makefile:12") is a citation only when it names a file under the root as
+# written; otherwise "host/path:80" shapes would count.
+EXTENSIONLESS = re.compile(r"(?<![A-Za-z0-9_./:-])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_-]+|Makefile|Dockerfile|Gemfile|Rakefile|Procfile|Jenkinsfile|Brewfile)"
+                           r"\s*:\s*([0-9]+)(?:-([0-9]+))?(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_/-])")
+for match in EXTENSIONLESS.finditer(resp):
+    raw = match.group(1)
+    if raw not in resolved:
+        relative = Path(raw)
+        try:
+            candidate = (root / relative).resolve(strict=True)
+            resolved[raw] = candidate if ".." not in relative.parts and contained(candidate) and candidate.is_file() else None
+        except (OSError, RuntimeError):
+            resolved[raw] = None
+    if resolved[raw] is not None:
+        token = (match.start(), match.end(), resolved[raw], int(match.group(2)))
+        tokens.append(token)
+        citations.append(token)
+tokens.sort()
+citations.sort()
 result["citations"] = len(citations)
 result["citations_unresolved"] = len(tokens) - len(citations)
 if not citations:
@@ -3258,10 +3278,63 @@ for match in re.finditer(r"(?:^[ \t]*>[^\n]*(?:\n|$))+", resp, re.M):
     lines = [l for l in lines if l.strip()]
     if lines:
         units.append((match.start(), match.end(), "blockquote", lines, [], ""))
-for match in re.finditer(r"`([^`\n]+)`", resp):
-    if in_fence(match.start(), match.end()):
+TICKS = re.compile(r"`+")
+def escaped_at(index):
+    # An odd run of backslashes before a backtick escapes it.
+    run = 0
+    while index - run - 1 >= 0 and resp[index - run - 1] == "\\":
+        run += 1
+    return run % 2 == 1
+def code_spans():
+    # sail-cruisey #3338: a run of N backticks closes only on a run of exactly
+    # N, so ``a `b` c`` is one span, and a seat's \` inside a single-backtick
+    # span is a literal backtick. A span never crosses a line.
+    def run_at(match):
+        # An escaped first backtick is a literal; the rest of the run counts.
+        begin = match.start() + (1 if escaped_at(match.start()) else 0)
+        return begin, match.end()
+    pos = 0
+    while True:
+        opener = TICKS.search(resp, pos)
+        if not opener:
+            return
+        open_start, open_end = run_at(opener)
+        width = open_end - open_start
+        if width == 0:
+            pos = opener.end()
+            continue
+        line_end = resp.find("\n", open_end)
+        line_end = len(resp) if line_end < 0 else line_end
+        def find_closer(escapes):
+            closer = TICKS.search(resp, open_end, line_end)
+            while closer:
+                begin = run_at(closer)[0] if escapes else closer.start()
+                if closer.end() - begin == width:
+                    return closer, begin
+                closer = TICKS.search(resp, closer.end(), line_end)
+            return None, None
+        # CommonMark: no escapes inside a span, so `\` is a backslash. A seat's
+        # paired \`...\` inside a span is read as literal backticks instead.
+        closer, close_start = find_closer(False)
+        if width == 1:
+            alt, alt_start = find_closer(True)
+            if alt is not None and alt_start != close_start:
+                inner = resp[open_end:alt_start]
+                if inner.count("\\`") >= 2 and inner.count("\\`") % 2 == 0:
+                    closer, close_start = alt, alt_start
+        if closer is None:
+            pos = opener.end()
+            continue
+        body = resp[open_end:close_start]
+        if width == 1 and body.count("\\`") >= 2:
+            body = body.replace("\\`", "`")
+        if body.strip():
+            yield open_start, closer.end(), body
+        pos = closer.end()
+for span_start, span_end, body in code_spans():
+    if in_fence(span_start, span_end):
         continue
-    units.append((match.start(), match.end(), "inline", [match.group(1).strip()], [], ""))
+    units.append((span_start, span_end, "inline", [body.strip()], [], ""))
 # The "path:line" list shape: a line holding only a citation, followed by the
 # quoted source line with no markup. These can only add verified evidence; an
 # unmatched bare line may be prose, so it is never counted against the seat.
@@ -3691,9 +3764,11 @@ def proposed(start):
 # seat's own string, not a quote of a file.
 inline_spans = sorted((u[0], u[1]) for u in units if u[2] == "inline")
 SPAN_JOIN = re.compile(r"\s*(?:,\s*(?:and|or)?|and|or|followed by|then)\s*", re.I)
-PROBE_BEFORE = re.compile(r"(?:\b(?:reproduc\w*|fed|feeding|passing|called with|for input|inputs?|synthetic [\w-]+|lets)"
+PROBE_BEFORE = re.compile(r"(?:\b(?:reproduc\w*|fed|feeding|passing|called with|for input|inputs?|synthetic [\w-]+|lets|bypass(?:es|ed)?:?)"
                           r"|\breturns? `[^`\n]*` for)(?: both| either)?\s*$", re.I)
-PROBE_AFTER = re.compile(r"^\s*(?:returns?|yields?|produces?|pass(?:es)?|still pass\w*|(?:is|are) (?:flagged|rejected|accepted|ignored)"
+PROBE_AFTER = re.compile(r"^\s*(?:(?:all|both|each|also|still|then|now) )?(?:returns?|yields?|produces?|pass(?:es)?|still pass\w*"
+                         r"|execut(?:es?|ed)|miss(?:es|ed)?|evad(?:es?|ed)|bypass(?:es|ed)?|slips?|leaks?"
+                         r"|(?:is|are) (?:not )?(?:flagged|rejected|accepted|ignored|detected|caught|blocked|missed|allowed)"
                          r"|becomes? an?)\b", re.I)
 def probe_input(start, end):
     i = bisect_left(inline_spans, (start, end))
@@ -3708,7 +3783,32 @@ def probe_input(start, end):
     line_end = resp.find("\n", inline_spans[last][1])
     before = resp[max(line_start, inline_spans[first][0] - 200):inline_spans[first][0]]
     after = resp[inline_spans[last][1]:line_end if line_end >= 0 else len(resp)]
-    return bool(PROBE_BEFORE.search(before) or PROBE_AFTER.match(after))
+    return bool(PROBE_BEFORE.search(before) or PROBE_AFTER.match(after) or NEGATED.search(before)
+                or input_cell(start))
+
+# "it avoids returning `x`", "never calls `x`": the seat says the code does NOT
+# contain this, so it is not a claim of file content (sail-cruisey #3338).
+NEGATED = re.compile(r"\b(?:avoids?|avoiding|never|(?:does|do|did)(?: not|n'?t)|without)(?: \w+ing| \w+s?)?\s*$", re.I)
+INPUT_HEADER = re.compile(r"^\s*(?:inputs?|commands?|cases?|probes?|payloads?|samples?|strings?)\s*$", re.I)
+def cells(text):
+    # Cell texts of one table row, ignoring pipes inside code spans or escaped.
+    text = re.sub(r"`+[^`]*`+|\\.", lambda m: "x" * len(m.group(0)), text)
+    return [i for i, ch in enumerate(text) if ch == "|"]
+def input_cell(start):
+    # The input column of a table of probe results ("| Input | Real | Broken |").
+    i = bisect_right(table_starts, start) - 1
+    if i < 0 or start >= table_ranges[i][1]:
+        return False
+    t_start = table_ranges[i][0]
+    header = resp[t_start:resp.find("\n", t_start)]
+    row_start = resp.rfind("\n", 0, start) + 1
+    column = sum(1 for p in cells(resp[row_start:start]))
+    bounds = cells(header)
+    names = [header[a + 1:b] for a, b in zip([-1] + bounds, bounds + [len(header)])]
+    if header.lstrip().startswith("|"):
+        names = names[1:]
+        column -= 1 if resp[row_start:start].lstrip().startswith("|") else 0
+    return 0 <= column < len(names) and bool(INPUT_HEADER.match(names[column]))
 
 def record_unverified(text, reason):
     # Each sample carries why it failed, so a lead can tell an invented quote
