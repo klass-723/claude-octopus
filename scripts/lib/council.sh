@@ -3531,15 +3531,20 @@ def find_lines(hay, starts, line_numbers, needle, limit=50):
 # quote that misses only on that verifies. A space between two words still
 # counts: "await limit" is never "awaitlimit".
 LAYOUT_SPACE = re.compile(r" (?=[^\w ])|(?<=[^\w ]) ")
-tight_cache = {}
-def tight_entry(entry):
+# sail-cruisey #3386: a single-backtick span cannot hold a backtick, so a seat
+# quoting `describe("... `map`")` drops the file's inner backticks.
+BACKTICK = re.compile(r"`")
+stripped_cache = {}
+def stripped_entry(entry, pattern):
     hay, starts, line_numbers = entry
-    got = tight_cache.get(hay)
+    got = stripped_cache.get((hay, pattern))
     if got is None:
-        removed = [m.start() for m in LAYOUT_SPACE.finditer(hay)]
-        got = (LAYOUT_SPACE.sub("", hay), [s - bisect_left(removed, s) for s in starts], line_numbers)
-        tight_cache[hay] = got
+        removed = [m.start() for m in pattern.finditer(hay)]
+        got = (pattern.sub("", hay), [s - bisect_left(removed, s) for s in starts], line_numbers)
+        stripped_cache[(hay, pattern)] = got
     return got
+def tight_entry(entry):
+    return stripped_entry(entry, LAYOUT_SPACE)
 
 def match_variant(text, entry):
     hay, starts, line_numbers = entry
@@ -3554,7 +3559,10 @@ def match_variant(text, entry):
         if all(piece_lines):
             return piece_lines[0]
     if specific(needle):
-        return find_lines(*tight_entry(entry), LAYOUT_SPACE.sub("", needle))
+        lines = find_lines(*tight_entry(entry), LAYOUT_SPACE.sub("", needle))
+        if not lines and "`" not in needle and "`" in hay:
+            lines = find_lines(*stripped_entry(entry, BACKTICK), needle)
+        return lines
     return []
 
 def match_unit(wholes, line_variants, entry, misses=None, short=()):
@@ -3692,14 +3700,22 @@ COMMAND = re.compile(r"^\$?\s*(?:npm|npx|pnpm|yarn|node|deno|bun|git|gh|make|bas
 SHELL_FENCES = {"sh", "bash", "shell", "console", "zsh", "terminal", "shell-session"}
 # What a command the seat ran printed ("exited with `vitest: command not found`")
 # is not file content either (sail-cruisey #3311).
+# So is the error a seat's probe threw ("throws `RangeError: Maximum call stack
+# size exceeded`", sail-cruisey #3386): an error class and its message, a
+# traceback header or a panic.
 TOOL_OUTPUT = re.compile(r"(?:: command not found|: No such file or directory|: Permission denied)$"
                          r"|^Cannot find (?:module|package) \S+", re.I)
-TOOL_OUTPUT_BEFORE = re.compile(r"\b(?:exit(?:s|ed)? with|fail(?:s|ed)? with|errors? with|errored with|printed|prints|output|stderr:?)\s*$", re.I)
+RUNTIME_ERROR = re.compile(r"^(?:Uncaught (?:\(in promise\) )?)?[A-Z][A-Za-z]*(?:Error|Exception)(?: \[[\w-]+\])?: \S"
+                           r"|^Traceback \(most recent call last\)|^panic: \S")
+TOOL_OUTPUT_BEFORE = re.compile(r"\b(?:exit(?:s|ed)? with|fail(?:s|ed)? with|errors? with|errored with|printed|prints|output|stderr:?"
+                                r"|throws?|threw|raises?|raised|crash(?:es|ed)? with|reject(?:s|ed)? with)\s*$", re.I)
 def tool_output(kind, start, block):
     if kind != "inline":
         return False
     line_start = resp.rfind("\n", 0, start) + 1
-    return bool(TOOL_OUTPUT.search(norm(block[0])) or TOOL_OUTPUT_BEFORE.search(resp[max(line_start, start - 80):start]))
+    text = norm(block[0])
+    return bool(TOOL_OUTPUT.search(text) or RUNTIME_ERROR.match(text)
+                or TOOL_OUTPUT_BEFORE.search(resp[max(line_start, start - 80):start]))
 # A unit is ATTRIBUTED when it sits directly under or after a citation, with only
 # markup or a reading verb between them ("x.ts:12 reads `...`", "x.ts:12:" then a
 # fence). That is the seat stating the cited file contains this code, so the
@@ -3726,7 +3742,8 @@ def proposes(text):
                 continue
         return True
     return False
-PROPOSAL = re.compile(r"\b(should|propos\w*|suggest\w*|recommend\w*|replace with|instead|would|could|change (?:it |this )?to|rewrit\w*|becomes?|example|e\.g\.|such as|consider|cover|prefer\w*|expected|want|(?:constructed|built|crafted) as)\b", re.I)
+PROPOSAL = re.compile(r"\b(should|propos\w*|suggest\w*|recommend\w*|replace with|instead|would|could|change (?:it |this )?to|rewrit\w*|becomes?|example|e\.g\.|such as|consider|cover|prefer\w*|expected|want|(?:constructed|built|crafted) as"
+                      r"|(?:an?|any|some) [\w-]+(?: [\w-]+)? like)\b", re.I)
 
 def association(start):
     # The citation a quote is written about: the nearest one before it in the
