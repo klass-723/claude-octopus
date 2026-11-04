@@ -3290,11 +3290,27 @@ def in_fence(start, end):
     i = bisect_right(fence_starts, end - 1) - 1
     return i >= 0 and fence_ranges[i][1] > start
 
+# sail-cruisey #3400: "> `code`" wraps a quoted line in a code span. The span's
+# backticks are markdown; the whole line is the quote, inner backticks included.
+# A line without inner backticks is one span, so it is not read again inline.
+# One with them may be several spans ("`a` calls `b`"), so those still count.
+WRAPPED_LINE = re.compile(r"(`+)(?=[^`])(.*[^`])\1[ \t]*")
+wrapped_lines = []
 for match in re.finditer(r"(?:^[ \t]*>[^\n]*(?:\n|$))+", resp, re.M):
     if in_fence(match.start(), match.end()):
         continue
-    lines = [re.sub(r"^[ \t]*>+ ?", "", l) for l in match.group(0).split("\n")]
-    lines = [l for l in lines if l.strip()]
+    lines = []
+    offset = match.start()
+    for raw in match.group(0).split("\n"):
+        line = re.sub(r"^[ \t]*>+ ?", "", raw)
+        wrapped = WRAPPED_LINE.fullmatch(line)
+        if wrapped:
+            line = wrapped.group(2)
+            if "`" not in line:
+                wrapped_lines.append((offset, offset + len(raw)))
+        if line.strip():
+            lines.append(line)
+        offset += len(raw) + 1
     if lines:
         units.append((match.start(), match.end(), "blockquote", lines, [], ""))
 TICKS = re.compile(r"`+")
@@ -3351,7 +3367,8 @@ def code_spans():
             yield open_start, closer.end(), body
         pos = closer.end()
 for span_start, span_end, body in code_spans():
-    if in_fence(span_start, span_end):
+    if in_fence(span_start, span_end) or any(
+            start <= span_start and span_end <= end for start, end in wrapped_lines):
         continue
     units.append((span_start, span_end, "inline", [body.strip()], [], ""))
 # The "path:line" list shape: a line holding only a citation, followed by the
