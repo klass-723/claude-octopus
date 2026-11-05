@@ -15,7 +15,7 @@ if ! declare -f _is_cursor_agent_binary >/dev/null 2>&1; then
     source "${_preflight_lib_dir}/cursor-agent.sh" 2>/dev/null || true
 fi
 
-# The council roster a session has pinned, if any. octocodex sets
+# The council roster a session has pinned, if any. A Codex-led session sets
 # OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=claude,agy because Codex is the lead, not a
 # seat, so preflight must check exactly those seats rather than every
 # detectable provider (sail-cruisey #2901). Prints canonical provider ids, one
@@ -35,6 +35,8 @@ octo_preflight_roster() {
         seen="${seen}${provider} "
         printf '%s\n' "$provider"
     done
+    # A separator-only policy can validate without yielding a council seat.
+    [[ "$seen" != " " ]] || return 2
 }
 
 # True when no roster is pinned, or the provider is on it.
@@ -775,8 +777,9 @@ preflight_check() {
         fi
     fi
 
-    # v7.9.1: Only need ONE provider to work
-    if [[ "$providers_found" -eq 0 ]]; then
+    # Without a pinned roster, at least one detectable provider must work.
+    # Pinned rosters were checked above; unchecked seats stay unchecked.
+    if [[ -z "$roster" && "$providers_found" -eq 0 ]]; then
         echo ""
         echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${RED}║  ❌ NO AI PROVIDERS FOUND                                     ║${NC}"
@@ -802,7 +805,7 @@ preflight_check() {
     fi
 
     # Check if at least one provider is authenticated
-    if [[ "$ready_provider_count" -eq 0 ]]; then
+    if [[ -z "$roster" && "$ready_provider_count" -eq 0 ]]; then
         echo ""
         echo -e "${YELLOW}╔═══════════════════════════════════════════════════════════════╗${NC}"
         echo -e "${YELLOW}║  ⚠️  PROVIDERS FOUND BUT NOT READY                            ║${NC}"
@@ -902,8 +905,12 @@ preflight_check() {
         return 1
     fi
 
-    log INFO "Pre-flight checks passed 🐙"
-    echo -e "${GREEN}✓${NC} All 8 tentacles accounted for and ready to work!"
+    if [[ -n "$roster_unchecked" ]]; then
+        log INFO "Preflight completed with unchecked council seats: $roster_unchecked"
+    else
+        log INFO "Pre-flight checks passed 🐙"
+        echo -e "${GREEN}✓${NC} All 8 tentacles accounted for and ready to work!"
+    fi
 
     # v8.19: Provider smoke test (Issue #34)
     if ! provider_smoke_test "$force_check"; then

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Preflight checks the council roster a session pins with
 # OCTOPUS_COUNCIL_DEFAULT_PROVIDERS, and says when it ran inside a sandbox
-# (sail-cruisey #2901: octocodex pins claude,agy because Codex is the lead).
+# (sail-cruisey #2901: a Codex-led session pins claude,agy; Codex is the lead).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,7 +9,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$SCRIPT_DIR/../helpers/test-framework.sh"
 test_suite "Preflight council roster"
 
-log() { :; }
+log() { case "$1" in INFO|WARN|ERROR) shift; printf '%s\n' "$*" ;; esac; }
 export HOME="$TEST_TMP_DIR/home"
 WORKSPACE_DIR="$TEST_TMP_DIR/workspace"
 mkdir -p "$HOME" "$WORKSPACE_DIR"
@@ -32,6 +32,13 @@ test_case "an invalid roster is rejected"
 if ! OCTOPUS_COUNCIL_DEFAULT_PROVIDERS='claude,nope' octo_preflight_roster >/dev/null 2>&1; then test_pass
 else test_fail "invalid roster accepted"; fi
 
+for whitespace_roster in '   ' $'\t' $'\n' ' , , '; do
+    test_case "a roster without any seats is rejected ($(printf '%q' "$whitespace_roster"))"
+    if OCTOPUS_COUNCIL_DEFAULT_PROVIDERS="$whitespace_roster" octo_preflight_roster >/dev/null 2>&1; then
+        test_fail "whitespace-only roster accepted"
+    else test_pass; fi
+done
+
 # preflight_check with every probe stubbed: readiness from a table, no smoke.
 READY_CALLS="$TEST_TMP_DIR/ready-calls"
 # Providers named in STUB_UNREADY report degraded; the rest are available.
@@ -48,6 +55,12 @@ check_codex_auth_freshness() { return 0; }
 detect_enterprise_backend() { :; }
 provider_smoke_test() { return 0; }
 run_preflight() { rm -f "$READY_CALLS" "$PREFLIGHT_CACHE_FILE"; preflight_check true 2>&1; }
+
+test_case "an invalid whitespace roster fails before any provider is checked"
+out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=$' \t\n' run_preflight)" && rc=0 || rc=$?
+if [[ "$rc" -ne 0 && ! -e "$READY_CALLS" && "$out" == *"is not a valid council roster"* &&
+      "$(preflight_cache_read)" == 1 ]]; then test_pass
+else test_fail "rc=$rc out=$out"; fi
 
 test_case "with claude,agy pinned, preflight checks exactly those seats and names the list"
 STUB_UNREADY=""
@@ -69,6 +82,18 @@ calls=" $(tr '\n' ' ' < "$READY_CALLS")"
 expected=" $(_preflight_provider_candidates | tr '\n' ' ')"
 if [[ "$rc" -eq 0 && "$calls" == "$expected" && "$calls" != *" claude "* && "$out" != *"council roster"* ]]; then test_pass
 else test_fail "rc=$rc calls='$calls' expected='$expected'"; fi
+
+for blocked_status in missing degraded; do
+    test_case "without a roster, $blocked_status providers still fail preflight"
+    out="$(
+        octo_provider_readiness_result() {
+            printf '{"provider":"%s","status":"%s","reason_code":"test-unready","remediation":"Configure provider."}\n' "$1" "$blocked_status"
+        }
+        run_preflight
+    )" && rc=0 || rc=$?
+    if [[ "$rc" -ne 0 && "$(preflight_cache_read)" == 1 ]]; then test_pass
+    else test_fail "rc=$rc out=$out"; fi
+done
 
 test_case "a cached pass is reused only for the same roster"
 STUB_UNREADY=""
@@ -99,6 +124,16 @@ test_case "an undetectable seat does not hide an unready one"
 STUB_UNREADY="claude"
 out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=claude,openai-tools run_preflight)" && rc=0 || rc=$?
 if [[ "$rc" -ne 0 && "$out" == *"seat(s) not ready: claude"* && "$out" != *"not ready: claude openai-tools"* ]]; then test_pass
+else test_fail "rc=$rc out=$out"; fi
+
+test_case "a roster with only undetectable seats passes without claiming they were checked"
+STUB_UNREADY=""
+out="$(OCTOPUS_COUNCIL_DEFAULT_PROVIDERS=openai-tools run_preflight)" && rc=0 || rc=$?
+if [[ "$rc" -eq 0 && ! -e "$READY_CALLS" && "$out" == *"openai-tools: not checked"* &&
+      "$out" == *"Preflight completed with unchecked council seats: openai-tools"* &&
+      "$out" != *"All 8 tentacles accounted for and ready to work!"* &&
+      "$out" != *"NO AI PROVIDERS FOUND"* && "$out" != *"PROVIDERS FOUND BUT NOT READY"* ]] &&
+   [[ "$(preflight_cache_read)" == 0 ]]; then test_pass
 else test_fail "rc=$rc out=$out"; fi
 
 # Static readiness accepts codex from ~/.codex/auth.json alone; the OAuth
