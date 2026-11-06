@@ -2141,8 +2141,9 @@ council_response_is_substantive() {
     # plan, PRD, or security audit files" REVISE was counted as the 2nd provider.)
     # A live evidence root lets the detector distinguish a real citation from
     # a fabricated file:line token. Standalone callers may omit it for plan or
-    # PRD reviews that have no source tree.
-    local f="$1" evidence_root="${2:-}"
+    # PRD reviews that have no source tree. Admission can pass the contribution's
+    # fresh grounding report as $3 so record and decision use the same result.
+    local f="$1" evidence_root="${2:-}" grounding_report="${3:-}"
     [[ -f "$f" ]] || return 1
 
     # 1) Host self-dispatch stub — runner-emitted, exact match. (grep -c … >/dev/null,
@@ -2167,7 +2168,7 @@ council_response_is_substantive() {
     #    be scored as a substantive responder. Fold it in here so the single
     #    substantive gate the quorum tally keys on and the advice-phase `blind` label
     #    agree; the advice phase still re-tests is_blind to label it distinctly.
-    if council_response_is_blind "$f" "$evidence_root"; then
+    if council_response_is_blind "$f" "$evidence_root" "$grounding_report"; then
         return 1
     fi
 
@@ -2514,7 +2515,8 @@ council_response_is_blind() {
     # round instead of eating several. First-person access failure is checked
     # independently of length; less-specific refusal and permission shapes remain
     # brevity-gated to protect genuine reviews that discuss those failures.
-    local f="$1" evidence_root="${2:-}"
+    # Optional $3 carries the report already created for this contribution.
+    local f="$1" evidence_root="${2:-}" grounding_report="${3:-}"
     [[ -f "$f" ]] || return 1
 
     # A first-person access failure is authoritative. Citation-shaped prose is not
@@ -2529,8 +2531,8 @@ council_response_is_blind() {
     # real citation token is not evidence of reading when the code it quotes is
     # invented, so this overrides the citation exemptions below. Seats that quote
     # nothing beside their citations, or whose cited files are unreadable, are
-    # unaffected.
-    if council_response_quotes_fabricated "$f" "$evidence_root"; then
+    # unaffected within the verification budgets.
+    if council_response_quotes_fabricated "$f" "$evidence_root" "$grounding_report"; then
         return 0
     fi
 
@@ -2917,7 +2919,8 @@ print(json.dumps(validated, separators=(",", ":")))
 PY
 }
 
-COUNCIL_EMPTY_GROUNDING_JSON='{"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_verified_in_context":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"quotes_partial":0,"partial_samples":[],"diff_sources":[],"fabricated":false,"unverified_samples":[],"unverified_reasons":[]}'
+COUNCIL_EMPTY_GROUNDING_JSON='{"verification_failed":false,"citations":0,"citations_unresolved":0,"quotes_checked":0,"quotes_verified":0,"quotes_near_line":0,"quotes_attributed":0,"quotes_attributed_unverified":0,"quotes_verified_in_diff_removed":0,"quotes_verified_in_diff_added":0,"quotes_unverified":0,"quotes_unverifiable":0,"quotes_unverifiable_claimed_removed":0,"quotes_unverifiable_unresolved_citation":0,"quotes_unverifiable_command":0,"quotes_unverifiable_proposed":0,"quotes_unverifiable_prose":0,"quotes_unverifiable_diff_incomplete":0,"quotes_omitted":0,"quotes_partial":0,"response_oversized":false,"diff_truncated":false,"diff_unavailable":false,"diff_sources":[],"fabricated":false,"unverified_samples":[]}'
+COUNCIL_FAILED_GROUNDING_JSON="${COUNCIL_EMPTY_GROUNDING_JSON/\"verification_failed\":false/\"verification_failed\":true}"
 
 council_response_quote_verification_json() {
     # Verify the code a seat QUOTES next to its `path:line` citations (sail-cruisey
@@ -2942,8 +2945,14 @@ council_response_quote_verification_json() {
     # ">" blockquotes and bare lines under a citation-only line are quotes too.
     local response_path="$1" evidence_root="$2"
     local empty="$COUNCIL_EMPTY_GROUNDING_JSON"
+    local failed="$COUNCIL_FAILED_GROUNDING_JSON" report
     [[ -f "$response_path" && -n "$evidence_root" && -d "$evidence_root" ]] || { printf '%s\n' "$empty"; return 0; }
     command -v python3 >/dev/null 2>&1 || { printf '%s\n' "$empty"; return 0; }
+    # Bound parsing, evidence reads and descendants together. Missing supervision
+    # is a verification failure, not an unbounded fallback.
+    if ! declare -f _octo_run_bare_probe_with_timeout >/dev/null 2>&1; then
+        source "${_council_registry_dir}/bounded-probe.sh" 2>/dev/null || { printf '%s\n' "$failed"; return 0; }
+    fi
     # Every readable --context-file is passed as a trailing argv entry. Each one
     # can be the target of a citation ("phase-3-plan.md:8"), and those that look
     # like a unified diff, plus `git diff` of the evidence root against
@@ -2955,14 +2964,25 @@ council_response_quote_verification_json() {
         [[ -f "$ctx" && -r "$ctx" ]] && diff_context_files+=("$ctx")
     done
     # Source evidence is data; never import project-local Python modules.
-    OCTOPUS_COUNCIL_DIFF_BASE="${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}" \
-    python3 -I - "$response_path" "$evidence_root" ${diff_context_files[@]+"${diff_context_files[@]}"} <<'PY' 2>/dev/null || printf '%s\n' "$empty"
+    # Bash 3.2 misparses quoted heredocs inside command substitutions. Redirect
+    # the group so Python inherits its input before the report is captured.
+    if {
+        # Verification is not a provider dispatch. Preserve peer accounting and
+        # event logs while reusing the strict 15-second process-group budget.
+        report="$(OCTO_EVENT_LOG="" OCTOPUS_AUTO_PEER_DISPATCH_MARKER="" \
+        OCTOPUS_COUNCIL_DIFF_BASE="${OCTOPUS_COUNCIL_DIFF_BASE:-HEAD}" \
+        _octo_run_bare_probe_with_timeout 15 13 2 \
+        python3 -I - "$response_path" "$evidence_root" ${diff_context_files[@]+"${diff_context_files[@]}"} 2>/dev/null)"
+    } <<'PY'
 import html
 import json
+import math
 import os
 import re
+import selectors
 import subprocess
 import sys
+import time
 from bisect import bisect_left, bisect_right
 from pathlib import Path
 
@@ -2978,14 +2998,17 @@ NEAR_LINES = 40
 MIN_TOKENS = 3
 MIN_CHARS = 20
 
-result = {"citations": 0, "citations_unresolved": 0, "quotes_checked": 0, "quotes_verified": 0,
+result = {"verification_failed": False, "citations": 0, "citations_unresolved": 0, "quotes_checked": 0, "quotes_verified": 0,
           "quotes_near_line": 0, "quotes_attributed": 0, "quotes_attributed_unverified": 0,
           "quotes_verified_in_diff_removed": 0, "quotes_verified_in_diff_added": 0,
-          "quotes_verified_in_context": 0, "quotes_unverified": 0, "quotes_unverifiable": 0,
+          "quotes_unverified": 0, "quotes_unverifiable": 0,
           "quotes_unverifiable_claimed_removed": 0, "quotes_unverifiable_unresolved_citation": 0,
           "quotes_unverifiable_command": 0, "quotes_unverifiable_proposed": 0,
-          "quotes_partial": 0, "partial_samples": [], "diff_sources": [],
-          "fabricated": False, "unverified_samples": [], "unverified_reasons": []}
+          "quotes_unverifiable_prose": 0, "quotes_unverifiable_diff_incomplete": 0,
+          "quotes_omitted": 0, "quotes_partial": 0, "response_oversized": False, "diff_truncated": False, "diff_unavailable": False, "diff_sources": [],
+          # Preserve the report schema without copying provider excerpts into
+          # persistent contribution records. Counts retain the rejection reason.
+          "fabricated": False, "unverified_samples": []}
 
 def emit():
     print(json.dumps(result, separators=(",", ":")))
@@ -2995,13 +3018,17 @@ try:
     with open(sys.argv[1], "rb") as handle:
         raw = handle.read(MAX_RESPONSE_BYTES + 1)
     if len(raw) > MAX_RESPONSE_BYTES:
+        result["response_oversized"] = True
         emit()
     # Some transports deliver Markdown HTML-escaped ("&gt; quote", "=&gt;").
     # Unescape before parsing so blockquotes and operators read as written; the
     # file side is unescaped the same way so an HTML source still matches.
-    resp = html.unescape(raw.decode("utf-8", "replace"))
+    raw_resp = raw.decode("utf-8", "replace")
+    policy_text_valid = raw_resp.encode("utf-8") == raw
+    resp = html.unescape(raw_resp)
     root = Path(sys.argv[2]).resolve(strict=True)
 except (OSError, RuntimeError, ValueError):
+    result["verification_failed"] = True
     emit()
 
 context_files = []
@@ -3025,33 +3052,37 @@ def specific(text):
 # pruned from the suffix index; containment and no-symlink rules still apply.
 INDEX_SKIP = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv"}
 suffix_index = None
+suffix_index_complete = False
 def build_index():
-    paths, entries = [], 0
+    paths, entries, complete = [], 0, True
     stack = [(root, 0)]
-    while stack and entries < MAX_INDEX_ENTRIES:
+    while stack:
         directory, depth = stack.pop()
         try:
-            listing = list(os.scandir(directory))
+            with os.scandir(directory) as listing:
+                for entry in listing:
+                    entries += 1
+                    if entries >= MAX_INDEX_ENTRIES:
+                        return [], False
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            # A nested checkout (.claude/worktrees/<issue>) is
+                            # another tree; its copies are not this root's files.
+                            if (entry.name not in INDEX_SKIP
+                                    and not os.path.lexists(os.path.join(entry.path, ".git"))):
+                                if depth < MAX_INDEX_DEPTH:
+                                    stack.append((Path(entry.path), depth + 1))
+                                else:
+                                    complete = False
+                        elif entry.is_file(follow_symlinks=False):
+                            paths.append((entry.path[::-1], Path(entry.path)))
+                    except OSError:
+                        complete = False
         except OSError:
-            continue
-        for entry in listing:
-            entries += 1
-            if entries >= MAX_INDEX_ENTRIES:
-                break
-            try:
-                if entry.is_symlink():
-                    continue
-                if entry.is_dir(follow_symlinks=False):
-                    # A nested checkout (.claude/worktrees/<issue>) is another
-                    # tree; its copies are not this root's files.
-                    if (entry.name not in INDEX_SKIP and depth < MAX_INDEX_DEPTH
-                            and not os.path.lexists(os.path.join(entry.path, ".git"))):
-                        stack.append((Path(entry.path), depth + 1))
-                elif entry.is_file(follow_symlinks=False):
-                    paths.append(Path(entry.path))
-            except OSError:
-                continue
-    return paths
+            complete = False
+    return sorted(paths), complete
 
 def contained(candidate):
     try:
@@ -3080,13 +3111,28 @@ def resolve_citation(relative):
         return hits[0]
     # 3) A unique path suffix under the root, including hidden directories. A
     #    bare basename counts too when only one file has it (sail-cruisey #3295:
-    #    "pr-watchdog.yml:249" for .github/workflows/pr-watchdog.yml).
-    global suffix_index
+    #    "pr-watchdog.yml:249" for .github/workflows/pr-watchdog.yml). A shared
+    #    name resolves only to the one the seat also cited by full path (below).
+    global suffix_index, suffix_index_complete
     if suffix_index is None:
-        suffix_index = build_index()
-    hits = [p for p in suffix_index if ("/" + p.as_posix()).endswith(tail)]
+        suffix_index, suffix_index_complete = build_index()
+    # An unread subtree can contain another hit for any apparent unique suffix.
+    if not suffix_index_complete:
+        return None
+    # Reversing paths turns a component suffix into a sorted prefix range.
+    # Only its first two entries are needed to distinguish unique from ambiguous.
+    key = tail[::-1]
+    at = bisect_left(suffix_index, (key,))
+    hits = [p for suffix, p in suffix_index[at:at + 2] if suffix.startswith(key)]
     if len(hits) > 1:
+        # Keep every same-named file, bounded, for the full-path tie-break below.
+        hits = []
+        for suffix, p in suffix_index[at:at + 64]:
+            if not suffix.startswith(key):
+                break
+            hits.append(p)
         ambiguous[relative.as_posix()] = hits
+        return None
     return hits[0] if len(hits) == 1 else None
 ambiguous = {}
 
@@ -3131,10 +3177,11 @@ def resolve_outside_form(raw):
             return candidate
     return None
 
-# Resolve each distinct path once; a long response repeats the same few paths,
-# and an unresolved multi-part one rescans the whole suffix index.
+# Resolve each distinct path once, using the shared sorted suffix index.
 resolved = {}
+citation_matches = []
 for match in CITATION.finditer(resp):
+    citation_matches.append(match)
     raw = match.group(1).strip()
     if raw not in resolved:
         relative = Path(raw)
@@ -3156,7 +3203,7 @@ for raw, hits in ambiguous.items():
         chosen = [hit for hit in hits if hit.resolve() in cited_in_full]
         if len(chosen) == 1:
             resolved[raw] = chosen[0]
-for match in CITATION.finditer(resp):
+for match in citation_matches:
     raw = match.group(1).strip()
     candidate = resolved[raw]
     token = (match.start(), match.end(), candidate, int(match.group(2)))
@@ -3189,11 +3236,13 @@ if not citations:
     emit()
 
 # Quote units: fenced blocks, ">" blockquote runs, inline backtick spans outside
-# fences, and bare code lines directly under a citation-only line. Each unit is
+# those blocks, and bare code lines directly under a citation-only line. Each unit is
 # (outer start, end, kind, block lines, removed lines, fence info).
 GUTTER = re.compile(r"^\s*\d+\s*[:|]\s?")
+DIFF_HUNK = re.compile(r"^@@ -[0-9]{1,10}(?:,([0-9]{1,10}))? \+[0-9]{1,10}(?:,([0-9]{1,10}))? @@(?: .*)?\r?$", re.M)
 units = []
 fence_ranges = []
+fences = []
 def policy_findings_blocks():
     # The feature workflow's structured findings block is JSON, not a code
     # quote; feature-analysis.py checks each finding by digest (sail-cruisey
@@ -3211,11 +3260,24 @@ def policy_findings_blocks():
         return value
     def nonfinite(_):
         raise ValueError("nonfinite JSON number")
-    lines, offsets, offset = resp.split("\n"), [], 0
-    for line in lines:
+    def finite_float(text):
+        value = float(text)
+        if not math.isfinite(value):
+            raise ValueError("nonfinite JSON number")
+        return value
+    # Runtime extraction rejects the entire response on any invalid block or
+    # more than 100 findings in total. Such a response has no policy-digest
+    # coverage, so none of its blocks may bypass ordinary quote verification.
+    if not policy_text_valid:
+        return []
+    # JSON and fence syntax belong to the raw transport text. Decoding entities
+    # can break JSON strings or invent markers that policy ingestion never saw.
+    # Quote units still use resp, so translate line boundaries to that view.
+    lines, offsets, offset = raw_resp.splitlines(), [], 0
+    for line in raw_resp.splitlines(keepends=True):
         offsets.append(offset)
-        offset += len(line) + 1
-    blocks, index = [], 0
+        offset += len(html.unescape(line))
+    blocks, index, total_findings = [], 0, 0
     while index < len(lines):
         match = re.fullmatch(r"\s*(`{3,}|~{3,})octopus-policy-findings\s*", lines[index])
         marker = match.group(1) if match else None
@@ -3228,16 +3290,24 @@ def policy_findings_blocks():
             continue
         while index < len(lines) and not re.fullmatch(r"\s*" + re.escape(marker) + r"\s*", lines[index]):
             index += 1
+        # Analysis can fall back to the first body line when the full source
+        # quotation exceeds 16 KiB, but it rejects an oversized first line too.
+        if match and (index == len(lines) or len(lines[first]) > 16384):
+            return []
         if match and index < len(lines):
             try:
                 value = json.loads("\n".join(lines[first:index]), object_pairs_hook=pairs,
-                                   parse_constant=nonfinite)
+                                   parse_constant=nonfinite, parse_float=finite_float)
             except (ValueError, RecursionError):
-                value = None
+                return []
             if isinstance(value, dict):
                 value = value.get("findings")
-            if isinstance(value, list) and all(isinstance(item, dict) for item in value):
-                blocks.append((offsets[first - 1], offsets[index] + len(lines[index])))
+            if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+                return []
+            total_findings += len(value)
+            if total_findings > 100:
+                return []
+            blocks.append((offsets[first - 1], offsets[index] + len(html.unescape(lines[index]))))
         index += 1
     return blocks
 
@@ -3248,18 +3318,65 @@ def in_policy_block(start):
     i = bisect_right(policy_starts, start) - 1
     return i >= 0 and policy_ranges[i][1] > start
 
-for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
-    fence_ranges.append((match.start(), match.end()))
-    # A findings block is skipped as a unit; its range still hides code spans.
+def capture_fence(opener, end, body_end):
+    # Accepted raw policy blocks can sit inside an entity-decoded ordinary
+    # fence. Split its quote units so neither side absorbs the findings JSON.
+    start, body_start = opener.start(), opener.end()
+    index = max(0, bisect_right(policy_starts, body_start) - 1)
+    for index in range(index, len(policy_ranges)):
+        policy_start, policy_end = policy_ranges[index]
+        if policy_start >= body_end:
+            break
+        if policy_end <= body_start:
+            continue
+        fences.append((start, policy_start, opener.group(2), resp[body_start:policy_start]))
+        start = body_start = policy_end
+    fences.append((start, end, opener.group(2), resp[body_start:body_end]))
+
+opener = None
+# A closing fence uses the same marker and at least the opening width. Scan
+# marker lines once so mismatched or unterminated fences cannot hide quotes.
+# Treat malformed info strings as openers too, matching the verdict parser.
+for match in re.finditer(r"^ {0,3}(`{3,}|~{3,})([^\n]*)(?:\n|$)", resp, re.M):
+    marker, info = match.groups()
+    # Policy markers cannot open or close an ordinary fence.
     if in_policy_block(match.start()):
         continue
-    info = match.group(1).strip().lower()
-    lines = match.group(2).split("\n")
+    if opener is None:
+        opener = match
+    elif (marker[0] == opener.group(1)[0] and len(marker) >= len(opener.group(1))
+          and not info.strip()):
+        capture_fence(opener, match.end(), match.start())
+        opener = None
+if opener is not None:
+    capture_fence(opener, len(resp), len(resp))
+for start, end, info, body in fences:
+    fence_ranges.append((start, end))
+    info = info.strip().lower()
+    lines = body.split("\n")
     diff_like = info in ("diff", "patch") or any(l.startswith(("@@", "+++ ", "--- ")) for l in lines)
     kept, removed_kept = [], []
-    for line in lines:
+    remaining, header_end = None, -1
+    for index, line in enumerate(lines):
         if diff_like:
-            if line.startswith(("@@", "+++ ", "--- ")):
+            # Git metadata does not quote source or consume hunk capacity.
+            if line.rstrip("\r") == "\\ No newline at end of file":
+                continue
+            hunk = DIFF_HUNK.fullmatch(line)
+            if hunk:
+                remaining = [int(n) if n is not None else 1 for n in hunk.groups()]
+                continue
+            if remaining is not None and any(remaining):
+                context = line.startswith(" ") or (not line.rstrip("\r") and all(remaining))
+                consumed = (int(context or line.startswith("-")), int(context or line.startswith("+")))
+                remaining = ([left - n for left, n in zip(remaining, consumed)]
+                             if any(consumed) and all(n <= left for n, left in zip(consumed, remaining)) else None)
+            elif (line.startswith("--- ") and index + 2 < len(lines)
+                  and lines[index + 1].startswith("+++ ") and DIFF_HUNK.fullmatch(lines[index + 2])):
+                # A file header is a pair before a hunk. Inside the hunk, or
+                # in a headerless excerpt, +++/--- can be ++/-- source code.
+                header_end = index + 1
+            if index <= header_end:
                 continue
             if line.startswith("-"):
                 # Removed code: verifiable only against the diff's removed side.
@@ -3270,13 +3387,12 @@ for match in re.finditer(r"```([^\n]*)\n(.*?)```", resp, re.S):
                 line = line[1:]
         if line.strip():
             kept.append(line)
-    units.append((match.start(), match.end(), "fence", kept, removed_kept, info))
+    units.append((start, end, "fence", kept, removed_kept, info))
 
-# Findings blocks follow feature-analysis.py, not this fence pass, so add
-# their ranges and merge any overlap. Fence ranges are then sorted and
-# disjoint: only the last fence starting before the span ends can overlap it.
-# A bisect keeps a response with many fences and spans linear-log instead of
-# quadratic.
+# The fence scan skips findings blocks, so add their ranges (which also hide
+# code spans inside them) and merge any overlap. Fence ranges are then sorted and disjoint: only the last
+# fence starting before the span ends can overlap it. A bisect keeps a
+# response with many fences and spans linear-log instead of quadratic.
 merged = []
 for f_start, f_end in sorted(fence_ranges + policy_ranges):
     if merged and f_start < merged[-1][1]:
@@ -3292,85 +3408,80 @@ def in_fence(start, end):
 
 # sail-cruisey #3400: "> `code`" wraps a quoted line in a code span. The span's
 # backticks are markdown; the whole line is the quote, inner backticks included.
-# A line without inner backticks is one span, so it is not read again inline.
-# One with them may be several spans ("`a` calls `b`"), so those still count.
 WRAPPED_LINE = re.compile(r"(`+)(?=[^`])(.*[^`])\1[ \t]*")
-wrapped_lines = []
+blockquote_ranges = []
 for match in re.finditer(r"(?:^[ \t]*>[^\n]*(?:\n|$))+", resp, re.M):
     if in_fence(match.start(), match.end()):
         continue
-    lines = []
-    offset = match.start()
-    for raw in match.group(0).split("\n"):
-        line = re.sub(r"^[ \t]*>+ ?", "", raw)
-        wrapped = WRAPPED_LINE.fullmatch(line)
-        if wrapped:
-            line = wrapped.group(2)
-            if "`" not in line:
-                wrapped_lines.append((offset, offset + len(raw)))
-        if line.strip():
-            lines.append(line)
-        offset += len(raw) + 1
+    lines = [re.sub(r"^[ \t]*>+ ?", "", l) for l in match.group(0).split("\n")]
+    # Whole-line inline formatting is Markdown, not literal source backticks.
+    lines = [(lambda w: w.group(2) if w else l)(WRAPPED_LINE.fullmatch(l.lstrip(" \t")))
+             for l in lines if l.strip()]
     if lines:
+        blockquote_ranges.append((match.start(), match.end()))
         units.append((match.start(), match.end(), "blockquote", lines, [], ""))
-TICKS = re.compile(r"`+")
-def escaped_at(index):
-    # An odd run of backslashes before a backtick escapes it.
-    run = 0
-    while index - run - 1 >= 0 and resp[index - run - 1] == "\\":
-        run += 1
-    return run % 2 == 1
-def code_spans():
-    # sail-cruisey #3338: a run of N backticks closes only on a run of exactly
-    # N, so ``a `b` c`` is one span, and a seat's \` inside a single-backtick
-    # span is a literal backtick. A span never crosses a line.
-    def run_at(match):
-        # An escaped first backtick is a literal; the rest of the run counts.
-        begin = match.start() + (1 if escaped_at(match.start()) else 0)
-        return begin, match.end()
-    pos = 0
-    while True:
-        opener = TICKS.search(resp, pos)
-        if not opener:
-            return
-        open_start, open_end = run_at(opener)
-        width = open_end - open_start
-        if width == 0:
-            pos = opener.end()
-            continue
-        line_end = resp.find("\n", open_end)
-        line_end = len(resp) if line_end < 0 else line_end
-        def find_closer(escapes):
-            closer = TICKS.search(resp, open_end, line_end)
-            while closer:
-                begin = run_at(closer)[0] if escapes else closer.start()
-                if closer.end() - begin == width:
-                    return closer, begin
-                closer = TICKS.search(resp, closer.end(), line_end)
-            return None, None
-        # CommonMark: no escapes inside a span, so `\` is a backslash. A seat's
-        # paired \`...\` inside a span is read as literal backticks instead.
-        closer, close_start = find_closer(False)
-        if width == 1:
-            alt, alt_start = find_closer(True)
-            if alt is not None and alt_start != close_start:
-                inner = resp[open_end:alt_start]
-                if inner.count("\\`") >= 2 and inner.count("\\`") % 2 == 0:
-                    closer, close_start = alt, alt_start
-        if closer is None:
-            pos = opener.end()
-            continue
-        body = resp[open_end:close_start]
-        if width == 1 and body.count("\\`") >= 2:
-            body = body.replace("\\`", "`")
-        if body.strip():
-            yield open_start, closer.end(), body
-        pos = closer.end()
-for span_start, span_end, body in code_spans():
-    if in_fence(span_start, span_end) or any(
-            start <= span_start and span_end <= end for start, end in wrapped_lines):
+blockquote_starts = [q_start for q_start, _ in blockquote_ranges]
+# A code span closes with the same backtick-run width as its opener. Index the
+# next equal run once, so unmatched delimiters and many widths cannot cause
+# repeated suffix scans. Embedded runs of other widths remain literal source.
+backticks = list(re.finditer(r"`+", resp))
+next_backtick = [None] * len(backticks)
+last_backtick = {}
+for backtick_index in range(len(backticks) - 1, -1, -1):
+    width = len(backticks[backtick_index].group())
+    next_backtick[backtick_index] = last_backtick.get(width)
+    last_backtick[width] = backtick_index
+backtick_starts = [b.start() for b in backticks]
+# sail-cruisey #3338: a seat writes `a \`b\` c` for a span holding backticks.
+# Paired \` inside a single-backtick span are literal; a lone `\` stays a
+# backslash, as in CommonMark.
+ESCAPED_SPAN = re.compile(r"((?:[^`\\\n]|\\[^\n])*?)`(?!`)")
+def escaped_pair_span(opening):
+    if len(opening.group()) != 1:
+        return None
+    match = ESCAPED_SPAN.match(resp, opening.end())
+    if not match or match.group(1).count("\\`") < 2 or match.group(1).count("\\`") % 2:
+        return None
+    # The closer may end a run whose first backtick is escaped ("\``").
+    index = bisect_right(backtick_starts, match.end() - 1) - 1
+    if index < 0 or backticks[index].end() != match.end():
+        return None
+    return index, match.group(1).replace("\\`", "`")
+# A span stays inside one paragraph: it never crosses a blank line or a line
+# that opens a new block (list item, heading, quote, table row, fence). A seat's
+# unclosed backtick in link text ("[`a.ts:3](file:///a.ts#L3)") is literal.
+# Otherwise one stray backtick pairs with the next paragraph and turns prose into
+# "quotes" (sail-cruisey #3338).
+SPAN_BREAK = re.compile(r"\n[ \t]*(?:\r?\n|[-+*][ \t]|\d{1,9}[.)][ \t]|#{1,6}[ \t]|>|\||```|~~~)")
+def link_text_opener(opening, closing):
+    if resp[opening.start() - 1:opening.start()] != "[":
+        return False
+    link = resp.find("](", opening.end())
+    return 0 <= link < closing.start()
+backtick_index = 0
+while backtick_index < len(backticks):
+    opening = backticks[backtick_index]
+    closing_index = next_backtick[backtick_index]
+    escaped_body = None
+    paired = escaped_pair_span(opening)
+    if paired is not None:
+        closing_index, escaped_body = paired
+    backtick_index += 1
+    if closing_index is None:
         continue
-    units.append((span_start, span_end, "inline", [body.strip()], [], ""))
+    closing = backticks[closing_index]
+    if SPAN_BREAK.search(resp, opening.end(), closing.start()) or link_text_opener(opening, closing):
+        continue
+    quote_index = bisect_right(blockquote_starts, closing.end() - 1) - 1
+    if in_fence(opening.start(), closing.end()) or (
+            quote_index >= 0 and blockquote_ranges[quote_index][1] > opening.start()):
+        continue
+    # Markdown code spans replace embedded line endings with spaces.
+    body = re.sub(r"\r\n?|\n", " ", resp[opening.end():closing.start()])
+    if escaped_body is not None:
+        body = escaped_body
+    units.append((opening.start(), closing.end(), "inline", [body.strip()], [], ""))
+    backtick_index = closing_index + 1
 # The "path:line" list shape: a line holding only a citation, followed by the
 # quoted source line with no markup. These can only add verified evidence; an
 # unmatched bare line may be prose, so it is never counted against the seat.
@@ -3417,7 +3528,7 @@ def checkable(text):
     return specific(text)
 
 # GFM table rows: a delimiter row, the header line above it, and the rows
-# below it that still contain a pipe, up to a line that starts another block
+# below it until a blank line or a line that starts another block
 # (heading, quote, fence, list item, thematic break or HTML). Only a code span
 # in one of these rows can carry a table-escaped "\|".
 DELIMITER_ROW = re.compile(r"^[ \t]*\|?(?:[ \t]*:?-+:?[ \t]*\|)*[ \t]*:?-+:?[ \t]*\|?[ \t]*$")
@@ -3425,20 +3536,22 @@ BLOCK_START = re.compile(r"^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|```|~~~|[-+*][ \t]|\d{1
 table_ranges = []
 resp_lines = []
 offset = 0
-for raw in resp.split("\n"):
-    resp_lines.append((offset, offset + len(raw), raw))
-    offset += len(raw) + 1
-def cell_count(text):
-    # Unescaped pipes separate cells; one leading and one trailing pipe are
-    # borders. GFM requires the header and delimiter rows to match. A
-    # backslash escapes the next character, so "\\|" is an escaped backslash
-    # and then a separator.
-    row_text = re.sub(r"\\.", "x", text.strip())
-    if row_text.startswith("|"):
-        row_text = row_text[1:]
-    if row_text.endswith("|"):
-        row_text = row_text[:-1]
-    return row_text.count("|") + 1
+# Parse structure before entity decoding: "&#124;" is cell content, never a
+# separator. Keep offsets in the decoded response used by quote units.
+for raw_line in raw_resp.split("\n"):
+    end = offset + len(html.unescape(raw_line))
+    resp_lines.append((offset, end, raw_line))
+    offset = end + 1
+def table_cells(text):
+    # Consume escape pairs before recognizing separators, including inside
+    # backticks. GFM splits cells before it parses inline code spans.
+    separators = [-1] + [m.start() for m in re.finditer(r"\\.|(\|)", text) if m.group(1)] + [len(text)]
+    cells = [(left + 1, right) for left, right in zip(separators, separators[1:])]
+    if len(cells) > 1 and not text[cells[0][0]:cells[0][1]].strip():
+        cells.pop(0)
+    if len(cells) > 1 and not text[cells[-1][0]:cells[-1][1]].strip():
+        cells.pop()
+    return cells
 
 def indented_code(text):
     # Four columns of indentation make an indented code block, not a table.
@@ -3447,8 +3560,40 @@ def indented_code(text):
 
 def table_line(index):
     l_start, l_end, text = resp_lines[index]
-    return ("|" in text and not indented_code(text) and not BLOCK_START.match(text)
-            and not in_fence(l_start, l_end + 1))
+    return (bool(text.strip()) and not indented_code(text) and not BLOCK_START.match(text)
+            and index not in html_lines and not in_fence(l_start, l_end + 1))
+
+# Raw HTML blocks suppress Markdown table parsing. Comments and the other
+# explicit terminators can cross blank lines; ordinary HTML blocks end at a
+# blank line. Be conservative about tag-like openers at this evidence boundary.
+html_lines = set()
+html_end = None
+for index, (l_start, l_end, text) in enumerate(resp_lines):
+    if html_end is None:
+        if in_fence(l_start, l_end + 1):
+            continue
+        if re.match(r"^ {0,3}<!--", text):
+            html_end = re.compile(r"-->")
+        elif re.match(r"^ {0,3}<\?", text):
+            html_end = re.compile(r"\?>")
+        elif re.match(r"^ {0,3}<!\[CDATA\[", text):
+            html_end = re.compile(r"\]\]>")
+        elif re.match(r"^ {0,3}<![A-Z]", text):
+            html_end = re.compile(r">")
+        else:
+            tag = re.match(r"^ {0,3}<(script|pre|style|textarea)(?:[ \t>]|$)", text, re.I)
+            if tag:
+                html_end = re.compile(r"</" + tag.group(1) + r">", re.I)
+            elif re.match(r"^ {0,3}<", text):
+                html_end = False  # Blank-line-terminated block.
+            else:
+                continue
+    if html_end is False and not text.strip():
+        html_end = None
+        continue
+    html_lines.add(index)
+    if html_end and html_end.search(text):
+        html_end = None
 
 row = 1
 while row < len(resp_lines):
@@ -3456,17 +3601,29 @@ while row < len(resp_lines):
     # The delimiter skips BLOCK_START, since a "- | -" delimiter also looks
     # like a list item.
     if not ("|" in delimiter[2] and DELIMITER_ROW.match(delimiter[2]) and not indented_code(delimiter[2])
-            and not in_fence(delimiter[0], delimiter[1] + 1) and table_line(row - 1)
-            and cell_count(resp_lines[row - 1][2]) == cell_count(delimiter[2])):
+            and row not in html_lines and not in_fence(delimiter[0], delimiter[1] + 1) and table_line(row - 1)
+            and len(table_cells(resp_lines[row - 1][2])) == len(table_cells(delimiter[2]))):
         row += 1
         continue
     last = row
     while last + 1 < len(resp_lines) and table_line(last + 1):
         last += 1
-    table_ranges.append((resp_lines[row - 1][0], resp_lines[last][1]))
+    # Excess body cells are discarded by GFM. Only a complete code span
+    # within one rendered header/body cell may receive table decoding.
+    columns = len(table_cells(delimiter[2]))
+    for index in [row - 1] + list(range(row + 1, last + 1)):
+        l_start, _, text = resp_lines[index]
+        # Decode disjoint pieces once to map raw cell boundaries into the
+        # decoded quote coordinate space, without repeated prefix scans.
+        cursor, decoded_offset = 0, l_start
+        for start, end in table_cells(text)[:columns]:
+            decoded_offset += len(html.unescape(text[cursor:start]))
+            decoded_end = decoded_offset + len(html.unescape(text[start:end]))
+            table_ranges.append((decoded_offset, decoded_end))
+            cursor, decoded_offset = end, decoded_end
     row = last + 2
 
-# Tables come from one forward scan, so they are sorted and disjoint.
+# Cells come from one forward scan, so they are sorted and disjoint.
 table_starts = [t_start for t_start, _ in table_ranges]
 
 def in_table(start, end):
@@ -3516,13 +3673,11 @@ def short_lines(block):
     for line in block:
         variants = [line.strip(), GUTTER.sub("", line).strip()]
         # An elision marker stands for omitted source; it is never a miss.
-        if ELLIPSIS.fullmatch(variants[-1]) or ELLIPSIS.fullmatch(variants[0]):
+        if not variants[-1] or ELLIPSIS.fullmatch(variants[-1]) or ELLIPSIS.fullmatch(variants[0]):
             continue
         if line.strip() and not any(checkable(v) for v in variants):
-            normed = [norm(v) for v in dict.fromkeys(variants) if norm(v)]
-            if normed:
-                out.append(normed)
-    return out
+            out.append([norm(v) for v in dict.fromkeys(variants) if norm(v)])
+    return [v for v in out if v]
 
 def unit_wholes(block):
     whole = " ".join(l.strip() for l in block)
@@ -3555,9 +3710,15 @@ def load(path):
     return entry
 
 ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
-def find_lines(hay, starts, line_numbers, needle, limit=50):
+def find_lines(hay, starts, line_numbers, needle, limit=50, following=()):
     found, at = [], hay.find(needle)
     while at >= 0 and len(found) < limit:
+        end = at + len(needle)
+        for piece in following:
+            pos = hay.find(piece, end)
+            if pos < 0:
+                return found  # Later starts cannot complete this sequence either.
+            end = pos + len(piece)
         found.append(line_numbers[bisect_right(starts, at) - 1] if starts else 1)
         at = hay.find(needle, at + 1)
     return found
@@ -3588,12 +3749,11 @@ def match_variant(text, entry):
     lines = find_lines(hay, starts, line_numbers, needle)
     if lines:
         return lines
-    # An elided quote ("a(...) ... b") verifies when every specific piece does.
+    # Elided fragments must occur in source order without reusing characters.
     pieces = [p for p in ELLIPSIS.split(needle) if specific(p)]
     if len(pieces) > 1 or (pieces and pieces[0] != needle):
-        piece_lines = [find_lines(hay, starts, line_numbers, p) for p in pieces]
-        if all(piece_lines):
-            return piece_lines[0]
+        lines = find_lines(hay, starts, line_numbers, pieces[0], following=pieces[1:])
+        return lines or elided_lines(entry, needle)
     if specific(needle):
         lines = find_lines(*tight_entry(entry), LAYOUT_SPACE.sub("", needle))
         if not lines and "`" not in needle and "`" in hay:
@@ -3634,40 +3794,118 @@ def elided_lines(entry, needle):
             found.append(line_numbers[i])
     return found
 
+# Batch small literal-line queries across all quotes. A failure-link trie scans
+# each source once instead of searching a megabyte file for every short line.
+# Long lines and ordered elisions retain their existing matching path.
+plain_needles = {norm(v) for unit in units for line in unit[3] + unit[4]
+                 for v in unescaped([line.strip(), GUTTER.sub("", line).strip()], True)
+                 if 0 < len(norm(v)) <= 64 and not ELLIPSIS.search(norm(v))}
+plain_automaton = None
+plain_hits = {}
+def plain_line_present(needle, hay):
+    global plain_automaton
+    if len(plain_needles) < 64 or needle not in plain_needles:
+        return None
+    if plain_automaton is None:
+        edges, failure, output, words = [{}], [0], [0], {}
+        for word in plain_needles:
+            state = 0
+            for char in word:
+                if char not in edges[state]:
+                    edges[state][char] = len(edges)
+                    edges.append({}); failure.append(0); output.append(0)
+                state = edges[state][char]
+            words[state] = word
+        queue = list(edges[0].values())
+        for state in queue:
+            output[state] = state if state in words else output[failure[state]]
+            for char, child in edges[state].items():
+                fallback = failure[state]
+                while fallback and char not in edges[fallback]:
+                    fallback = failure[fallback]
+                failure[child] = edges[fallback].get(char, 0)
+                queue.append(child)
+        plain_automaton = edges, failure, output, words
+    if hay not in plain_hits:
+        edges, failure, output, words = plain_automaton
+        parent = list(range(len(edges)))
+        def unseen(state):
+            while parent[state] != state:
+                parent[state] = parent[parent[state]]
+                state = parent[state]
+            return state
+        hits, state = set(), 0
+        for char in hay:
+            while state and char not in edges[state]:
+                state = failure[state]
+            state = edges[state].get(char, 0)
+            terminal = unseen(output[state])
+            while terminal:
+                hits.add(words[terminal])
+                # Retire each matched pattern, including suffix patterns, once.
+                # Repeated source text cannot multiply output-processing work.
+                parent[terminal] = unseen(output[failure[terminal]])
+                terminal = parent[terminal]
+            if len(hits) == len(plain_needles):
+                break
+        plain_hits[hay] = hits
+    return needle in plain_hits[hay]
+
+# Presence is independent of source line numbers. Reuse it across quote units
+# without changing which source supplies the near-line report.
+partial_presence = {}
 def match_unit(wholes, line_variants, entry, misses=None, short=()):
     # A multi-line block verifies as a whole or when at least two thirds of its
     # specific lines are in the file. One generic real line (a signature, an
     # "if (flag) {") can no longer carry an otherwise invented block. When the
-    # threshold or elision carries it, the lines it did not find, short ones
-    # included, are appended to misses.
+    # threshold or elision carries it, report whether any retained line,
+    # short ones included, is missing.
     hay = entry[0]
-    def scan():
-        found, missing = [], []
-        for variants in line_variants:
-            for variant in variants:
-                lines = match_variant(variant, entry)
-                if lines:
-                    found.append(lines)
-                    break
-            else:
-                missing.append(variants[0])
-        return found, missing
-    def record_misses(missing):
-        if misses is not None:
-            misses.extend(missing)
-            misses.extend(variants[0] for variants in short if not any(v in hay for v in variants))
+    variant_matches = {}
+    def match(variant):
+        if variant not in variant_matches:
+            variant_matches[variant] = match_variant(variant, entry)
+        return variant_matches[variant]
+    def missing():
+        for variants in line_variants + list(short):
+            key = (hay, tuple(variants))
+            if key not in partial_presence:
+                partial_presence[key] = True
+                for variant in variants:
+                    # Partial accounting checks every retained fragment, even
+                    # below the specificity floor used by the verdict.
+                    pieces = [p for p in ELLIPSIS.split(norm(variant)) if p]
+                    present = plain_line_present(norm(variant), hay)
+                    if present is None:
+                        present = (match(variant) if not ELLIPSIS.search(norm(variant)) else
+                                   pieces and find_lines(hay, [], [], pieces[0], following=pieces[1:]))
+                    if present:
+                        partial_presence[key] = False
+                        break
+            # Callers only need a boolean. A first miss establishes partial
+            # status without scanning every other distinct short line.
+            if partial_presence[key]:
+                return 1
+        return 0
     for variant in wholes:
-        lines = match_variant(variant, entry)
+        lines = match(variant)
         if lines:
             if misses is not None and norm(variant) not in hay:
                 # Elided fragments matched; a line between them may be invented.
-                record_misses(scan()[1])
+                misses.append(missing())
             return lines
     if not line_variants:
         return []
-    found, missing = scan()
+    found = []
+    for variants in line_variants:
+        for variant in variants:
+            lines = match(variant)
+            if lines:
+                found.append(lines)
+                break
     if found and len(found) * 3 >= len(line_variants) * 2:
-        record_misses(missing)
+        if misses is not None:
+            misses.append(missing())
         return found[0]
     return []
 
@@ -3680,13 +3918,27 @@ for _, _, path, _ in citations:
 # code ("this guard was removed"); that code is in no working-tree file, so it
 # is checked here instead of being reported as fabricated. Loaded lazily, only
 # when a quote fails against the cited files.
-DIFF_HEADER = re.compile(r"^(@@ |diff --git |\+\+\+ |--- )", re.M)
 diff_sides = None
+optional_diff_sides = None
 def split_diff(text):
     removed, added = [], []
+    remaining = None
     for line in html.unescape(text).split("\n"):
-        if line.startswith(("+++ ", "--- ")):
+        hunk = DIFF_HUNK.fullmatch(line)
+        if hunk:
+            remaining = [int(n) if n is not None else 1 for n in hunk.groups()]
             continue
+        # Only unified hunk lines are source evidence. Headers and Markdown
+        # bullets outside the declared line counts cannot manufacture removals.
+        if remaining is None or line.startswith("\\ No newline at end of file"):
+            continue
+        # Git's diff.suppressBlankEmpty omits the marker on empty context.
+        context = line.startswith(" ") or (not line.rstrip("\r") and all(remaining))
+        consumed = (int(context or line.startswith("-")), int(context or line.startswith("+")))
+        if not any(consumed) or any(n > left for n, left in zip(consumed, remaining)):
+            remaining = None
+            continue
+        remaining = [left - n for left, n in zip(remaining, consumed)]
         if line.startswith("-"):
             piece = norm(line[1:])
             if piece:
@@ -3697,17 +3949,47 @@ def split_diff(text):
                 added.append(piece)
     return removed, added
 
-def load_diff_sides():
+def read_git_diff(command, env, limit=MAX_DIFF_BYTES, timeout=10):
+    # Read one byte past the cap to detect truncation without buffering the
+    # remaining diff. Include process exit in the caller's deadline.
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(command, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as proc:
+        try:
+            raw = bytearray()
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while len(raw) <= limit:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    chunk = os.read(proc.stdout.fileno(), min(65536, limit + 1 - len(raw)))
+                    if not chunk:
+                        break
+                    raw.extend(chunk)
+            if len(raw) > limit:
+                proc.kill()
+                return raw
+            return raw if proc.wait(timeout=max(0, deadline - time.monotonic())) == 0 else None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+def load_diff_sides(git_timeout=10):
     removed, added = [], []
     for path in context_files:
         try:
             with open(path, "rb") as handle:
-                data = handle.read(MAX_DIFF_BYTES).decode("utf-8", "replace")
+                raw_diff = handle.read(MAX_DIFF_BYTES + 1)
         except OSError:
             continue
-        if not DIFF_HEADER.search(data):
-            continue  # a plan or prose artifact; its "- " bullets are not removed code
+        data = raw_diff[:MAX_DIFF_BYTES].decode("utf-8", "replace")
+        if not DIFF_HUNK.search(data):
+            continue  # a file header or Markdown rule alone is not diff evidence
+        result["diff_truncated"] |= len(raw_diff) > MAX_DIFF_BYTES
         r, a = split_diff(data)
+        if not r and not a:
+            continue  # a plan or prose artifact; its "- " bullets are not removed code
         removed += r
         added += a
         result["diff_sources"].append("context-file")
@@ -3716,111 +3998,138 @@ def load_diff_sides():
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0")
         try:
-            proc = subprocess.run(["git", "-C", str(root), "diff", "--no-color", "--no-ext-diff",
-                                   "--unified=0", base, "--"],
-                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
-            if proc.returncode == 0 and proc.stdout:
-                r, a = split_diff(proc.stdout[:MAX_DIFF_BYTES].decode("utf-8", "replace"))
+            git_command = ["git", "-C", str(root), "-c", "core.fsmonitor=false"]
+            # Attributes can select clean/process commands even with textconv
+            # disabled. Override every configured driver, including those used by
+            # .git/info/attributes and core.attributesFile. Read names, not values.
+            config = read_git_diff(git_command + ["config", "--null", "--name-only", "--list"], env, 65_536, git_timeout)
+            if config is None or len(config) > 65_536:
+                raise subprocess.SubprocessError("filter configuration unavailable")
+            drivers = {key.rsplit(b".", 1)[0] for key in bytes(config).split(b"\0")
+                       if key.lower().startswith(b"filter.") and
+                       key.rsplit(b".", 1)[-1].lower() in (b"clean", b"process", b"required")}
+            for driver in sorted(drivers):
+                if b"=" in driver:
+                    raise subprocess.SubprocessError("unsafe filter driver name")
+                name = os.fsdecode(driver)
+                git_command += ["-c", name + ".clean=", "-c", name + ".process=",
+                                "-c", name + ".required=false"]
+            raw_diff = read_git_diff(git_command + ["diff", "--no-color", "--no-ext-diff",
+                                                   "--no-textconv", "--unified=0", base, "--"], env, timeout=git_timeout)
+            if raw_diff is None:
+                # A plain evidence directory has no default Git diff. In a
+                # worktree, or with a requested base, failure is missing evidence.
+                result["diff_unavailable"] = base != "HEAD" or any(
+                    (parent / ".git").exists() for parent in (root, *root.parents))
+            elif raw_diff:
+                result["diff_truncated"] |= len(raw_diff) > MAX_DIFF_BYTES
+                r, a = split_diff(raw_diff[:MAX_DIFF_BYTES].decode("utf-8", "replace"))
                 if r or a:
                     removed += r
                     added += a
                     result["diff_sources"].append("git-diff:" + base)
         except (OSError, subprocess.SubprocessError):
-            pass
+            result["diff_unavailable"] = True
+    else:
+        result["diff_unavailable"] = True
     # Joined so a multi-line quote of consecutive diff lines still matches.
     return (" ".join(removed), " ".join(added))
 
-context_text = None
-def load_context_text():
-    # Prose --context-files (a plan, a spec) that load_diff_sides() skips. A seat
-    # reviewing a plan quotes the plan's PROPOSED code next to the source file it
-    # would change (sail-cruisey #3118); that quote is grounded in the context
-    # the seat was given, not fabricated.
-    pieces = []
-    for path in context_files:
-        try:
-            with open(path, "rb") as handle:
-                data = handle.read(MAX_DIFF_BYTES).decode("utf-8", "replace")
-        except OSError:
-            continue
-        if DIFF_HEADER.search(data):
-            continue  # already a diff side
-        data = norm(html.unescape(data))
-        if data:
-            pieces.append(data)
-    return " ".join(pieces)
-
-def in_diff_side(variants, side):
-    if not side:
-        return False
-    for variant in variants:
-        needle = norm(variant)
-        if needle in side:
-            return True
-        pieces = [p for p in ELLIPSIS.split(needle) if specific(p)]
-        if (len(pieces) > 1 or (pieces and pieces[0] != needle)) and all(p in side for p in pieces):
-            return True
-    return False
+def in_diff_side(wholes, line_variants, side, misses=None, short=()):
+    # Reuse the source-file threshold, including elision and gutter handling.
+    return bool(side and match_unit(wholes, line_variants, (side, [0], [1]), misses, short))
 
 REMOVAL_WORDS = re.compile(r"\b(remov(?:e|ed|es|ing|al)|delet(?:e|ed|es|ing|ion)|drop(?:ped|s)?|no longer|was gone|got rid of)\b", re.I)
 # A command the seat ran ("`npm ci --dry-run`") is not a claim about file
 # content. If it is not in the cited file, it is unverifiable, never fabricated.
 COMMAND = re.compile(r"^\$?\s*(?:npm|npx|pnpm|yarn|node|deno|bun|git|gh|make|bash|sh|zsh|cd|ls|cat|grep|rg|sed|awk|curl|python3?|pip|uv|cargo|go|tsc|vitest|jest|pytest|docker|kubectl|psql|netlify|supabase|env)\s")
 SHELL_FENCES = {"sh", "bash", "shell", "console", "zsh", "terminal", "shell-session"}
-# What a command the seat ran printed ("exited with `vitest: command not found`")
-# is not file content either (sail-cruisey #3311).
-# So is the error a seat's probe threw ("throws `RangeError: Maximum call stack
+# Nor is the error a seat's probe threw ("throws `RangeError: Maximum call stack
 # size exceeded`", sail-cruisey #3386): an error class and its message, a
 # traceback header or a panic.
-TOOL_OUTPUT = re.compile(r"(?:: command not found|: No such file or directory|: Permission denied)$"
-                         r"|^Cannot find (?:module|package) \S+", re.I)
 RUNTIME_ERROR = re.compile(r"^(?:Uncaught (?:\(in promise\) )?)?[A-Z][A-Za-z]*(?:Error|Exception)(?: \[[\w-]+\])?: \S"
                            r"|^Traceback \(most recent call last\)|^panic: \S")
-TOOL_OUTPUT_BEFORE = re.compile(r"\b(?:exit(?:s|ed)? with|fail(?:s|ed)? with|errors? with|errored with|printed|prints|output|stderr:?"
-                                r"|throws?|threw|raises?|raised|crash(?:es|ed)? with|reject(?:s|ed)? with)\s*$", re.I)
-def tool_output(kind, start, block):
-    if kind != "inline":
-        return False
-    line_start = resp.rfind("\n", 0, start) + 1
-    text = norm(block[0])
-    return bool(TOOL_OUTPUT.search(text) or RUNTIME_ERROR.match(text)
-                or TOOL_OUTPUT_BEFORE.search(resp[max(line_start, start - 80):start]))
 # A unit is ATTRIBUTED when it sits directly under or after a citation, with only
-# markup or a reading verb between them ("x.ts:12 reads `...`", "x.ts:12:" then a
+# markup or a source verb between them ("x.ts:12 defines `...`", "x.ts:12:" then a
 # fence). That is the seat stating the cited file contains this code, so the
 # quote must be found in that file, and a failure counts against the seat even
 # when other quotes verify. A proposal on the citation's line ("change x.ts:12
 # to:") is not a claim about current content.
 GAP_WORDS = {"reads", "read", "shows", "show", "contains", "contain", "has", "says", "is", "at",
-             "computes", "compute",
+             "defines", "define", "defined", "declares", "declare", "declared",
              "line", "lines", "source", "code", "verbatim", "quote", "quoted", "excerpt",
              "current", "currently", "actual", "l"}
-# A content verb before "built as" keeps the claim about the file ("x.ts:2
-# contains the code built as `...`"); "I" or "we" as the subject of "built as"
-# marks the seat's own input ("x.ts:2 reads a row I constructed as `...`").
-# Another first-person word does not: "reads what my teammate built as" is a claim.
+SOURCE_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|is|defines?|defined|declares?|declared|computes?)\b", re.I)
+# A content verb before "built as" keeps the citation's claim ("x.ts:2 contains
+# the code built as `...`"); "I" or "we" as the subject of "built as" marks the
+# seat's own input ("x.ts:2 reads a row I constructed as `...`"). Another
+# first-person word does not: "reads what my teammate built as" is a claim.
 OWN_INPUT = re.compile(r"(?:constructed|built|crafted) as", re.I)
-CONTENT_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|defines?|defined|declares?|declared)\b", re.I)
-FIRST_PERSON_SUBJECT = re.compile(r"\b(?:I|[Ww]e)\s+(?:constructed|built|crafted)\s+as\b")
+CONTENT_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|is|defines?|defined|declares?|declared)\b", re.I)
+FIRST_PERSON_SUBJECT = re.compile(
+    r"\b(?:I|we)\s+(?:(?:have|had|just|recently|already|carefully|deliberately|"
+    r"explicitly|locally|manually|originally|previously)\s+)*$", re.I)
+DOTTED_ABBREVIATION = re.compile(r"\b(?:[A-Za-z]\.){2,}")
+CLAUSE_BOUNDARY = re.compile(r"[.!?;](?:\s|$)")
+def clause_start(text, end):
+    # Both scans advance in source order; never rescan all abbreviation ranges
+    # for each punctuation mark on a long response line.
+    abbreviations = DOTTED_ABBREVIATION.finditer(text, 0, end)
+    abbreviation = next(abbreviations, None)
+    last = 0
+    for boundary in CLAUSE_BOUNDARY.finditer(text, 0, end):
+        while abbreviation is not None and abbreviation.end() <= boundary.start():
+            abbreviation = next(abbreviations, None)
+        if abbreviation is None or boundary.start() < abbreviation.start():
+            last = boundary.end()
+    return last
+
 def proposes(text):
-    for match in PROPOSAL.finditer(text):
-        # A citation's own dots ("x.ts:2") do not end the clause.
-        if OWN_INPUT.fullmatch(match.group(0)) and not re.search(r"[.!?;]", CITATION.sub("", text[:match.start()])):
-            verbs = list(CONTENT_VERB.finditer(text, 0, match.start()))
-            if verbs and not FIRST_PERSON_SUBJECT.search(text, verbs[-1].end(), match.end()):
+    # A proposal in an earlier sentence cannot excuse a current source claim.
+    # Keep terminal punctuation on a standalone fence lead-in in its clause.
+    end = len(text.rstrip(" \t\r\n.!?;"))
+    start = clause_start(text, end)
+    verbs = CONTENT_VERB.finditer(text, start)
+    verb = next(verbs, None)
+    verb_end = None
+    previous_end = start
+    for match in PROPOSAL.finditer(text, start):
+        if OWN_INPUT.fullmatch(match.group(0)):
+            # Advance through verbs once. A direct I/we subject cannot contain
+            # an earlier proposal, so its search need not rescan that prefix.
+            while verb is not None and verb.end() <= match.start():
+                verb_end = verb.end()
+                verb = next(verbs, None)
+            if verb_end is not None and not FIRST_PERSON_SUBJECT.search(
+                    text, max(verb_end, previous_end), match.start()):
+                previous_end = match.end()
                 continue
         return True
     return False
+SOURCE_ABSENCE = re.compile(
+    r"\b(?:(?:does|do|did)\s+not|(?:doesn|don|didn)['’]t)\s+"
+    r"(?:currently\s+)?(?:contain|show|read|say|define|declare|have|compute)\b|\bnever\s+computes?\b", re.I)
 PROPOSAL = re.compile(r"\b(should|propos\w*|suggest\w*|recommend\w*|replace with|instead|would|could|change (?:it |this )?to|rewrit\w*|becomes?|example|e\.g\.|such as|consider|cover|prefer\w*|expected|want|(?:constructed|built|crafted) as"
                       r"|(?:an?|any|some) [\w-]+(?: [\w-]+)? like)\b", re.I)
+# Backticks also format prose and multiword values. Sentence punctuation alone
+# is not code syntax, nor is a dotted name embedded in a sentence. Calls,
+# indexing, operators and statements returning a member expression still are.
+CODE_SYNTAX = re.compile(
+    r"[{}=<>+*/%|&]|\b[\w$]+[\[(]|!=|\?\?|\?\.|"
+    r"^\s*(?:return|yield|raise|throw|delete)\s+[\w$]+(?:\.[\w$]+)+\b|"
+    r"\S\s+\?\s+[^?\s:][^?:]*:\s+\S")
+
+token_ends = [t[1] for t in tokens]
+citation_starts = [c[0] for c in citations]
+citation_ends = [c[1] for c in citations]
 
 def association(start):
     # The citation a quote is written about: the nearest one before it in the
     # same paragraph, with no other quote between them.
-    preceding = [t for t in tokens if t[1] <= start]
-    if not preceding:
+    index = bisect_right(token_ends, start) - 1
+    if index < 0:
         return None, ""
-    token = max(preceding, key=lambda t: t[1])
+    token = tokens[index]
     gap = LINK_TARGET.sub("", resp[token[1]:start]).lstrip("`")
     if len(gap) > 300 or "`" in gap or re.search(r"\n[ \t]*\n", gap):
         return None, ""
@@ -3832,26 +4141,41 @@ NEXT_ITEM = re.compile(r"[.!?][)\]`*_]*[ \t]*\n[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]"
 def attribution(token, gap):
     if token is None or len(gap) > 200 or gap.count("\n") > 2 or NEXT_ITEM.search(gap):
         return None
-    if any(word.lower() not in GAP_WORDS for word in re.findall(r"[A-Za-z]+", gap)):
+    # A source verb in this bounded clause still attributes the quote when
+    # ordinary modifiers follow it. A new sentence or a proposal ends that claim.
+    clause = clause_start(gap, len(gap))
+    source_clause = (SOURCE_VERB.search(gap, clause)
+                     and not re.search(r"(?:^|[,;:]|\b(?:and|but|so|while)\b)\s*(?:I|we)\s+(?:estimate|compute|calculate)\b", gap[clause:], re.I))
+    if proposes(gap) or (not source_clause and any(
+            word.lower() not in GAP_WORDS for word in re.findall(r"[A-Za-z]+", gap))):
         return None
     line_start = resp.rfind("\n", 0, token[0]) + 1
-    if PROPOSAL.search(LINK_TARGET.sub("", resp[line_start:token[0]])):
+    prefix = CITATION.sub("", LINK_TARGET.sub("", resp[line_start:token[0]]))
+    # Here terminal punctuation closes an earlier sentence; it is not the
+    # standalone proposed fence lead-in that proposes() otherwise preserves.
+    if proposes(prefix[clause_start(prefix, len(prefix)) :]):
         return None
     return token
 
 def proposed(start):
     # "Cover inputs such as `...`", "should become:" then a fence: the seat's own
-    # suggestion, not a claim about what a file contains today.
+    # suggestion, not a claim about what a file contains today. Blank lines do
+    # not sever that lead-in; other nonempty lines still end its scope.
     line_start = resp.rfind("\n", 0, start) + 1
-    if resp[line_start:start].strip(" \t>`") == "":
-        line_start = resp.rfind("\n", 0, max(0, line_start - 1)) + 1
-    return proposes(LINK_TARGET.sub("", resp[line_start:start]))
+    prose = resp[line_start:start]
+    if prose.strip(" \t>`") == "":
+        preceding = resp[:line_start].rstrip()
+        prose = preceding[preceding.rfind("\n") + 1:]
+    # A source filename such as example.ts is not proposal language.
+    prose = CITATION.sub("", LINK_TARGET.sub("", prose))
+    return proposes(prose)
 
-# sail-cruisey #3340: a seat that ran the code under review names the input it
-# fed in ("probing returns `[]` for `## Disclosures\n- none`", "`- a` and `- b`
-# pass through the matcher"). An unattributed inline span next to that wording,
-# alone or in a run of spans joined by "and", "or" or "followed by", is the
-# seat's own string, not a quote of a file.
+# sail-cruisey #3340/#3339: a seat that ran the code under review names the
+# input it fed in ("probing returns `[]` for `x`", "`a`, `b` and `c` all return
+# `[]`", "Bypasses: `x`", the Input column of a results table). An unattributed
+# inline span next to that wording, alone or in a run of spans joined by "and",
+# "or" or commas, is the seat's own string. So is code the seat says the file
+# avoids ("it avoids returning `x`").
 inline_spans = sorted((u[0], u[1]) for u in units if u[2] == "inline")
 SPAN_JOIN = re.compile(r"\s*(?:,\s*(?:and|or)?|and|or|followed by|then)\s*", re.I)
 PROBE_BEFORE = re.compile(r"(?:\b(?:reproduc\w*|fed|feeding|passing|called with|for input|inputs?|synthetic [\w-]+|lets|bypass(?:es|ed)?:?)"
@@ -3860,6 +4184,39 @@ PROBE_AFTER = re.compile(r"^\s*(?:(?:all|both|each|also|still|then|now) )?(?:ret
                          r"|execut(?:es?|ed)|miss(?:es|ed)?|evad(?:es?|ed)|bypass(?:es|ed)?|slips?|leaks?"
                          r"|(?:is|are) (?:not )?(?:flagged|rejected|accepted|ignored|detected|caught|blocked|missed|allowed)"
                          r"|becomes? an?)\b", re.I)
+NEGATED = re.compile(r"\b(?:avoids?|avoiding|never|(?:does|do|did)(?: not|n'?t)|without)(?: \w+ing| \w+s?)?\s*$", re.I)
+INPUT_HEADER = re.compile(r"^\s*(?:inputs?|commands?|cases?|probes?|payloads?|samples?|strings?)\s*$", re.I)
+TABLE_DELIMITER = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$")
+def pipes(text):
+    # Cell separators, ignoring pipes inside code spans or escaped.
+    text = re.sub(r"`+[^`]*`+|\\.", lambda m: "x" * len(m.group(0)), text)
+    return [i for i, ch in enumerate(text) if ch == "|"]
+def input_cell(start):
+    # The input column of a table of probe results ("| Input | Real | Broken |").
+    row_start = resp.rfind("\n", 0, start) + 1
+    rows = []
+    line_start = row_start
+    while True:
+        line_end = resp.find("\n", line_start)
+        line = resp[line_start:line_end if line_end >= 0 else len(resp)]
+        if "|" not in line:
+            break
+        rows.append(line)
+        if line_start == 0:
+            break
+        line_start = resp.rfind("\n", 0, line_start - 1) + 1
+    if len(rows) < 3:
+        return False
+    header, delimiter = rows[-1], rows[-2]
+    if not TABLE_DELIMITER.match(delimiter):
+        return False
+    prefix = resp[row_start:start]
+    column = len(pipes(prefix)) - (1 if prefix.lstrip().startswith("|") else 0)
+    bounds = pipes(header)
+    names = [header[a + 1:b] for a, b in zip([-1] + bounds, bounds + [len(header)])]
+    if header.lstrip().startswith("|"):
+        names = names[1:]
+    return 0 <= column < len(names) and bool(INPUT_HEADER.match(names[column]))
 def probe_input(start, end):
     i = bisect_left(inline_spans, (start, end))
     if i >= len(inline_spans) or inline_spans[i][0] != start:
@@ -3876,60 +4233,49 @@ def probe_input(start, end):
     return bool(PROBE_BEFORE.search(before) or PROBE_AFTER.match(after) or NEGATED.search(before)
                 or input_cell(start))
 
-# "it avoids returning `x`", "never calls `x`": the seat says the code does NOT
-# contain this, so it is not a claim of file content (sail-cruisey #3338).
-NEGATED = re.compile(r"\b(?:avoids?|avoiding|never|(?:does|do|did)(?: not|n'?t)|without)(?: \w+ing| \w+s?)?\s*$", re.I)
-INPUT_HEADER = re.compile(r"^\s*(?:inputs?|commands?|cases?|probes?|payloads?|samples?|strings?)\s*$", re.I)
-def cells(text):
-    # Cell texts of one table row, ignoring pipes inside code spans or escaped.
-    text = re.sub(r"`+[^`]*`+|\\.", lambda m: "x" * len(m.group(0)), text)
-    return [i for i, ch in enumerate(text) if ch == "|"]
-def input_cell(start):
-    # The input column of a table of probe results ("| Input | Real | Broken |").
-    i = bisect_right(table_starts, start) - 1
-    if i < 0 or start >= table_ranges[i][1]:
-        return False
-    t_start = table_ranges[i][0]
-    header = resp[t_start:resp.find("\n", t_start)]
-    row_start = resp.rfind("\n", 0, start) + 1
-    column = sum(1 for p in cells(resp[row_start:start]))
-    bounds = cells(header)
-    names = [header[a + 1:b] for a, b in zip([-1] + bounds, bounds + [len(header)])]
-    if header.lstrip().startswith("|"):
-        names = names[1:]
-        column -= 1 if resp[row_start:start].lstrip().startswith("|") else 0
-    return 0 <= column < len(names) and bool(INPUT_HEADER.match(names[column]))
-
-def record_unverified(text, reason):
-    # Each sample carries why it failed, so a lead can tell an invented quote
-    # from one aimed at the wrong file (sail-cruisey #3246).
-    result["quotes_unverified"] += 1
-    if len(result["unverified_samples"]) < 3:
-        result["unverified_samples"].append(norm(text)[:120])
-        result["unverified_reasons"].append(reason)
-
+token_starts = [t[0] for t in tokens]
+CITED_AFTER = re.compile(r"(?:[(\[]|[:,\u2013\u2014-]|in|at|from)?[ \t]*`?", re.I)
+HORIZONTAL_SPACE = re.compile(r"[ \t]*")
 def cited_after(end):
-    # "`1024 * 10` (src/pricing.ts:2)": a citation right after the span.
-    following = [t for t in tokens if t[0] >= end]
-    if not following:
+    """Recognize an adjacent citation without copying the remaining response."""
+    index = bisect_left(token_starts, end)
+    if index >= len(tokens):
         return False
-    token = min(following, key=lambda t: t[0])
-    return re.fullmatch(r"[ \t]*(?:[(\[]|[:,\u2013\u2014-]|in|at|from)?[ \t]*", resp[end:token[0]], re.I) is not None
+    limit = tokens[index][0]
+    start = HORIZONTAL_SPACE.match(resp, end, limit).end()
+    return CITED_AFTER.fullmatch(resp, start, limit) is not None
 
-for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
+checkable_units = 0
+for start, end, kind, block, removed_block, info in units:
     wholes = unit_wholes(block) if len(block) > 1 else []
     # Only an inline code span can sit in a table cell or be a string literal.
     line_variants = specific_lines(block, kind == "inline" and in_table(start, end), kind == "inline")
+    short = short_lines(block)
     removed_variants = [v for v in [" ".join(l.strip() for l in removed_block)] + [l.strip() for l in removed_block]
                         if v and checkable(v)]
-    if not wholes and not line_variants and not removed_variants:
+    if not wholes and not line_variants and not removed_variants and not (
+            removed_block and checkable(" ".join(block + removed_block))):
         continue
     associated, gap = association(start)
     attributed = attribution(associated, gap)
     # A seat's own arithmetic in an inline span is a value it computed, unless a
     # citation claims it: then it is a claim about the cited file to verify.
     if kind == "inline" and attributed is None and computed(block[0]) and not cited_after(end):
-        continue
+        # A removal claim asserts old source content. Keep that span for the
+        # existing diff matcher only when removal wording directly introduces
+        # or follows this expression, rather than describing another subject.
+        before = re.split(r"(?<=[.!?])\s+|\n", resp[max(0, start - REMOVAL_WINDOW):start])[-1]
+        after = re.split(r"(?<=[.!?])\s+|\n", resp[end:end + REMOVAL_WINDOW], maxsplit=1)[0]
+        removal_before = re.search(REMOVAL_WORDS.pattern +
+                                   r"(?:\s+(?:the|this|old|code|expression|line|calculation))*\s*:?\s*$", before, re.I)
+        removal_after = re.match(r"\s*(?:(?:was|is|were|are|has been|had been)\s+)?" +
+                                 REMOVAL_WORDS.pattern, after, re.I)
+        if not (removal_before or removal_after):
+            continue
+    # Specificity selects the entire quote. A short nonempty side of a mixed
+    # quote still needs an exact whole-side match; it is not an absent side.
+    if removed_block and block and not (wholes or line_variants):
+        wholes = [norm(" ".join(block))]
     flat_variants = wholes + [v for variants in line_variants for v in variants]
     if associated is not None and associated[2] is None:
         # Written about a citation that names a file outside the evidence root
@@ -3943,9 +4289,25 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     if attributed is not None:
         bound = [(attributed[2], attributed[3])]
     else:
-        bound = [(path, line) for c_start, c_end, path, line in citations
-                 if c_start <= end + QUOTE_PROXIMITY and c_end >= start - QUOTE_PROXIMITY]
+        lo = bisect_left(citation_ends, start - QUOTE_PROXIMITY)
+        hi = bisect_right(citation_starts, end + QUOTE_PROXIMITY)
+        bound = [(path, line) for _, _, path, line in citations[lo:hi]]
     if not bound:
+        continue
+    # Only specific, citation-bound units consume matching capacity. Count
+    # omitted units without reading or matching evidence beyond the cap.
+    if checkable_units >= MAX_UNITS:
+        result["quotes_omitted"] += 1
+        continue
+    checkable_units += 1
+    absences = list(SOURCE_ABSENCE.finditer(gap))
+    absence = absences[-1] if absences else None
+    if (associated is not None and absence and len(gap) <= 200 and gap.count("\n") <= 2
+            and not re.search(r"[.!?;]", gap) and not SOURCE_VERB.search(gap, absence.end())):
+        # An explicit absence claim is not positive source evidence. Do not
+        # match it as a quote, even when its text happens to exist in a file.
+        result["quotes_checked"] += 1
+        result["quotes_unverifiable"] += 1
         continue
     bound_paths = []
     for path, _ in bound:
@@ -3954,8 +4316,7 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     # A miss is only checkable when every file the quote is bound to loaded; a
     # readable neighbor cannot stand in for an oversized or unreadable bound file.
     readable = True
-    verified = near = False
-    partial_lines = []
+    verified = near = partial = False
     for path in bound_paths + [p for p in all_cited if p not in bound_paths]:
         entry = load(path)
         if entry is None:
@@ -3963,16 +4324,16 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
                 readable = False
             continue
         misses = []
-        lines = match_unit(wholes, line_variants, entry, misses, short_lines(block))
+        lines = match_unit(wholes, line_variants, entry, misses, short)
         if not lines:
             continue
         cited_lines = [line for p, line in bound if p == path]
         near = near or any(abs(found - cited) <= NEAR_LINES for found in lines for cited in cited_lines)
         # A partial match may be complete in a later cited file; keep looking
         # for the report. The first match already decides the verdict.
+        partial = bool(misses and misses[0])
         verified = True
-        partial_lines = misses
-        if not partial_lines:
+        if not partial:
             break
     if kind == "bare":
         # Positive evidence only: a matched bare line is a verified quote; an
@@ -3988,84 +4349,121 @@ for start, end, kind, block, removed_block, info in units[:MAX_UNITS]:
     if attributed is not None:
         result["quotes_attributed"] += 1
     diff_side_hit = None
-    if not verified:
+    diff_partial = False
+    if kind == "fence" and verified and partial and not removed_block:
+        # A complete diff match clears partial reporting while the source-file
+        # match retains its verification count and attribution.
+        if diff_sides is None and optional_diff_sides is None:
+            # This lookup only refines partial reporting. Bound both Git calls
+            # within two seconds. A failed optional lookup cannot populate the
+            # required cache or mark later claims uncertain without a retry.
+            previous_diff_state = {key: result[key] for key in ("diff_truncated", "diff_unavailable")}
+            previous_diff_state["diff_sources"] = list(result["diff_sources"])
+            optional_diff_sides = load_diff_sides(git_timeout=1)
+            if result["diff_unavailable"]:
+                result.update(previous_diff_state)
+            else:
+                diff_sides = optional_diff_sides
+        for side in diff_sides if diff_sides is not None else optional_diff_sides:
+            side_misses = []
+            if in_diff_side(wholes, line_variants, side, side_misses, short) and not any(side_misses):
+                partial = False
+                break
+    if not verified or removed_block:
         if diff_sides is None:
             diff_sides = load_diff_sides()
         removed_side, added_side = diff_sides
-        if in_diff_side(flat_variants + removed_variants, removed_side):
-            diff_side_hit = "removed"
-        elif in_diff_side(flat_variants, added_side):
-            diff_side_hit = "added"
-    context_hit = False
-    if not verified and not diff_side_hit:
-        if context_text is None:
-            context_text = load_context_text()
-        context_hit = in_diff_side(flat_variants + removed_variants, context_text)
+        if removed_block:
+            # A mixed fence makes claims about both versions. A genuine
+            # addition cannot excuse invented removals, or the reverse.
+            removed_wholes = unit_wholes(removed_block) or [norm(" ".join(removed_block))]
+            removed_misses, kept_misses = [], []
+            removed_hit = in_diff_side(removed_wholes, specific_lines(removed_block), removed_side,
+                                       removed_misses, short_lines(removed_block))
+            # Each portion is partial on its own side. A kept portion partial in
+            # the cited file but exact on the added side is not partial.
+            kept_on_added = bool(block) and in_diff_side(wholes, line_variants, added_side, kept_misses, short)
+            kept_hit = verified or not block or kept_on_added
+            if kept_on_added:
+                kept_partial = any(kept_misses) and (partial or not verified)
+            else:
+                kept_partial = verified and partial
+            verified = False
+            if removed_hit and kept_hit:
+                diff_side_hit = "removed"
+                diff_partial = any(removed_misses) or kept_partial
+        else:
+            # Check both sides: the removed side keeps precedence, but an exact
+            # match on either side means the fence is not partial.
+            removed_misses, added_misses = [], []
+            hits = [(side_name, side_misses) for side_name, side, side_misses in
+                    (("removed", removed_side, removed_misses), ("added", added_side, added_misses))
+                    if in_diff_side(wholes, line_variants, side, side_misses, short)]
+            if hits:
+                diff_side_hit = hits[0][0]
+                diff_partial = all(any(side_misses) for _, side_misses in hits)
     sample = (flat_variants or removed_variants)[0]
     if verified:
         result["quotes_verified"] += 1
         if near:
             result["quotes_near_line"] += 1
         # sail-cruisey #3247: a mostly real fence can carry an invented line.
-        # Report it with the missing lines; the threshold still decides.
-        if kind == "fence" and partial_lines:
-            result["quotes_partial"] += 1
-            for line in partial_lines:
-                if len(result["partial_samples"]) < 3:
-                    result["partial_samples"].append(norm(line)[:120])
+        # Report it; the two-thirds threshold still decides the verdict.
+        result["quotes_partial"] += int(kind == "fence" and partial)
     elif diff_side_hit:
         result["quotes_verified"] += 1
         result["quotes_verified_in_diff_" + diff_side_hit] += 1
-    elif context_hit:
-        result["quotes_verified"] += 1
-        result["quotes_verified_in_context"] += 1
-        if "context-file-text" not in result["diff_sources"]:
-            result["diff_sources"].append("context-file-text")
+        result["quotes_partial"] += int(kind == "fence" and diff_partial)
     elif not diff_sides[0] and not diff_sides[1] and (
-            removed_variants or REMOVAL_WORDS.search(resp[max(0, start - REMOVAL_WINDOW):end + REMOVAL_WINDOW])):
+            removed_block or REMOVAL_WORDS.search(resp[max(0, start - REMOVAL_WINDOW):end + REMOVAL_WINDOW])):
         # No diff to check a claimed removal against: unverifiable, not fabricated.
         result["quotes_unverifiable"] += 1
         result["quotes_unverifiable_claimed_removed"] += 1
-    elif info in SHELL_FENCES or all(COMMAND.match(norm(l) + " ") for l in block) or (
-            attributed is None and tool_output(kind, start, block)):
+    elif attributed is None and (info in SHELL_FENCES or (
+            block and all(COMMAND.match(norm(l) + " ") for l in block)) or (
+            kind == "inline" and block and RUNTIME_ERROR.match(norm(block[0])))):
         result["quotes_unverifiable"] += 1
         result["quotes_unverifiable_command"] += 1
     elif proposed(start) or (kind == "inline" and attributed is None and probe_input(start, end)):
         result["quotes_unverifiable"] += 1
         result["quotes_unverifiable_proposed"] += 1
+    elif kind in ("inline", "blockquote") and attributed is None and not CODE_SYNTAX.search(sample):
+        result["quotes_unverifiable"] += 1
+        result["quotes_unverifiable_prose"] += 1
+    elif result["diff_truncated"] or result["diff_unavailable"]:
+        # A missing quote may be in omitted or unavailable diff evidence,
+        # including a genuine removal absent from the current cited file.
+        result["quotes_unverifiable"] += 1
+        result["quotes_unverifiable_diff_incomplete"] += 1
     elif readable:
-        if attributed is not None:
-            try:
-                cited = str(Path(attributed[2]).relative_to(root))
-            except ValueError:
-                cited = str(attributed[2])
-            reason = "not found in the cited file " + cited
-        else:
-            reason = "not found in any readable file under the evidence root, the reviewed diff or the context files"
-        record_unverified(sample, reason)
+        result["quotes_unverified"] += 1
         if attributed is not None:
             result["quotes_attributed_unverified"] += 1
     else:
         result["quotes_unverifiable"] += 1
 
-# Fabricated when every checked quote failed, or when any quote the seat
-# attributed to a specific cited file is in neither that file, the other cited
-# files, nor the reviewed diff (sail-cruisey #3005: five real quotes alongside
+# Fabricated when every checked quote failed, or when an attributed quote is
+# absent from every cited file and the reviewed diff. Attribution identifies
+# source claims; matching does not prove which file supplied the quote
+# (sail-cruisey #3005: five real quotes alongside
 # two invented "Checked Source Citations" blocks).
 result["fabricated"] = (result["quotes_attributed_unverified"] > 0 or
                         (result["quotes_unverified"] > 0 and result["quotes_verified"] == 0))
 emit()
 PY
+    then
+        printf '%s\n' "$report"
+    else
+        # Discard partial stdout; a crashed verifier cannot grant grounding.
+        printf '%s\n' "$failed"
+    fi
 }
 
 council_response_quote_report_cached() {
     # Sets COUNCIL_QUOTE_REPORT to the verification report for this response,
-    # running the verifier only when the response bytes, root, context files, or
-    # diff base changed since the last call in this shell. One seat is otherwise
-    # verified up to five times (substantive, blind, contribution record), each
-    # run possibly paying a git diff and a root index walk. Subshells inherit the
-    # cached value, so a record computed in $(...) after the parent's blind
-    # check reuses it.
+    # sharing preliminary checks when response bytes and evidence configuration
+    # are unchanged. This key does not fingerprint evidence contents. Contribution
+    # records must clear it to reverify current evidence before serialization.
     local f="$1" evidence_root="$2" stamp key
     # Content checksum, not mtime: a response rewritten within one second must
     # not reuse the previous report.
@@ -4080,10 +4478,11 @@ council_response_quote_report_cached() {
 }
 
 council_response_quotes_fabricated() {
-    # True when a seat quotes code beside its path:line citations and NONE of those
-    # quotes appear in the cited files (council_response_quote_verification_json).
+    # Reject fabricated quotes, verification failures and responses above either budget.
     # Opt out with OCTOPUS_COUNCIL_QUOTE_VERIFY=0. A precomputed JSON may be passed
-    # as $3 to avoid re-scanning.
+    # as $3 to avoid re-scanning. Oversized responses and omitted quote units are
+    # rejected because they cannot be checked, without labeling them fabricated.
+    # Verification or report parsing failures reject the seat for the same reason.
     local f="$1" evidence_root="${2:-}" precomputed="${3:-}"
     [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]] || return 1
     [[ -f "$f" && -n "$evidence_root" && -d "$evidence_root" ]] || return 1
@@ -4092,7 +4491,12 @@ council_response_quotes_fabricated() {
         council_response_quote_report_cached "$f" "$evidence_root"
         report="$COUNCIL_QUOTE_REPORT"
     fi
-    jq -e '.fabricated == true' <<< "$report" >/dev/null 2>&1
+    local rc=0
+    jq -se 'length != 1 or (.[0] | type != "object" or .verification_failed == true
+        or .fabricated == true or .response_oversized == true or ((.quotes_omitted // 0) > 0))' \
+        <<< "$report" >/dev/null 2>&1 || rc=$?
+    # Only jq's false result permits the seat; parse or tool errors reject.
+    (( rc != 1 ))
 }
 
 council_artifact_digest() {
@@ -4177,17 +4581,24 @@ council_contribution_record_json() {
     if council_response_nonempty "$response_path"; then
         verdict="$(council_response_verdict "$response_path")"
         if [[ "${OCTOPUS_COUNCIL_QUOTE_VERIFY:-1}" != "0" ]]; then
+            # Source, context and resolved diff bytes can change after the
+            # preliminary checks even when this response and its config do not.
+            COUNCIL_QUOTE_REPORT_KEY=""
             council_response_quote_report_cached "$response_path" "$evidence_root"
             grounding="$COUNCIL_QUOTE_REPORT"
-            jq -e 'type == "object"' <<< "$grounding" >/dev/null 2>&1 \
-                || grounding="$COUNCIL_EMPTY_GROUNDING_JSON"
+            jq -se 'length == 1 and (.[0] | type == "object")' <<< "$grounding" >/dev/null 2>&1 \
+                || grounding="$COUNCIL_FAILED_GROUNDING_JSON"
         fi
-        if council_response_quotes_fabricated "$response_path" "$evidence_root" "$grounding"; then
-            # Distinct from invalid-access: the seat did not report an access
-            # failure, its quoted source simply is not in the files it cited.
+        if council_response_has_access_failure "$response_path"; then
+            # Keep file-access guidance authoritative even when quotes fail.
+            access_state="failed"
+            validation_result="invalid-access"
+        elif council_response_quotes_fabricated "$response_path" "$evidence_root" "$grounding"; then
+            # Distinct from invalid-access: evidence is rejected for fabricated
+            # quotes, verification failure, or a response above the budgets.
             access_state="evidence-rejected"
             validation_result="invalid-ungrounded"
-        elif council_response_is_blind "$response_path" "$evidence_root"; then
+        elif council_response_is_blind "$response_path" "$evidence_root" "$grounding"; then
             access_state="failed"
             validation_result="invalid-access"
         elif ! council_response_has_verdict "$response_path"; then
@@ -4226,7 +4637,7 @@ PY
 }
 
 council_unavailable_contribution_record_json() {
-    printf '%s\n' '{"artifact_digest":"unavailable","workspace_digest":"unavailable","access_state":"unverified","evidence_paths":[],"validation_result":"invalid-record","verdict":null,"comprehension_verified":false}'
+    printf '{"artifact_digest":"unavailable","workspace_digest":"unavailable","access_state":"unverified","evidence_paths":[],"validation_result":"invalid-record","verdict":null,"comprehension_verified":false,"grounding":%s}\n' "$COUNCIL_EMPTY_GROUNDING_JSON"
 }
 
 council_received_non_chair() {
@@ -4568,7 +4979,7 @@ council_run_advice_phase() {
     local index=0 member persona slug output_path seat mprovider mprovider_spec verdict
     local seat_org seat_model seat_model_family resp_bytes seat_status seat_rec dispatch_timeout_provenance
     local seat_synthesizer verdict_explicit
-    local evidence_root="${OCTOPUS_PROJECT_DIR:-${PROJECT_ROOT:-$PWD}}" artifact_digest contribution_json
+    local evidence_root="${OCTOPUS_PROJECT_DIR:-${PROJECT_ROOT:-$PWD}}" artifact_digest contribution_json grounding_report
     [[ -d "$evidence_root" ]] || evidence_root="$PWD"
     artifact_digest="$(council_artifact_digest "$evidence_root" "${COUNCIL_TASK:-}")" || artifact_digest="unavailable"
     COUNCIL_ARTIFACT_DIGEST="$artifact_digest"
@@ -4623,12 +5034,23 @@ council_run_advice_phase() {
         _OCTOPUS_CONTEXT_REFUSAL_FILE="$refusal_file" _OCTOPUS_SEAT_STDERR_FILE="$stderr_file" \
             council_dispatch_member_detached "$member" "independent-advice" "$output_path" || dispatch_rc=$?
         dispatch_timeout_provenance="$COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE"
+        # Admit the serialized contribution before changing any response or vote
+        # counters. A refreshed report can reject evidence that passed earlier
+        # checks, and its verdict must be the one recorded and tallied below.
+        contribution_json="$(council_contribution_record_json "$output_path" "$evidence_root" "$artifact_digest")" \
+            || contribution_json="$(council_unavailable_contribution_record_json)"
+        # Command substitution cannot share the verifier's shell cache. Carry
+        # this contribution's fresh report through every admission check instead.
+        grounding_report="$(jq -ce '.grounding | objects' <<< "$contribution_json" 2>/dev/null)" \
+            || grounding_report="$COUNCIL_FAILED_GROUNDING_JSON"
         # Confirm-finish-before-shortage: a non-zero dispatch (e.g. the per-seat
         # timeout fired) may still have left a COMPLETE, verdict-bearing review that
         # the seat finished writing right at the boundary. Salvage that instead of
         # discarding a usable verdict as a provider shortage (sail-cruisey #2077).
-        if council_response_nonempty "$output_path" \
-                && council_response_is_substantive "$output_path" "$evidence_root" \
+        if jq -e '.validation_result == "valid-grounded" or .validation_result == "valid-unverified"' \
+                <<< "$contribution_json" >/dev/null 2>&1 \
+                && council_response_nonempty "$output_path" \
+                && council_response_is_substantive "$output_path" "$evidence_root" "$grounding_report" \
                 && { (( dispatch_rc == 0 )) || council_response_has_verdict "$output_path"; }; then
             COUNCIL_RESPONSES_RECEIVED=$((COUNCIL_RESPONSES_RECEIVED + 1))
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"; [[ -z "$resp_bytes" ]] && resp_bytes=0
@@ -4654,7 +5076,7 @@ council_run_advice_phase() {
             # independent approver plus the chair's own vendor could pass a 2-vendor
             # quorum. The chair-fallback path never added to this set either, so gating
             # on non-chair seats keeps seats[] and quorum consistent (#670).
-            verdict="$(council_response_verdict "$output_path")"
+            verdict="$(jq -r '.verdict' <<< "$contribution_json")"
             seat_status="responded"
             if [[ "$seat" != "chair" ]]; then
                 COUNCIL_RESPONDING_PROVIDERS="${COUNCIL_RESPONDING_PROVIDERS} ${mprovider}"
@@ -4666,15 +5088,14 @@ council_run_advice_phase() {
             fi
         elif council_response_nonempty "$output_path"; then
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"; [[ -z "$resp_bytes" ]] && resp_bytes=0
-            if council_response_is_substantive "$output_path" "$evidence_root"; then
+            if council_response_is_substantive "$output_path" "$evidence_root" "$grounding_report"; then
                 # A timed-out/truncated review without a final verdict is preserved
                 # for diagnosis, but cannot count as a response or approver.
                 seat_status="no-response"
-            elif council_response_is_blind "$output_path" "$evidence_root"; then
-                # Returned a verdict without reading the artifact (no file tools /
-                # permission). Label it distinctly and surface which provider, so
-                # the operator can switch its mode after ROUND ONE, not round six.
-                # Still excluded from quorum (not "responded").
+            elif council_response_is_blind "$output_path" "$evidence_root" "$grounding_report"; then
+                # Access failures and rejected grounding both remain blind and
+                # excluded from quorum. Warnings use the contribution's access
+                # state to distinguish provider access from evidence rejection.
                 seat_status="blind"
                 council_note_blind_seat "$mprovider"
             else
@@ -4713,8 +5134,6 @@ council_run_advice_phase() {
         else
             rm -f "$stderr_file" 2>/dev/null
         fi
-        contribution_json="$(council_contribution_record_json "$output_path" "$evidence_root" "$artifact_digest")" \
-            || contribution_json="$(council_unavailable_contribution_record_json)"
         # Per-seat record for summary.json — makes quorum integrity machine-checkable
         # (a chair or degenerate seat can no longer masquerade as a distinct approving
         # vendor). payload_kind is "full" here; #2 (agy chunking) populates delta/chunk,
@@ -4799,6 +5218,8 @@ council_run_advice_phase() {
         map(.model_family as $f
             | .counted_as_approver = (.seat != "chair"
                 and .status == "responded" and .verdict == "APPROVE"
+                and (.contribution.validation_result == "valid-grounded"
+                    or .contribution.validation_result == "valid-unverified")
                 and ($approving_families | contains(" " + $f + " "))))' <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
 
     # Per-seat counted_in_vote + per-vendor (model family) vote with a reason, so
@@ -4872,7 +5293,7 @@ council_synthesis_capable_persona() {
 council_run_chair_fallback() {
     local persona provider member_json slug output_path index
     local seat_agent_spec seat_org seat_model seat_model_family resp_bytes verdict seat_status seat_rec existing_response dispatch_rc
-    local dispatch_timeout_provenance contribution_json artifact_digest="${1:-}"
+    local dispatch_timeout_provenance contribution_json grounding_report artifact_digest="${1:-}"
     local evidence_root="${OCTOPUS_PROJECT_DIR:-${PROJECT_ROOT:-$PWD}}"
     [[ -d "$evidence_root" ]] || evidence_root="$PWD"
     if [[ -z "$artifact_digest" ]]; then
@@ -4886,14 +5307,18 @@ council_run_chair_fallback() {
         slug="$(council_slug "$persona")"
         existing_response="$(find "${COUNCIL_RUN_DIR}/responses" -type f -name "*-${slug}.md" -print -quit)"
         # Reuse an existing synthesis-capable member only when the advice phase
-        # accepted that seat. A timed-out partial or degenerate artifact is kept for
-        # diagnosis, but must not masquerade as a recovered chair response.
+        # accepted that seat and its current response still passes contribution
+        # validation. Retained invalid output must not become a recovered chair.
         if [[ -n "$existing_response" ]] \
                 && council_response_nonempty "$existing_response" \
-                && council_response_is_substantive "$existing_response" "$evidence_root" \
                 && jq -e --arg persona "$persona" \
                     'any(.[]; .persona == $persona and .status == "responded")' \
-                    <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}" >/dev/null; then
+                    <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}" >/dev/null \
+                && contribution_json="$(council_contribution_record_json "$existing_response" "$evidence_root" "$artifact_digest")" \
+                && jq -e '.validation_result == "valid-grounded" or .validation_result == "valid-unverified"' \
+                    <<< "$contribution_json" >/dev/null 2>&1 \
+                && grounding_report="$(jq -ce '.grounding | objects' <<< "$contribution_json" 2>/dev/null)" \
+                && council_response_is_substantive "$existing_response" "$evidence_root" "$grounding_report"; then
             COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
             COUNCIL_CHAIR_FALLBACK_USED="true"
             COUNCIL_CHAIR_FALLBACK_PERSONA="$persona"
@@ -4921,18 +5346,16 @@ council_run_chair_fallback() {
         _OCTOPUS_SEAT_STDERR_FILE="$fallback_stderr" \
             council_dispatch_member_detached "$member_json" "independent-advice" "$output_path" || dispatch_rc=$?
         dispatch_timeout_provenance="$COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE"
+        contribution_json="$(council_contribution_record_json "$output_path" "$evidence_root" "$artifact_digest")" \
+            || contribution_json="$(council_unavailable_contribution_record_json)"
+        grounding_report="$(jq -ce '.grounding | objects' <<< "$contribution_json" 2>/dev/null)" \
+            || grounding_report="$COUNCIL_FAILED_GROUNDING_JSON"
         if council_response_nonempty "$output_path" \
-                && council_response_is_substantive "$output_path" "$evidence_root" \
+                && { council_response_quotes_fabricated "$output_path" "$evidence_root" "$grounding_report" \
+                     || council_response_is_substantive "$output_path" "$evidence_root" "$grounding_report"; } \
                 && { (( dispatch_rc == 0 )) || council_response_has_verdict "$output_path"; }; then
-            COUNCIL_RESPONSES_RECEIVED=$((COUNCIL_RESPONSES_RECEIVED + 1))
-            rm -f "$fallback_stderr" 2>/dev/null
-            COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
-            COUNCIL_CHAIR_FALLBACK_USED="true"
-            COUNCIL_CHAIR_FALLBACK_PERSONA="$persona"
-            # The fallback is an additional advice dispatch outside the resolved
-            # roster, so persist it as an additional seat execution record. Without
-            # this, summary.json claims to expose every seat while silently omitting
-            # the chair response that actually made synthesis possible.
+            # Persist completed fallback attempts, including rejected metadata,
+            # even when access failure takes priority in their classification.
             seat_agent_spec="$(jq -r '.agent_spec // .provider // ""' <<< "$member_json")"
             seat_org="$(jq -r '.provider_org // ""' <<< "$member_json")"
             seat_model="$(jq -r '.model // ""' <<< "$member_json")"
@@ -4940,12 +5363,19 @@ council_run_chair_fallback() {
             [[ -n "$seat_model_family" ]] || seat_model_family="$(council_model_family "$seat_agent_spec" "$seat_model")"
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"
             [[ -z "$resp_bytes" ]] && resp_bytes=0
-            verdict="$(council_response_verdict "$output_path")"
+            verdict="$(jq -r '.verdict // ""' <<< "$contribution_json")"
             local fallback_verdict_explicit="false"
             council_response_has_verdict "$output_path" && fallback_verdict_explicit="true"
-            seat_status="responded"
-            contribution_json="$(council_contribution_record_json "$output_path" "$evidence_root" "$artifact_digest")" \
-                || contribution_json="$(council_unavailable_contribution_record_json)"
+            seat_status="no-response"
+            if jq -e '.validation_result == "valid-grounded" or .validation_result == "valid-unverified"' \
+                    <<< "$contribution_json" >/dev/null 2>&1; then
+                seat_status="responded"
+                COUNCIL_RESPONSES_RECEIVED=$((COUNCIL_RESPONSES_RECEIVED + 1))
+                rm -f "$fallback_stderr" 2>/dev/null
+                COUNCIL_CHAIR_RESPONSE_RECEIVED="true"
+                COUNCIL_CHAIR_FALLBACK_USED="true"
+                COUNCIL_CHAIR_FALLBACK_PERSONA="$persona"
+            fi
             seat_rec="$(jq -cn --argjson idx "$index" --arg persona "$persona" \
                 --arg agent_spec "$seat_agent_spec" --arg provider "$(octo_agent_spec_provider "$provider")" --arg org "$seat_org" --arg model "$seat_model" --arg model_family "$seat_model_family" \
                 --argjson bytes "${resp_bytes:-0}" --arg verdict "$verdict" --arg status "$seat_status" \
@@ -4963,7 +5393,11 @@ council_run_chair_fallback() {
                   timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
                   counted_as_approver:false}')"
             COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
-            return 0
+            [[ "$seat_status" != "responded" ]] || return 0
+            # Keep completed output and its rejected record for diagnosis while
+            # trying another fallback. A metadata failure must not erase work.
+        else
+            rm -f "$output_path"
         fi
         # Rejected retries retain the earlier failed attempt even when the
         # final dispatch exited zero. Accepted responses already removed it.
@@ -4975,7 +5409,6 @@ council_run_chair_fallback() {
         else
             rm -f "$fallback_stderr" 2>/dev/null
         fi
-        rm -f "$output_path"
     done < <(printf '%s\n' strategy-analyst research-synthesizer code-reviewer exec-communicator business-analyst)
 
     return 1
@@ -5956,7 +6389,15 @@ council_print_run_warnings() {
     fi
 
     if [[ -n "${COUNCIL_BLIND_SEATS:-}" ]]; then
-        echo "Council warning: blind seat(s) returned a verdict without reading the artifact and were excluded from quorum: ${COUNCIL_BLIND_SEATS} — switch that provider's mode/model (e.g. give it file-read tools) or inline the artifact into the prompt. See summary.json quorum.blind_seats."
+        local provider_blind_seats grounding_failed_seats
+        provider_blind_seats="$(jq -r '[.[] | select(.status == "blind" and .contribution.access_state != "evidence-rejected") | .provider] | unique | join(" ")' <<< "$COUNCIL_SEAT_RECORDS_JSON")"
+        grounding_failed_seats="$(jq -r '[.[] | select(.status == "blind" and .contribution.access_state == "evidence-rejected") | .provider] | unique | join(" ")' <<< "$COUNCIL_SEAT_RECORDS_JSON")"
+        if [[ -n "$provider_blind_seats" ]]; then
+            echo "Council warning: blind seat(s) returned a verdict without reading the artifact and were excluded from quorum: ${provider_blind_seats} — switch that provider's mode/model (e.g. give it file-read tools) or inline the artifact into the prompt. See summary.json quorum.blind_seats."
+        fi
+        if [[ -n "$grounding_failed_seats" ]]; then
+            echo "Council warning: grounding verification failed for seat(s) excluded from quorum: ${grounding_failed_seats}. Inspect summary.json seats[].contribution.grounding and responses/*.md for verifier failures or unverified source quotes."
+        fi
     fi
 
     if [[ "$COUNCIL_QUORUM_MET" == "true" && "${COUNCIL_CHAIR_SYNTHESIS_AVAILABLE:-}" != "true" ]]; then

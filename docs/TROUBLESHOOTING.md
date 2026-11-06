@@ -35,9 +35,33 @@ A provider is used only when its CLI is installed AND its auth check passes. If 
 
 **"Circuit open for <provider> — skipping"** — the provider failed repeatedly this session and its circuit breaker tripped. It recovers automatically after the cooldown; to force it back immediately, start a new session or clear session state.
 
-**Provider quota-dead** — a provider that hit quota or auth-death earlier in the session is skipped for the rest of it. Check the provider's own dashboard, then restart the session.
+**Provider quota-dead**: smoke tests persist only explicit authentication or
+rate-limit failures observed outside Codex or Claude Code sandboxes. Preflight
+labels those entries `cached HH:MM, not re-checked`, using the provider's own
+timestamp when available. A passing smoke test clears the mark; otherwise check
+the provider's account or quota window before retrying. Unknown errors, timeouts,
+and sandbox denials exclude the provider for the current run without creating a
+persistent quota mark. Preflight labels these failures `not cached`. An unknown
+failure also prevents caching a successful overall check, so the next run tests
+the provider again. Timeouts retain the existing slow-provider pass-cache policy.
 
-**"TIMEOUT EXCEEDED" on every provider in a phase**: each provider call has a per-call budget. Raise it for the whole run with `--timeout SECS` or `OCTOPUS_AGENT_TIMEOUT=SECS`; the environment variable wins when both are set. Calls a workflow runs deliberately unbounded stay unbounded. Council seats use `--seat-timeout` or `OCTOPUS_COUNCIL_TIMEOUT_<PROVIDER>` instead. If a provider keeps exploring the repository for a narrow question, a shorter prompt that asks for decisions rather than investigation is usually faster than a larger budget.
+**Sandbox denied a provider check**: `Operation not permitted` and recognized
+sandbox denials identify a restriction on the check. Run preflight outside that
+sandbox before treating the provider as unavailable. Smoke-test failures inside
+these sandboxes are never saved as quota or authentication failures.
+
+**"TIMEOUT EXCEEDED" on every provider in a phase**: raise the background seat budget with `--timeout SECS`. Probe-specific overrides are described below. Calls a workflow runs deliberately unbounded stay unbounded. Council seats use `--seat-timeout` or `OCTOPUS_COUNCIL_TIMEOUT_<PROVIDER>` instead. If a provider keeps exploring the repository for a narrow question, a shorter prompt that asks for decisions rather than investigation is usually faster than a larger budget.
+
+For `probe` and `probe-single`, seats use `OCTOPUS_AGENT_TIMEOUT` first when
+it contains only digits. If it is unset or nonnumeric, seats use a valid
+explicit `--timeout`, then the default budget. Numeric values above
+1,073,741,823 seconds are rejected. For example,
+`OCTOPUS_AGENT_TIMEOUT=1200 ./scripts/orchestrate.sh probe "Research a topic"`
+gives each probe seat 1,200 seconds. The probe progress watchdog uses that
+same budget plus its grace period, and status rows show the selected budget.
+If the environment variable is set, a timed-out probe seat recommends
+increasing it. Other background workflows continue to use their `--timeout`
+budget.
 
 **"Context budget: summarizer unavailable and the council prompt … Refusing to truncate"**: a council prompt exceeded the seat's context budget and no summarizer could condense it. Council seats fail with exit 78 instead of reviewing a silently truncated artifact, because a truncated diff still produces confident APPROVE verdicts. Split the diff per file (`git diff -- <paths>` chunks that each fit the budget) and dispatch one council per chunk. To accept truncation anyway, set `OCTOPUS_COUNCIL_ALLOW_TRUNCATION=1`.
 
@@ -56,6 +80,52 @@ A provider is used only when its CLI is installed AND its auth check passes. If 
 **Waiting on `orchestrate.sh spawn` fires too early** — the result file echoes the prompt before the provider answers, so polling it for `VERDICT` (or any word the prompt contains) matches the prompt itself. A background spawn prints `TASK_ID=`, `RESULT_FILE=`, `DONE_FILE=` and `RESULT_END_SENTINEL=` lines before its final PID line (the PID stays the last line). Wait for the `.done` marker to exist (it holds the worker's exit code), or for the result file's final line to be exactly `=== OCTOPUS-RESULT-END <task-id> rc=<n> ===`. Only then read the verdict. `agy` spawns run synchronously and print the answer on stdout, so they write no result file.
 
 **A council seat with `path:line` citations is marked `blind` / `invalid-ungrounded`** — when a seat quotes code (a backtick span or fenced block of at least 3 tokens and 20 characters) within about 1500 characters of a citation that resolves, the quote must appear, whitespace-normalized, in a cited file. If none of those quotes appear in a cited file, the seat is not counted. `summary.json` records per-seat counts under `seats[].grounding` (`quotes_checked`, `quotes_verified`, `quotes_near_line`, `quotes_unverified`, `quotes_unverifiable`, and `unverified_samples`). Quotes in files the runner cannot read count as unverifiable, never as fabricated. A quote of deleted code is checked against the removed side, and then the added side, of the reviewed diff. That diff comes from any `--context-file` that is a unified diff, plus `git diff <base>` in the evidence root, where the base is `OCTOPUS_COUNCIL_DIFF_BASE` (default `HEAD`, the uncommitted change). These matches are counted in `quotes_verified_in_diff_removed` and `quotes_verified_in_diff_added`. With no diff available, a quote the seat describes as removed, deleted or dropped is unverifiable (`quotes_unverifiable_claimed_removed`), not fabricated. Set `OCTOPUS_COUNCIL_QUOTE_VERIFY=0` to turn the check off.
+
+**Large provider stderr transcripts**: when stdout contains an answer and stderr
+exceeds 16 KB, Octopus saves the full stderr beside the result as
+`<result-name>.stderr.log`, with file mode `600`. The result includes the last
+40 lines, bounded to 16 KB, and the transcript path. Runs without a usable stdout
+answer keep stderr inline. If the private writer rejects the path or the
+transcript exceeds its 1 MiB limit, full stderr also stays inline. Expiring a
+per-agent result removes its transcript; retained synthesis reports and recent
+results keep theirs.
+
+## Learned file hints and provider history
+
+Heuristic file hints and provider history are scoped to the current Git
+worktree root, or the project directory outside Git. Hints use only existing
+relative paths within that root. Patterns in
+`~/.claude-octopus/.octo/patterns.jsonl` without a recorded root are ignored.
+Provider histories use `.octo/providers/<project-key>/` under the Octopus
+workspace. Older `.octo/providers/<provider>-history.md` files remain on disk
+but are no longer read. Each worktree builds its own history from subsequent
+runs.
+
+## Session preferences and memory
+
+SessionEnd writes `octopus-preferences.md` and `octopus-learnings.md` in the
+current project's existing Claude auto-memory directory under
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/<project-key>/memory`.
+SessionStart restores preferences from `octopus-preferences.md`. Both hooks use
+`CLAUDE_PROJECT_DIR`, or the working directory when it is absent, to select that
+project, including punctuation in the project path.
+
+If preferences are not restored, check that this project's memory directory
+exists and its preferences file is readable. Saving these project files also
+requires write access. Missing or inaccessible project storage skips these
+writes without choosing another project's directory. A `memory/` folder inside
+your repository is not used for session preferences. Existing repository-local
+memory files are left for you to review; the hooks do not migrate or remove them.
+
+Project paths that Claude maps to the same project key can still share a memory
+directory. Octopus follows that native key convention and does not distinguish
+colliding paths.
+
+Separately, SessionEnd can write structured cross-task learnings as JSON under
+`~/.claude-octopus/learnings`. This global store is shared across projects,
+including when project auto-memory storage is missing. SessionStart does not
+automatically read these JSON records. This store is separate from the project
+preferences and Markdown session learnings described above.
 
 ## Uninstall the plugin and keep local data
 

@@ -981,40 +981,6 @@ if ! council_response_is_substantive "$B2" "$ROOT" &&
    jq -e '.validation_result == "invalid-access" and .access_state == "failed" and .verdict == "APPROVE" and .evidence_paths == []' <<< "$record" >/dev/null; then test_pass
 else test_fail "an ungrounded confident approval remained a valid contribution"; fi
 
-
-# ── sail-cruisey #3244: OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1 makes a terse
-# ungrounded APPROVE blind, so summary.json agrees with a consumer that rejects
-# any counted APPROVE without a source path:line or verified quote.
-printf '# Rules\n\nEvery change needs a test.\n' > "$ROOT/RULES.md"
-TERSE_APPROVE="$(_mk terse-approve.md "No security findings in the diff. Authorization, input validation, and parameterized SQL remain intact." "" "VERDICT: APPROVE")"
-TERSE_REVISE="$(_mk terse-revise.md "The plan skips a needed test." "" "VERDICT: REVISE")"
-CITED_APPROVE="$(_mk cited-approve.md "The fallback at functions-v2/sailing-compare.ts:2 keeps the class code." "" "VERDICT: APPROVE")"
-DOC_APPROVE="$(_mk doc-approve.md "This follows RULES.md:3." "" "VERDICT: APPROVE")"
-
-test_case "#3244: by default a terse ungrounded APPROVE is not blind"
-if ! ( unset OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE; council_response_is_blind "$TERSE_APPROVE" "$ROOT" ); then test_pass
-else test_fail "default behavior changed: terse APPROVE was blind"; fi
-
-test_case "#3244: with the flag, a terse ungrounded APPROVE is blind"
-if ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$TERSE_APPROVE" "$ROOT" ); then test_pass
-else test_fail "terse ungrounded APPROVE was not blind with the flag"; fi
-
-test_case "#3244: with the flag, an APPROVE with a resolving source path:line stays grounded"
-if ! ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$CITED_APPROVE" "$ROOT" ); then test_pass
-else test_fail "a cited APPROVE was blind with the flag"; fi
-
-test_case "#3244: with the flag, an APPROVE citing only a documentation file is blind"
-if ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$DOC_APPROVE" "$ROOT" ); then test_pass
-else test_fail "a .md-only citation grounded the APPROVE"; fi
-
-test_case "#3244: the flag leaves a terse ungrounded REVISE alone"
-if ! ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$TERSE_REVISE" "$ROOT" ); then test_pass
-else test_fail "the flag blinded a REVISE"; fi
-
-test_case "#3244: the flag does not apply in fixture mode"
-if ! ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1 COUNCIL_FIXTURE=1; council_response_is_blind "$TERSE_APPROVE" "$ROOT" ); then test_pass
-else test_fail "the flag applied in fixture mode"; fi
-
 # sail-cruisey #3295: a seat that cites a file by its bare name (`pr-watchdog.yml:3`)
 # grounds the review when exactly one file under the evidence root has that name,
 # including under hidden directories such as .github/. An ambiguous name, a missing
@@ -1082,7 +1048,7 @@ for citation in outside.ts dangling.ts directory.ts linked-parent/entry.ts; do
     evidence="$(council_response_evidence_paths_json "$unsafe_resp" "$BASE_ROOT")"
     r="$(council_response_quote_verification_json "$unsafe_resp" "$BASE_ROOT")"
     if [[ "$evidence" == "[]" ]] &&
-       jq -e '.citations == 0 and .citations_unresolved == 1 and .quotes_checked == 0 and .quotes_verified == 0' <<< "$r" >/dev/null; then test_pass
+       jq -e '.verification_failed == false and .citations == 0 and .citations_unresolved == 1 and .quotes_checked == 0 and .quotes_verified == 0' <<< "$r" >/dev/null; then test_pass
     else test_fail "evidence: $evidence report: $r"; fi
 done
 
@@ -1093,5 +1059,39 @@ r="$(council_response_quote_verification_json "$safe_resp" "$BASE_ROOT")"
 if jq -e 'length == 1 and .[0].path == "inside.ts"' <<< "$evidence" >/dev/null &&
    jq -e '.citations == 1 and .citations_unresolved == 0 and .quotes_checked == 1 and .quotes_verified == 1' <<< "$r" >/dev/null; then test_pass
 else test_fail "evidence: $evidence report: $r"; fi
+
+
+# ── sail-cruisey #3244: OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1 makes a terse
+# ungrounded APPROVE blind, so summary.json agrees with a consumer that rejects
+# any counted APPROVE without a source path:line or verified quote.
+printf '# Rules\n\nEvery change needs a test.\n' > "$ROOT/RULES.md"
+TERSE_APPROVE="$(_mk terse-approve.md "No security findings in the diff. Authorization, input validation, and parameterized SQL remain intact." "" "VERDICT: APPROVE")"
+TERSE_REVISE="$(_mk terse-revise.md "The plan skips a needed test." "" "VERDICT: REVISE")"
+CITED_APPROVE="$(_mk cited-approve.md "The fallback at functions-v2/sailing-compare.ts:2 keeps the class code." "" "VERDICT: APPROVE")"
+DOC_APPROVE="$(_mk doc-approve.md "This follows RULES.md:3." "" "VERDICT: APPROVE")"
+
+test_case "#3244: by default a terse ungrounded APPROVE is not blind"
+if ! ( unset OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE; council_response_is_blind "$TERSE_APPROVE" "$ROOT" ); then test_pass
+else test_fail "default behavior changed: terse APPROVE was blind"; fi
+
+test_case "#3244: with the flag, a terse ungrounded APPROVE is blind"
+if ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$TERSE_APPROVE" "$ROOT" ); then test_pass
+else test_fail "terse ungrounded APPROVE was not blind with the flag"; fi
+
+test_case "#3244: with the flag, an APPROVE with a resolving source path:line stays grounded"
+if ! ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$CITED_APPROVE" "$ROOT" ); then test_pass
+else test_fail "a cited APPROVE was blind with the flag"; fi
+
+test_case "#3244: with the flag, an APPROVE citing only a documentation file is blind"
+if ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$DOC_APPROVE" "$ROOT" ); then test_pass
+else test_fail "a .md-only citation grounded the APPROVE"; fi
+
+test_case "#3244: the flag leaves a terse ungrounded REVISE alone"
+if ! ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1; council_response_is_blind "$TERSE_REVISE" "$ROOT" ); then test_pass
+else test_fail "the flag blinded a REVISE"; fi
+
+test_case "#3244: the flag does not apply in fixture mode"
+if ! ( OCTOPUS_COUNCIL_REQUIRE_GROUNDED_APPROVE=1 COUNCIL_FIXTURE=1; council_response_is_blind "$TERSE_APPROVE" "$ROOT" ); then test_pass
+else test_fail "the flag applied in fixture mode"; fi
 
 test_summary

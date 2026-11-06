@@ -38,7 +38,7 @@ fab="$(_resp "In src/pricing.ts:2 the base price is \`$FAKE\` which caches corre
 VERDICT: APPROVE")"
 r="$(_report "$fab")"
 if jq -e '.citations == 1 and .quotes_checked == 1 and .quotes_verified == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null &&
-   jq -e '.unverified_samples[0] | contains("fetchCabinPrice")' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+   jq -e '.unverified_samples == []' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
 test_case "a seat whose only citation quotes are fabricated is blind and not substantive"
 if council_response_is_blind "$fab" "$ROOT" && ! council_response_is_substantive "$fab" "$ROOT"; then test_pass; else test_fail "fabricated-quote seat still counted"; fi
@@ -51,6 +51,175 @@ if jq -e '.validation_result == "invalid-ungrounded" and .access_state == "evide
 else
     test_fail "record: $record"
 fi
+
+test_case "unavailable contribution records retain the grounding schema"
+record="$(council_unavailable_contribution_record_json)"
+if jq -e '.validation_result == "invalid-record" and (.grounding | type == "object") and .grounding.fabricated == false' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "fallback record lacks grounding: $record"
+fi
+
+# PR #1212 Actions follow-up: access guidance and diff metadata.
+for quote_kind in real fabricated; do
+    test_case "explicit access failure takes priority over $quote_kind quotes"
+    access_quote="$REAL_NEAR"
+    [[ "$quote_kind" == fabricated ]] && access_quote="$FAKE"
+    access_response="$(_resp "I cannot read the file.
+src/pricing.ts:2 contains \`$access_quote\`
+VERDICT: APPROVE")"
+    access_record="$(council_contribution_record_json "$access_response" "$ROOT" sha256:test)"
+    if council_response_has_access_failure "$access_response" &&
+       jq -e '.access_state == "failed" and .validation_result == "invalid-access"
+               and .evidence_paths == []' <<< "$access_record" >/dev/null; then
+        test_pass
+    else
+        test_fail "access failure lost its classification: $access_record"
+    fi
+    test_case "$quote_kind quote access failures preserve the grounding report"
+    if jq -e --arg kind "$quote_kind" '.grounding.quotes_checked == 1
+            and .grounding.fabricated == ($kind == "fabricated")' <<< "$access_record" >/dev/null; then
+        test_pass
+    else
+        test_fail "grounding evidence lost: $access_record"
+    fi
+    test_case "$quote_kind quote access failures give file-access guidance"
+    access_warnings="$(
+        COUNCIL_BLIND_SEATS=fixture
+        COUNCIL_SEAT_RECORDS_JSON="$(jq -cn --argjson record "$access_record" \
+            '[{status:"blind",provider:"fixture",contribution:$record}]')"
+        council_print_run_warnings
+    )"
+    if [[ "$access_warnings" == *"give it file-read tools"* &&
+          "$access_warnings" != *"grounding verification failed"* ]]; then
+        test_pass
+    else
+        test_fail "wrong access guidance: $access_warnings"
+    fi
+done
+
+marker_root="$(mktemp -d "$TEST_TMP_DIR/diff-marker.XXXXXX")"
+mkdir -p "$marker_root/src"
+marker_old='const amount = calculateLegacyRate(pricing.base);'
+marker_new='const amount = calculateCurrentRate(pricing.base);'
+printf '%s' "$marker_old" > "$marker_root/src/pricing.ts"
+git -C "$marker_root" init -q
+git -C "$marker_root" add src/pricing.ts
+git -C "$marker_root" -c user.name=Test -c user.email=test@example.invalid \
+    -c core.hooksPath=/dev/null commit -qm initial
+printf '%s' "$marker_new" > "$marker_root/src/pricing.ts"
+for marker_ending in lf crlf; do
+    marker_text='\ No newline at end of file'
+    [[ "$marker_ending" == crlf ]] && marker_text="${marker_text}"$'\r'
+    for marker_shape in added removed mixed hunk; do
+        marker_body="+$marker_new
+$marker_text"
+        case "$marker_shape" in
+            removed) marker_body="-$marker_old
+$marker_text" ;;
+            mixed|hunk) marker_body="-$marker_old
+$marker_text
++$marker_new
+$marker_text" ;;
+        esac
+        if [[ "$marker_shape" == hunk ]]; then
+            marker_body="--- a/src/pricing.ts
++++ b/src/pricing.ts
+@@ -1 +1 @@
+$marker_body"
+        fi
+        test_case "$marker_ending no-newline markers are metadata in $marker_shape quotes"
+        marker_response="$(_resp "src/pricing.ts:1 contains
+\`\`\`diff
+$marker_body
+\`\`\`
+VERDICT: APPROVE")"
+        marker_report="$(council_response_quote_verification_json "$marker_response" "$marker_root")"
+        if jq -e '.verification_failed == false and .diff_unavailable == false
+                and .quotes_checked == 1 and .quotes_verified == 1
+                and .quotes_unverified == 0 and .fabricated == false' <<< "$marker_report" >/dev/null; then
+            test_pass
+        else
+            test_fail "diff metadata counted as source: $marker_report"
+        fi
+    done
+done
+for marker_side in added removed; do
+    test_case "no-newline marker does not excuse invented $marker_side source"
+    marker_body="+$FAKE"
+    [[ "$marker_side" == removed ]] && marker_body="-$FAKE"
+    marker_response="$(_resp "src/pricing.ts:1 contains
+\`\`\`diff
+$marker_body
+\ No newline at end of file
+\`\`\`
+VERDICT: APPROVE")"
+    marker_report="$(council_response_quote_verification_json "$marker_response" "$marker_root")"
+    if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .fabricated == true' \
+            <<< "$marker_report" >/dev/null; then
+        test_pass
+    else
+        test_fail "invented source accepted: $marker_report"
+    fi
+done
+# End PR #1212 Actions follow-up.
+
+# Grounding report privacy: exercise both direct reports and the contribution
+# object that is persisted in summary.json, without redaction prerequisites.
+sample_root="$(mktemp -d "$TEST_TMP_DIR/quote-private.XXXXXX")"
+mkdir -p "$sample_root/src"
+cp "$ROOT/src/pricing.ts" "$sample_root/src/pricing.ts"
+git -C "$sample_root" init -q
+git -C "$sample_root" add src/pricing.ts
+git -C "$sample_root" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit -qm initial
+private_marker="sk-$(printf 'q%.0s' {1..48})"
+private_quote="const credential = \"$private_marker\";"
+for sample_kind in inline fenced mixed repeated; do
+    sample_checked=1; sample_verified=0; sample_unverified=1
+    case "$sample_kind" in
+        inline) sample_body="src/pricing.ts:2 reads \`$private_quote\`" ;;
+        fenced) sample_body="src/pricing.ts:2 reads
+\`\`\`ts
+$private_quote
+\`\`\`" ;;
+        mixed)
+            sample_body="src/pricing.ts:2 reads \`$REAL_NEAR\`.
+
+src/pricing.ts:2 reads \`$private_quote\`"
+            sample_checked=2; sample_verified=1 ;;
+        repeated)
+            sample_body=""
+            for sample_number in 1 2 3 4; do
+                sample_body="${sample_body}src/pricing.ts:2 reads \`$private_quote\`
+
+"
+            done
+            sample_checked=4; sample_unverified=4 ;;
+    esac
+    sample_response="$(_resp "$sample_body
+VERDICT: APPROVE")"
+    for sample_api in report contribution; do
+        test_case "$sample_kind unverified quotes retain counts without provider excerpts in $sample_api"
+        if [[ "$sample_api" == report ]]; then
+            sample_result="$(unset -f sanitize_secrets; council_response_quote_verification_json "$sample_response" "$sample_root")"
+        else
+            sample_result="$(unset -f sanitize_secrets; council_contribution_record_json "$sample_response" "$sample_root" sha256:test)"
+        fi
+        if [[ "$sample_result" != *"$private_marker"* ]] &&
+           jq -e --arg api "$sample_api" --argjson checked "$sample_checked" \
+               --argjson verified "$sample_verified" --argjson unverified "$sample_unverified" '
+               (if $api == "contribution" then select(.validation_result == "invalid-ungrounded") | .grounding else . end)
+               | .verification_failed == false and .diff_unavailable == false and .quotes_checked == $checked
+                 and .quotes_verified == $verified and .quotes_unverified == $unverified
+                 and .quotes_attributed_unverified == $unverified and .fabricated == true
+                 and .unverified_samples == []' <<< "$sample_result" >/dev/null; then
+            test_pass
+        else
+            test_fail "provider excerpts escaped or grounding counts/rejection changed"
+        fi
+    done
+done
+# End grounding report privacy controls.
 
 test_case "a real quote near the cited line verifies (near_line) and stays valid-grounded"
 real="$(_resp "In src/pricing.ts:2 the fallback \`$REAL_NEAR\` is correct.
@@ -93,18 +262,251 @@ fenced="$(_resp "Reviewed src/pricing.ts:2:
 \`\`\`
 and the change:
 \`\`\`diff
-@@ -1,4 +1,4 @@
+@@ -2 +3 @@
 -  const base = cabin.oldPrice || sailing.legacyPrice;
 +  if (!base) return null;
 \`\`\`
 VERDICT: APPROVE")"
-r="$(_report "$fenced")"
-if jq -e '.quotes_checked == 2 and .quotes_verified == 2 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+gutter_diff="$TEST_TMP_DIR/gutter-reviewed.diff"
+printf '@@ -2 +3 @@\n-  const base = cabin.oldPrice || sailing.legacyPrice;\n+  if (!base) return null;\n' > "$gutter_diff"
+r="$(COUNCIL_CONTEXT_FILES=("$gutter_diff"); _report "$fenced")"
+if jq -e '.quotes_checked == 2 and .quotes_verified == 2 and .quotes_verified_in_diff_removed == 1
+          and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-test_case "an elided quote verifies when each specific piece is in the file"
+test_case "a current added line cannot verify an unsupported removal in the same fence"
+r="$(_report "$fenced")"
+if jq -e '.quotes_checked == 2 and .quotes_verified == 1 and .quotes_unverifiable_claimed_removed == 1
+          and .quotes_verified_in_diff_removed == 0 and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "the source-only match vouched for removed code: $r"
+fi
+
+# A known empty diff makes these fabricated-source assertions independent of
+# the host's temporary-directory Git configuration.
+fence_root="$(mktemp -d "$TEST_TMP_DIR/fence-evidence.XXXXXX")"
+mkdir -p "$fence_root/src"
+cp "$ROOT/src/pricing.ts" "$fence_root/src/pricing.ts"
+git -C "$fence_root" init -q
+git -C "$fence_root" add src
+git -C "$fence_root" -c user.name=Test -c user.email=test@example.invalid commit -qm baseline
+for verb in defines declares define declare defined declared; do
+    test_case "an invented quote after $verb rejects approval even beside a genuine quote"
+    response="$(_resp "src/pricing.ts:2 $verb \`$FAKE\`
+
+src/pricing.ts:2 reads \`$REAL_NEAR\`
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$response" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "invalid-ungrounded" and .access_state == "evidence-rejected"
+            and .evidence_paths == [] and .grounding.quotes_checked == 2
+            and .grounding.quotes_verified == 1 and .grounding.quotes_attributed == 2
+            and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated == true' <<< "$record" >/dev/null &&
+       ! council_response_is_substantive "$response" "$fence_root"; then test_pass; else test_fail "record: $record"; fi
+done
+
+for verb in defines declares; do
+    test_case "a genuine quote after $verb remains valid"
+    response="$(_resp "src/pricing.ts:2 $verb \`$REAL_NEAR\`
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$response" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "valid-grounded" and .verdict == "APPROVE"
+            and .grounding.quotes_verified == 1 and .grounding.quotes_attributed == 1
+            and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+
+    test_case "a proposed quote before $verb is not a claim about current source"
+    response="$(_resp "Proposal: src/pricing.ts:2 $verb \`$FAKE\`
+
+src/pricing.ts:2 reads \`$REAL_NEAR\`
+VERDICT: REVISE")"
+    record="$(council_contribution_record_json "$response" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "valid-grounded" and .verdict == "REVISE"
+            and .grounding.quotes_verified == 1 and .grounding.quotes_unverifiable_proposed == 1
+            and .grounding.quotes_attributed_unverified == 0 and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+
+    test_case "an inline suggestion after the citation remains a proposal despite $verb"
+    response="$(_resp "src/pricing.ts:2 should be rewritten so it $verb \`$FAKE\`
+
+src/pricing.ts:2 reads \`$REAL_NEAR\`
+VERDICT: REVISE")"
+    record="$(council_contribution_record_json "$response" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "valid-grounded" and .grounding.quotes_verified == 1
+            and .grounding.quotes_unverifiable_proposed == 1
+            and .grounding.quotes_attributed_unverified == 0 and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+
+    test_case "a tilde-fenced invention after $verb rejects approval beside a genuine quote"
+    response="$(_resp "src/pricing.ts:2 $verb:
+~~~ts
+$FAKE
+~~~
+
+src/pricing.ts:2 reads \`$REAL_NEAR\`
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$response" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "invalid-ungrounded" and .access_state == "evidence-rejected"
+            and .evidence_paths == [] and .grounding.quotes_verified == 1
+            and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated == true' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+done
+
+for marker in '~~~' '~~~~' '````'; do
+    test_case "invented source in a $marker fence rejects the contribution"
+    fenced="$(_resp "src/pricing.ts:2 reads:
+${marker}ts
+$FAKE
+$marker
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$fenced" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "invalid-ungrounded" and .access_state == "evidence-rejected"
+            and .evidence_paths == [] and .grounding.quotes_checked == 1
+            and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated == true' <<< "$record" >/dev/null &&
+       ! council_response_is_substantive "$fenced" "$fence_root"; then test_pass; else test_fail "record: $record"; fi
+done
+
+for marker in '```' '````'; do
+    test_case "a $marker fence with backticks in its info cannot hide invented source"
+    fenced="$(_resp "src/pricing.ts:2 reads:
+$marker \`evil\` marker
+$FAKE
+$marker
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$fenced" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "invalid-ungrounded" and .access_state == "evidence-rejected"
+            and .evidence_paths == [] and .grounding.quotes_checked == 1
+            and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated == true' <<< "$record" >/dev/null &&
+       ! council_response_is_substantive "$fenced" "$fence_root"; then test_pass; else test_fail "record: $record"; fi
+
+    test_case "a genuine quote cannot mask invention inside a malformed $marker fence"
+    fenced="$(_resp "src/pricing.ts:2 reads:
+$marker \`evil\` marker
+$FAKE
+$marker
+
+src/pricing.ts:2 reads \`$REAL_NEAR\`
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$fenced" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "invalid-ungrounded" and .evidence_paths == []
+            and .grounding.quotes_checked == 2 and .grounding.quotes_verified == 1
+            and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated == true' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+
+    test_case "a genuine quote inside a malformed $marker fence retains grounding"
+    fenced="$(_resp "src/pricing.ts:2 reads:
+$marker \`ts\` marker
+$REAL_NEAR
+$marker
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$fenced" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "valid-grounded" and .verdict == "APPROVE"
+            and .grounding.quotes_checked == 1 and .grounding.quotes_verified == 1
+            and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+
+    test_case "a proposal inside a malformed $marker fence is not fabricated source"
+    fenced="$(_resp "src/pricing.ts:2 should become:
+$marker \`ts\` marker
+$FAKE
+$marker
+VERDICT: REVISE")"
+    record="$(council_contribution_record_json "$fenced" "$fence_root" sha256:test)"
+    if jq -e '.validation_result == "valid-grounded" and .verdict == "REVISE"
+            and .grounding.quotes_unverifiable_proposed == 1
+            and .grounding.quotes_attributed_unverified == 0 and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+done
+
+test_case "a real tilde-fenced quote with inline backticks is checked once"
+printf '%s\n' 'const label = `cabin ${cabin.id}`;' > "$fence_root/src/template.ts"
+fenced="$(_resp 'src/template.ts:1 reads:
+~~~ts
+const label = `cabin ${cabin.id}`;
+~~~~
+VERDICT: APPROVE')"
+record="$(council_contribution_record_json "$fenced" "$fence_root" sha256:test)"
+if jq -e '.validation_result == "valid-grounded" and .verdict == "APPROVE"
+        and .grounding.quotes_checked == 1 and .grounding.quotes_verified == 1
+        and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+
+for false_close in '~~~' '````' '~~~~ts'; do
+    test_case "$false_close cannot close a four-tilde fence before an invented quote"
+    fenced="$(_resp "src/pricing.ts:2 reads:
+~~~~ts
+$false_close
+$FAKE
+~~~~
+VERDICT: APPROVE")"
+    r="$(council_response_quote_verification_json "$fenced" "$fence_root")"
+    if jq -e '.quotes_checked == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+test_case "an unterminated tilde fence still checks its source quote"
+fenced="$(_resp "src/pricing.ts:2 reads:
+~~~ts
+$FAKE")"
+r="$(council_response_quote_verification_json "$fenced" "$fence_root")"
+if jq -e '.quotes_checked == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "an elided quote verifies when its specific pieces occur in source order"
 elided="$(_resp "src/pricing.ts:1 \`export function priceFor(cabin, sailing) { ... return applyTaxes(base, sailing.portFees);\`
 VERDICT: APPROVE")"
 if [[ "$(_field "$elided" quotes_verified)" == 1 ]]; then test_pass; else test_fail "report: $(_report "$elided")"; fi
+
+# Elided fragments must advance by character offsets, including within a line.
+elision_root="$(mktemp -d "$TEST_TMP_DIR/elision-order.XXXXXX")"
+mkdir -p "$elision_root/src"
+elision_first='const firstValue = source.first ?? fallbackFirst;'
+elision_second='const secondValue = source.second ?? fallbackSecond;'
+elision_third='const thirdValue = source.third ?? fallbackThird;'
+for elision_case in reversed same-line-reversed same-line-ordered reused-occurrence repeated-ordered three-piece-reversed; do
+    printf '%s\n' "$elision_first" "$elision_second" "$elision_third" > "$elision_root/src/ordered.ts"
+    elision_verified=0
+    case "$elision_case" in
+        reversed) elision_quote="$elision_second ... $elision_first" ;;
+        same-line-reversed)
+            printf '%s %s\n' "$elision_first" "$elision_second" > "$elision_root/src/ordered.ts"
+            elision_quote="$elision_second … $elision_first" ;;
+        same-line-ordered)
+            printf '%s %s\n' "$elision_first" "$elision_second" > "$elision_root/src/ordered.ts"
+            elision_quote="$elision_first … $elision_second"; elision_verified=1 ;;
+        reused-occurrence) elision_quote="$elision_first ... $elision_first" ;;
+        repeated-ordered)
+            printf '%s\n' "$elision_second" "$elision_first" "$elision_second" > "$elision_root/src/ordered.ts"
+            elision_quote="$elision_second ... $elision_first ... $elision_second"; elision_verified=1 ;;
+        three-piece-reversed) elision_quote="$elision_first ... $elision_third ... $elision_second" ;;
+    esac
+    test_case "elided source order: $elision_case"
+    elision_response="$(_resp "src/ordered.ts:1 reads \`$elision_quote\`.")"
+    r="$(council_response_quote_verification_json "$elision_response" "$elision_root")"
+    if jq -e --argjson verified "$elision_verified" '
+        .quotes_checked == 1 and .quotes_verified == $verified
+        and .quotes_unverified == (1 - $verified)
+        and .quotes_attributed_unverified == (1 - $verified)
+        and .fabricated == ($verified == 0)' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+elision_diff="$TEST_TMP_DIR/elision-reviewed.diff"
+elision_added_first='const addedFirst = revised.first ?? revisedFallback;'
+elision_added_second='const addedSecond = revised.second ?? revisedFallback;'
+printf '@@ -1,2 +1,2 @@\n-%s\n-%s\n+%s\n+%s\n' \
+    "$elision_first" "$elision_second" "$elision_added_first" "$elision_added_second" > "$elision_diff"
+printf 'export const currentValue = source.current;\n' > "$elision_root/src/ordered.ts"
+for elision_side in removed added; do
+    elision_a="$elision_first"; elision_b="$elision_second"
+    if [[ "$elision_side" == added ]]; then
+        elision_a="$elision_added_first"; elision_b="$elision_added_second"
+    fi
+    for elision_order in ordered reversed; do
+        elision_quote="$elision_a ... $elision_b"
+        if [[ "$elision_order" == reversed ]]; then
+            elision_quote="$elision_b ... $elision_a"
+        fi
+        elision_verified=0
+        [[ "$elision_order" != ordered ]] || elision_verified=1
+        test_case "elided source order in $elision_side diff: $elision_order"
+        elision_response="$(_resp "The $elision_side code in src/ordered.ts:1 reads \`$elision_quote\`.")"
+        r="$(COUNCIL_CONTEXT_FILES=("$elision_diff"); council_response_quote_verification_json "$elision_response" "$elision_root")"
+        if jq -e --argjson verified "$elision_verified" --arg side "$elision_side" '
+            .quotes_checked == 1 and .quotes_verified == $verified
+            and .quotes_unverified == (1 - $verified)
+            and .["quotes_verified_in_diff_" + $side] == $verified
+            and .fabricated == ($verified == 0)' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+    done
+done
+# End elided source order controls.
 
 test_case "a quote far beyond the proximity window of every citation is not checked"
 pad="$(head -c 1700 /dev/zero | tr '\0' 'x')"
@@ -152,6 +554,75 @@ fi
 
 test_case "OCTOPUS_COUNCIL_QUOTE_VERIFY=0 disables the check"
 if ! OCTOPUS_COUNCIL_QUOTE_VERIFY=0 council_response_quotes_fabricated "$fab" "$ROOT"; then test_pass; else test_fail "opt-out ignored"; fi
+
+test_case "an overflowing citation cannot hide an invented quote behind a verifier crash"
+overflow="$(_resp "src/pricing.ts:2 reads \`$FAKE\`.
+
+Noise src/ghost.ts:$(printf '%05000d' 0 | tr 0 9)
+VERDICT: APPROVE")"
+record="$(council_contribution_record_json "$overflow" "$ROOT" sha256:overflow)"
+if jq -e '.validation_result == "invalid-ungrounded"' <<< "$record" >/dev/null &&
+   council_response_is_blind "$overflow" "$ROOT"; then test_pass; else test_fail "verifier crash granted grounding: $record"; fi
+
+for failure_output in empty partial; do
+    test_case "a verifier process failure with $failure_output stdout rejects a real citation"
+    failure_response="$(_resp "src/pricing.ts:2 reads \`$REAL_NEAR\`.
+VERDICT: APPROVE")"
+    failure_record="$(
+        python3() {
+            if [[ "${1:-}" == -I ]]; then
+                [[ "$failure_output" != partial ]] || printf '{"verification_failed":false'
+                return 1
+            fi
+            command python3 "$@"
+        }
+        council_contribution_record_json "$failure_response" "$ROOT" sha256:process-failure
+    )" || failure_record='{}'
+    if jq -e '.validation_result == "invalid-ungrounded" and .grounding.verification_failed == true
+            and .grounding.fabricated == false' <<< "$failure_record" >/dev/null; then
+        test_pass
+    else
+        test_fail "failed verifier granted grounding or returned malformed JSON: $failure_record"
+    fi
+done
+
+test_case "missing Python preserves the legacy unverified prose fallback"
+missing_python="$(
+    # Bash 3.2 can retain a cached command with a function-local PATH override.
+    # Clear it in this subshell to simulate an actually unavailable executable.
+    PATH=/nonexistent
+    hash -r
+    council_response_quote_verification_json "$fab" "$ROOT"
+)"
+missing_record="$(
+    command() {
+        [[ "$*" != '-v python3' ]] || return 1
+        builtin command "$@"
+    }
+    council_contribution_record_json "$noquote" "$ROOT" sha256:missing-python
+)"
+if jq -e '(.verification_failed // false) == false and .citations == 0 and .fabricated == false' <<< "$missing_python" >/dev/null &&
+   jq -e '.validation_result == "valid-unverified" and .evidence_paths == []' <<< "$missing_record" >/dev/null; then
+    test_pass
+else
+    test_fail "missing Python changed availability or granted validated evidence: $missing_python $missing_record"
+fi
+
+for malformed_report in 'not-json' '{"fabricated":false} {"fabricated":false}' 'null'; do
+    test_case "an invalid precomputed grounding report cannot grant approval"
+    if council_response_quotes_fabricated "$fab" "$ROOT" "$malformed_report"; then
+        test_pass
+    else
+        test_fail "invalid grounding report was accepted: $malformed_report"
+    fi
+done
+
+test_case "the explicit quote-verification opt-out still bypasses failure reports"
+if ! OCTOPUS_COUNCIL_QUOTE_VERIFY=0 council_response_quotes_fabricated "$fab" "$ROOT" '{"verification_failed":true}'; then
+    test_pass
+else
+    test_fail "verification failure ignored the explicit opt-out"
+fi
 
 test_case "missing evidence root reports nothing and never fabricates"
 if [[ "$(council_response_quote_verification_json "$fab" "$ROOT/does-not-exist" | jq -r '.fabricated')" == false ]] &&
@@ -215,6 +686,96 @@ r="$(_greport "$git_mixed")"
 if jq -e '.quotes_checked == 2 and .quotes_verified_in_diff_removed == 1 and .quotes_unverified == 1 and .fabricated == false' <<< "$r" >/dev/null &&
    ! council_response_is_blind "$git_mixed" "$GROOT"; then test_pass; else test_fail "report: $r"; fi
 
+# One real diff line must not verify an otherwise invented multi-line quote.
+for diff_side in removed added; do
+    reviewed="$TEST_TMP_DIR/threshold-$diff_side.diff"
+    sign=-
+    [[ "$diff_side" != added ]] || sign=+
+    printf 'diff --git a/src/book.ts b/src/book.ts\n--- a/src/book.ts\n+++ b/src/book.ts\n@@ -1,3 +1,3 @@\n%s%s\n%s%s\n' \
+        "$sign" "$GUARD" "$sign" 'const closedBookings = sailing.closedBookings ?? [];' > "$reviewed"
+    for quote_kind in ts diff; do
+        [[ "$quote_kind" != diff || "$diff_side" == removed ]] || continue
+        prefix=""
+        [[ "$quote_kind" != diff ]] || prefix=-
+        for genuine_lines in 1 2; do
+            test_case "a $quote_kind quote with $genuine_lines real $diff_side lines out of three"
+            second='const inventedReservations = fetchUnknownReservations(sailing);'
+            [[ "$genuine_lines" != 2 ]] || second='const closedBookings = sailing.closedBookings ?? [];'
+            f="$(_resp "src/book.ts:2 reads:
+\`\`\`$quote_kind
+$prefix$GUARD
+$prefix$second
+${prefix}return approveImaginaryRefund(sailing, cabin);
+\`\`\`
+VERDICT: APPROVE")"
+            # The citation must resolve in the selected evidence root.
+            r="$(COUNCIL_CONTEXT_FILES=("$reviewed"); _greport "$f")"
+            if [[ "$genuine_lines" == 1 ]]; then
+                if ! jq -e '.quotes_verified == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then
+                    test_fail "one real $diff_side line verified a $quote_kind block: $r"
+                    continue
+                fi
+            elif ! jq -e --arg field "quotes_verified_in_diff_$diff_side" '.quotes_verified == 1 and .[$field] == 1 and .quotes_partial == 1 and .fabricated == false' <<< "$r" >/dev/null; then
+                test_fail "two real $diff_side lines failed to verify a $quote_kind block: $r"
+                continue
+            fi
+            test_pass
+        done
+    done
+done
+
+# A fence partial on the removed side but exact on the added side is not
+# partial; the removed side still decides where it verified.
+# A fence partial in the cited file but complete in the reviewed diff is not
+# partial; the file match still decides the verified count.
+test_case "#3247: a fence partial in the file but complete in the diff is not partial"
+full_added="$TEST_TMP_DIR/full-added.diff"
+printf 'diff --git a/src/book.ts b/src/book.ts\n--- a/src/book.ts\n+++ b/src/book.ts\n@@ -0,0 +1,3 @@\n+%s\n+  %s\n+%s\n' \
+    'export function book(sailing, cabin) {' "$GUARD" '  return reserve(sailing, cabin);' > "$full_added"
+r="$(COUNCIL_CONTEXT_FILES=("$full_added"); _greport "$(_resp "src/book.ts:1 reads:
+\`\`\`ts
+export function book(sailing, cabin) {
+  $GUARD
+  return reserve(sailing, cabin);
+\`\`\`
+VERDICT: REVISE")")"
+if jq -e '.quotes_verified == 1 and .quotes_verified_in_diff_removed == 0 and .quotes_partial == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: a fence exact on the added side is not partial"
+both_sides="$TEST_TMP_DIR/both-sides.diff"
+window='const refundWindow = sailing.refundWindowDays ?? 14;'
+printf 'diff --git a/src/book.ts b/src/book.ts\n--- a/src/book.ts\n+++ b/src/book.ts\n@@ -1,2 +1,3 @@\n-%s\n-%s\n+%s\n+%s\n+%s\n' \
+    "$GUARD" 'const closedBookings = sailing.closedBookings ?? [];' \
+    "$GUARD" 'const closedBookings = sailing.closedBookings ?? [];' "$window" > "$both_sides"
+f="$(_resp "src/book.ts:2 reads:
+\`\`\`ts
+$GUARD
+const closedBookings = sailing.closedBookings ?? [];
+$window
+\`\`\`
+VERDICT: APPROVE")"
+r="$(COUNCIL_CONTEXT_FILES=("$both_sides"); _greport "$f")"
+if jq -e '.quotes_verified == 1 and .quotes_verified_in_diff_removed == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "an oversized response reports the limit and cannot count as grounded"
+oversized="$TEST_TMP_DIR/oversized-response.md"
+python3 - "$oversized" "$FAKE" <<'PY_OVERSIZED'
+import sys
+with open(sys.argv[1], "w") as handle:
+    handle.write("src/pricing.ts:2 reads `%s`.\n" % sys.argv[2])
+    handle.write("Padding " * 150000)
+    handle.write("\nVERDICT: APPROVE\n")
+PY_OVERSIZED
+r="$(_report "$oversized")"
+record="$(council_contribution_record_json "$oversized" "$ROOT" sha256:oversized)"
+if jq -e '.response_oversized == true and .fabricated == false and .quotes_verified == 0' <<< "$r" >/dev/null &&
+   jq -e '.validation_result == "invalid-ungrounded" and .evidence_paths == [] and .grounding.response_oversized == true' <<< "$record" >/dev/null &&
+   ! council_response_is_substantive "$oversized" "$ROOT"; then
+    test_pass
+else
+    test_fail "oversized report: $r record: $record"
+fi
+
 test_case "OCTOPUS_COUNCIL_DIFF_BASE selects a committed base (removal already committed)"
 git -C "$GROOT" -c user.email=t@example.invalid -c user.name=t commit -q -am remove-guard
 r_head="$(_greport "$removed_only")"
@@ -225,6 +786,20 @@ if jq -e '.quotes_verified == 0' <<< "$r_head" >/dev/null &&
 else
     test_fail "head: $r_head base: $r_base"
 fi
+
+for unavailable_base in missing-review-revision --invalid-option; do
+    test_case "an unavailable diff base preserves uncertainty: $unavailable_base"
+    f="$(_resp "src/book.ts:2 reads \`$GUARD\`.
+VERDICT: REVISE")"
+    r="$(OCTOPUS_COUNCIL_DIFF_BASE="$unavailable_base" _greport "$f")"
+    if jq -e '.diff_unavailable == true and .diff_truncated == false and .quotes_unverifiable_diff_incomplete == 1
+              and .quotes_attributed_unverified == 0 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+       ! OCTOPUS_COUNCIL_DIFF_BASE="$unavailable_base" council_response_quotes_fabricated "$f" "$GROOT"; then
+        test_pass
+    else
+        test_fail "failed diff became definitive negative evidence: $r"
+    fi
+done
 
 test_case "a --context-file diff supplies the removed side (non-git root, fenced '-' lines)"
 ctx_diff="$TEST_TMP_DIR/reviewed.diff"
@@ -241,6 +816,33 @@ else
     test_fail "report: $r"
 fi
 
+test_case "invented all-removed diff fences are fabricated when real diff evidence exists"
+invented_removed="$(_resp "src/pricing.ts:2 reads:
+\`\`\`diff
+- $FAKE
+\`\`\`
+VERDICT: APPROVE")"
+r="$(COUNCIL_CONTEXT_FILES=("$ctx_diff"); _report "$invented_removed")"
+if jq -e '.quotes_checked == 1 and .quotes_unverified == 1 and .quotes_attributed_unverified == 1
+          and .quotes_unverifiable_command == 0 and .fabricated == true' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "report: $r"
+fi
+
+test_case "a source quote present in another cited file follows the grounding contract"
+cross_root="$(mktemp -d "$TEST_TMP_DIR/cross-cited.XXXXXX")"
+mkdir -p "$cross_root/src"
+cp "$ROOT/src/pricing.ts" "$cross_root/src/pricing.ts"
+printf '%s\n' "$FAKE" > "$cross_root/src/elsewhere.ts"
+cross_cited="$(_resp "src/pricing.ts:2 reads \`$FAKE\`.
+
+See src/elsewhere.ts:1 for related evidence.
+VERDICT: APPROVE")"
+r="$(council_response_quote_verification_json "$cross_cited" "$cross_root")"
+if jq -e '.citations == 2 and .quotes_verified == 1 and .quotes_attributed_unverified == 0
+          and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "a quote found only on the diff's added side verifies (working tree vs cited file timing)"
 printf 'diff --git a/src/pricing.ts b/src/pricing.ts\n@@ -4,1 +4,1 @@\n-  return applyTaxes(base, sailing.portFees);\n+  return applyTaxes(base, sailing.portFees, sailing.region);\n' > "$ctx_diff"
 added_resp="$(_resp "src/pricing.ts:4 now does \`return applyTaxes(base, sailing.portFees, sailing.region);\` correctly.
@@ -252,52 +854,559 @@ test_case "a non-diff context file's '- ' bullets are not treated as removed cod
 ctx_plan="$TEST_TMP_DIR/plan.md"
 printf '# Plan\n\n- const base = await fetchCabinPrice(cabin.id, { cache: true });\n' > "$ctx_plan"
 r="$(COUNCIL_CONTEXT_FILES=("$ctx_plan"); _report "$fab")"
-# The bullet's text still grounds the quote as plan context (sail-cruisey #3118),
-# but never as a diff side.
-if jq -e '.quotes_verified_in_diff_removed == 0 and .quotes_verified_in_diff_added == 0
-          and .quotes_verified_in_context == 1 and .diff_sources == ["context-file-text"]' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+if jq -e '.fabricated == true and .diff_sources == []' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-# ── sail-cruisey #3118: a seat reviewing a PLAN quotes the plan's proposed code
-# under the source file it would change. That code is in no source file and no
-# diff, but it is in the prose --context-file the seat was given.
-PLAN_CODE='const reportErr = new Error(`price lookup failed for ${cabin.id}`);'
-plan3118="$TEST_TMP_DIR/plan-3118.md"
-printf '# Plan\n\nStep 2: in src/pricing.ts, before the return:\n\n```ts\n%s\nreportError(reportErr);\n```\n' "$PLAN_CODE" > "$plan3118"
-plan_other="$TEST_TMP_DIR/plan-3118-other.md"
-printf '# Plan\n\nStep 2: log the failure in src/pricing.ts with the shared logger.\n' > "$plan_other"
-plan_quote="$(_resp "src/pricing.ts:3:
+# sail-cruisey #3247 chunk A: a seat describing a test input it built is not
+# quoting the file it cites. Its only checked quote failed, so the seat was
+# fabricated and blind despite eight real citations.
+test_case "#3247: an input the seat constructed is its own, not a quote"
+r="$(_report "$(_resp 'At src/pricing.ts:2, a 360-character row constructed as `"Order total $5.00".padEnd(80, " ") + "invalid".repeat(40)` becomes a valid total.
+VERDICT: REVISE')")"
+if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an invented quote the citation reads is still fabricated"
+r="$(_report "$(_resp "src/pricing.ts:2 reads \`$FAKE\` and the row is constructed later.
+VERDICT: REVISE")")"
+if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# sail-cruisey #3247 chunk C: a fence of mostly real lines verifies at the
+# two-thirds threshold even when one line is invented. The report now counts
+# such a fence as partial, without changing the verdict.
+test_case "#3247: a fence that verifies with an invented line is counted as partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
 \`\`\`ts
-$PLAN_CODE
+export function priceFor(cabin, sailing) {
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  if (!base) return null;
+  $FAKE
+  return applyTaxes(base, sailing.portFees);
 \`\`\`
-The plan's guard is sound.
-VERDICT: APPROVE")"
 
-test_case "#3118: plan-only code attributed to a source citation verifies against the prose context file"
-r="$(COUNCIL_CONTEXT_FILES=("$plan3118"); _report "$plan_quote")"
-blind=no; (COUNCIL_CONTEXT_FILES=("$plan3118"); council_response_is_blind "$plan_quote" "$ROOT") && blind=yes
-if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_verified_in_context == 1 and .quotes_unverified == 0
-          and .fabricated == false and .diff_sources == ["context-file-text"]' <<< "$r" >/dev/null && [[ "$blind" == no ]]; then
-    test_pass
-else
-    test_fail "blind=$blind report: $r"
-fi
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-test_case "#3118 placebo: the same quote absent from the attached plan is still fabricated"
-r="$(COUNCIL_CONTEXT_FILES=("$plan_other"); _report "$plan_quote")"
-blind=no; (COUNCIL_CONTEXT_FILES=("$plan_other"); council_response_is_blind "$plan_quote" "$ROOT") && blind=yes
-if jq -e '.quotes_verified_in_context == 0 and .quotes_attributed_unverified == 1 and .fabricated == true and .diff_sources == []' <<< "$r" >/dev/null &&
-   [[ "$blind" == yes ]]; then test_pass; else test_fail "blind=$blind report: $r"; fi
+test_case "#3247: an exact fence is not partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
 
-test_case "#3118: an elided quote verifies when each specific piece is in the plan text"
-elided="$(_resp "src/pricing.ts:3:
 \`\`\`ts
-const reportErr = new Error(\`price lookup failed
-...
-reportError(reportErr);
+export function priceFor(cabin, sailing) {
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  if (!base) return null;
+  return applyTaxes(base, sailing.portFees);
 \`\`\`
-VERDICT: APPROVE")"
-r="$(COUNCIL_CONTEXT_FILES=("$plan3118"); _report "$elided")"
-if jq -e '.quotes_verified_in_context == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# A content verb before the proposal wording keeps the citation's claim: the
+# seat says the file holds this code. A first-person subject between them
+# still marks the seat's own input.
+test_case "#3247: a citation that contains code built as an invented quote is fabricated"
+r="$(_report "$(_resp "src/pricing.ts:2 contains the code built as \`$FAKE\` today.
+VERDICT: REVISE")")"
+if jq -e '.quotes_attributed_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an input the seat itself built after a content verb stays its own"
+r="$(_report "$(_resp 'src/pricing.ts:2 reads the base price from a row I constructed as `"Order total $5.00".padEnd(80, " ") + "invalid".repeat(40)` for this test.
+VERDICT: REVISE')")"
+if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an invented short line in a fence that verifies is counted as partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  return true;
+  return applyTaxes(base, sailing.portFees);
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: a real short line in a fence that verifies is not partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  return applyTaxes(base, sailing.portFees);
+}
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an invented short line between elision markers is counted as partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  ...
+  return true;
+  ...
+  return applyTaxes(base, sailing.portFees);
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: an elided fence of real lines is not partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  ...
+  return applyTaxes(base, sailing.portFees);
+}
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: a blockquote with an unmatched line is not a partial fence"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+
+> const base = cabin.basePrice ?? sailing.defaultPrice;
+> const invented = fetchUnknownReservations(sailing);
+> return applyTaxes(base, sailing.portFees);
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3247: a fence complete in a later cited file is not partial"
+PROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-partial.XXXXXX")"
+mkdir -p "$PROOT/src"
+printf '%s\n' 'export function priceFor(cabin, sailing) {' '  const base = cabin.basePrice ?? sailing.defaultPrice;' \
+    '  return applyTaxes(base, sailing.portFees);' '}' > "$PROOT/src/a.ts"
+printf '%s\n' 'export function priceFor(cabin, sailing) {' '  const base = cabin.basePrice ?? sailing.defaultPrice;' \
+    '  const fees = sailing.portFees.filter(Boolean);' '  return applyTaxes(base, sailing.portFees);' '}' > "$PROOT/src/b.ts"
+r="$(council_response_quote_verification_json "$(_resp "src/a.ts:1 and src/b.ts:1 read:
+
+\`\`\`ts
+  const base = cabin.basePrice ?? sailing.defaultPrice;
+  const fees = sailing.portFees.filter(Boolean);
+  return applyTaxes(base, sailing.portFees);
+\`\`\`
+
+VERDICT: APPROVE")" "$PROOT")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+
+# A seat's own arithmetic is a computed value, not a quote of the payload
+# (sail-cruisey #3246 CP1: codex disputed a size estimate with its own sum and
+# was marked fabricated on it).
+test_case "#3246: a seat's own arithmetic in backticks is not a quote"
+sum_resp="$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 KB` adds up.
+VERDICT: APPROVE')"
+r="$(_report "$sum_resp")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic in scientific notation is a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `1.5e6 + 2.5E+6 = 4.0e6 tokens` adds up.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an identifier beside scientific notation is still a code quote"
+r="$(_report "$(_resp 'src/pricing.ts:2 computes `const total = 1.5e6 + base * 2e3;` before returning.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic with digit-group underscores is a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `1_000_000 * 3 = 3_000_000 rows` adds up.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an underscore identifier beside a grouped number is still a code quote"
+r="$(_report "$(_resp 'src/pricing.ts:2 computes `const cap = max_rows * 1_000;` before returning.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic a citation computes is still checked"
+r="$(_report "$(_resp 'src/pricing.ts:2 computes `1024 * 1024 * 1024 * 10 x` for the cap.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic with variables is still a code quote"
+var_resp="$(_resp 'src/pricing.ts:2 computes `const total = base + taxes * 2;` before returning.
+VERDICT: APPROVE')"
+r="$(_report "$var_resp")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: a long unit word after a number still makes arithmetic a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 kilobytes` adds up.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: modulo arithmetic is a computed value"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Check: `100000 % 1000 % 100 % 10` is zero.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: a conditional expression is not taken for numbers with units"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Elsewhere it computes `100 if 1000 > 500 else 1` first.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic a seat says a cited file contains is still verified"
+r="$(_report "$(_resp 'src/pricing.ts:2 reads `1024 * 1024 * 1024 * 10`.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .quotes_attributed == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: arithmetic followed by its citation is still verified"
+r="$(_report "$(_resp 'The cap is `1024 * 1024 * 1024 * 10` (src/pricing.ts:2).
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+for source_verb in computes is reads; do
+    test_case "#3246: first-person estimate ends the $source_verb source clause"
+    r="$(_report "$(_resp "src/pricing.ts:2 $source_verb the baseline and I estimate \`8 + 10 + 0.5 = 18.5 KB\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+test_case "#3246: arithmetic followed by a backtick-formatted citation is still verified"
+r="$(_report "$(_resp 'The cap is `1024 * 1024 * 1024 * 10` (`src/pricing.ts:2`).
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+for negative_compute in 'does not compute' "doesn't compute" 'did not compute'; do
+    test_case "#3246: negated compute claim is not positive source evidence: $negative_compute"
+    r="$(_report "$(_resp "src/pricing.ts:2 $negative_compute \`1024 * 1024 * 1024 * 10\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .quotes_unverifiable == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+for reader in 'I read' 'we read' 'We read'; do
+    test_case "#3246: first-person source reader preserves arithmetic verification: $reader"
+    r="$(_report "$(_resp "src/pricing.ts:2 $reader \`1024 * 1024 * 1024 * 10\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 1 and .quotes_attributed == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+for estimator in 'I estimate' 'we estimate' 'We estimate'; do
+    test_case "#3246: $estimator before a later is remains the seat's arithmetic"
+    r="$(_report "$(_resp "src/pricing.ts:2 $estimator the cap is \`8 + 10 + 0.5 = 18.5 KB\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+done
+
+for reader in 'I read the cap is' 'we read the cap is'; do
+    test_case "#3246: $reader still makes an explicit arithmetic source claim"
+    r="$(_report "$(_resp "src/pricing.ts:2 $reader \`1024 * 1024 * 1024 * 10\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 1 and .quotes_attributed == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+done
+
+for estimator in we We; do
+    test_case "#3246: $estimator estimate ends the preceding compute claim"
+    r="$(_report "$(_resp "src/pricing.ts:2 computes the baseline and $estimator estimate \`8 + 10 + 0.5 = 18.5 KB\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+test_case "#3246: inline arithmetic claimed removed remains eligible for diff matching"
+compute_removal_diff="$TEST_TMP_DIR/compute-removal.diff"
+printf 'diff --git a/src/pricing.ts b/src/pricing.ts\n--- a/src/pricing.ts\n+++ b/src/pricing.ts\n@@ -1 +1 @@\n-1024 * 1024 * 1024 * 10\n+const cap = 10;\n' > "$compute_removal_diff"
+r="$(COUNCIL_CONTEXT_FILES=("$compute_removal_diff"); _report "$(_resp 'At src/pricing.ts:2 the code `1024 * 1024 * 1024 * 10` was removed.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .quotes_verified_in_diff_removed == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an inline removal without diff evidence is still checked"
+r="$(_report "$(_resp 'At src/pricing.ts:2 the code `1024 * 1024 * 1024 * 10` was removed.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .quotes_unverifiable_claimed_removed == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: a removal in another sentence does not turn an estimate into source"
+r="$(_report "$(_resp 'src/pricing.ts:2 no longer caches. I estimate `8 + 10 + 0.5 = 18.5 KB`.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# Current-head PR #1231 review regressions.
+arithmetic_original_root="$ROOT"
+ROOT="$(mktemp -d "$TEST_TMP_DIR/arithmetic-root.XXXXXX")"
+mkdir -p "$ROOT/src"
+cp "$arithmetic_original_root/src/pricing.ts" "$ROOT/src/pricing.ts"
+git -C "$ROOT" init -q
+git -C "$ROOT" add src/pricing.ts
+git -C "$ROOT" -c user.name=Test -c user.email=test@example.invalid \
+    -c core.hooksPath=/dev/null commit -qm baseline
+printf '\n// unrelated change\n' >> "$ROOT/src/pricing.ts"
+test_case "#3246: never computes is an absence claim, not invented source"
+r="$(_report "$(_resp 'src/pricing.ts:2 never computes `1024 * 1024 * 1024 * 10`.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1 and .quotes_unverifiable == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+for estimator in 'I compute' 'we compute' 'We compute the cap is'; do
+    test_case "#3246: $estimator remains the seat's computation"
+    r="$(_report "$(_resp "src/pricing.ts:2 $estimator \`8 + 10 + 0.5 = 18.5 KB\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+for calculator in I we; do
+    test_case "#3246: a new $calculator calculate clause ends the preceding source claim"
+    r="$(_report "$(_resp "src/pricing.ts:2 computes the baseline and $calculator calculate \`8 + 10 + 0.5 = 18.5 KB\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+for source_claim in 'reads the expression we use:' 'contains the calculation I use:' 'reads the expression we compute:' 'reads the expression we calculate:' 'reads the expression we estimate:' 'contains the calculation I estimate:'; do
+    test_case "#3246: $source_claim remains a source claim"
+    r="$(_report "$(_resp "src/pricing.ts:2 $source_claim \`1024 * 1024 * 1024 * 10\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 1 and .quotes_attributed == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+for estimator in 'while we estimate' 'while I estimate' 'and we estimate' 'but I estimate' 'so we estimate'; do
+    test_case "#3246: a separate $estimator clause remains the seat's arithmetic"
+    r="$(_report "$(_resp "src/pricing.ts:2 computes the baseline $estimator \`8 + 10 + 0.5 = 18.5 KB\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+for estimate in 'the old cache was removed, so I estimate' 'I estimate the sum after removing the old cache is'; do
+    test_case "#3246: unrelated removal before $estimate does not claim the sum was removed"
+    r="$(COUNCIL_CONTEXT_FILES=("$compute_removal_diff"); _report "$(_resp "src/pricing.ts:2 $estimate \`8 + 10 + 0.5 = 18.5 KB\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+test_case "#3246: unrelated removal after an estimate does not claim the sum was removed"
+r="$(COUNCIL_CONTEXT_FILES=("$compute_removal_diff"); _report "$(_resp 'src/pricing.ts:2 I estimate `8 + 10 + 0.5 = 18.5 KB` after the old cache was removed.
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+for removal in 'removed the expression' 'deleted the code'; do
+    test_case "#3246: $removal directly before arithmetic preserves diff verification"
+    r="$(COUNCIL_CONTEXT_FILES=("$compute_removal_diff"); _report "$(_resp "src/pricing.ts:2 $removal \`1024 * 1024 * 1024 * 10\`.
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_checked == 1 and .quotes_verified_in_diff_removed == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+test_case "#3246: a long nonmatching citation gap cannot exhaust verification"
+long_gap_response="$TEST_TMP_DIR/computed-citation-gap.md"
+python3 - "$long_gap_response" <<'PY'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text('src/pricing.ts:2 keeps the fallback. I estimate '
+    '`8 + 10 + 0.5 = 18.5 KB`' + ' ' * 200_000 +
+    'outside (src/pricing.ts:2).\nVERDICT: APPROVE\n')
+PY
+r="$(_report "$long_gap_response")"
+if jq -e '.verification_failed == false and .citations == 2 and .quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+ROOT="$arithmetic_original_root"
+
+test_case "#3246: repeated citation lookups do not copy every response suffix"
+if python3 - "$PROJECT_ROOT/scripts/lib/council.sh" <<'PY'
+import re
+import sys
+from bisect import bisect_left
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+start = source.index("token_starts = [t[0] for t in tokens]")
+end = source.index("\ncheckable_units =", start)
+
+class CountedResponse(str):
+    copied = 0
+
+    def __getitem__(self, key):
+        result = super().__getitem__(key)
+        if isinstance(key, slice):
+            self.copied += len(result)
+        return result
+
+span = "`1024 * 1024 * 1024 * 1` "
+count = 42000
+resp = CountedResponse(span * count + "(src/pricing.ts:2)")
+tokens = [(len(span) * count, 0)]
+namespace = dict(re=re, bisect_left=bisect_left, resp=resp, tokens=tokens)
+exec(source[start:end], namespace)
+matches = [namespace["cited_after"]((i + 1) * len(span) - 1) for i in range(count)]
+assert sum(matches) == 1, sum(matches)
+assert resp.copied <= len(resp), f"copied {resp.copied} bytes for {len(resp)} response bytes"
+PY
+then test_pass; else test_fail "citation lookup copied repeated suffixes or lost its final citation"; fi
+
+test_case "#3246: an arithmetic line in a fence does not lower the fence's match threshold"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback. The block:
+\`\`\`ts
+${REAL_NEAR}
+1024 * 1024 * 1024 * 10
+\`\`\`
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3246: an arithmetic line claimed as a diff removal is still checked"
+r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The change:
+```diff
+-1024 * 1024 * 1024 * 10
+```
+VERDICT: APPROVE')")"
+if jq -e '.quotes_checked == 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# An `octopus-policy-findings` block is the feature workflow's structured
+# findings format (checked by digest in feature-workflow.py), not a code quote.
+# sail-cruisey #3244 CP1: codex's only "quote" was this block, so it was
+# marked fabricated beside real citations.
+# An initialized evidence repository makes an empty diff conclusive. A missing
+# repository intentionally preserves diff uncertainty on current main.
+policy_original_root="$ROOT"
+ROOT="$(mktemp -d "$TEST_TMP_DIR/policy-root.XXXXXX")"
+mkdir -p "$ROOT/src"
+cp "$policy_original_root/src/pricing.ts" "$ROOT/src/pricing.ts"
+git -C "$ROOT" init -q
+git -C "$ROOT" add src/pricing.ts
+git -C "$ROOT" -c user.name=Test -c user.email=test@example.invalid \
+    -c core.hooksPath=/dev/null commit -qm baseline
+test_case "#3244: an octopus-policy-findings block is not a code quote"
+policy='src/pricing.ts:2 keeps the fallback, but the plan skips a required audit.
+
+```octopus-policy-findings
+{
+  "findings": [
+    {
+      "source": "RULES.md",
+      "line_start": 3,
+      "quote": "**Audit:** run `/octo:security` when the\ndiff touches external input\nhandling.",
+      "recommendation": "Run the audit before CP2."
+    }
+  ]
+}
+```
+
+VERDICT: REVISE'
+r="$(_report "$(_resp "$policy")")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: an invented quote beside an octopus-policy-findings block is still fabricated"
+policy_fab="$policy
+src/pricing.ts:2 has \`const base = await fetchCabinPrice(cabin.id, { cache: true });\`."
+r="$(_report "$(_resp "$policy_fab")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# Only a closed, exact-label block whose body is findings JSON is skipped; the
+# feature workflow reads no other form. Anything else stays a quote unit, so a
+# seat cannot hide an invented quote behind the label.
+invented='const base = await fetchCabinPrice(cabin.id, { cache: true });'
+test_case "#3244: an unterminated octopus-policy-findings fence does not hide a quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+$invented
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked >= 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: an octopus-policy-findings fence that is not findings JSON does not hide a quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+$invented
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a case-variant findings label does not hide a quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`OCTOPUS-POLICY-FINDINGS
+$invented
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# The exempt form follows feature-analysis.py's fences(): any indentation, the
+# label right after the marker, a closing marker of the same width, and a
+# findings list or an object whose "findings" is one.
+findings_json='{
+  "findings": [
+    {"source": "RULES.md", "line_start": 3, "quote": "run `/octo:security` first", "recommendation": "Run the audit."}
+  ],
+  "summary": "one gap"
+}'
+test_case "#3244: a findings object with other keys is not a code quote"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+$findings_json
+\`\`\`
+
+VERDICT: REVISE")")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: an indented octopus-policy-findings block is not a code quote"
+indented_block='- Policy:
+
+    ```octopus-policy-findings
+    {"findings": [{"source": "RULES.md", "line_start": 3, "quote": "run `/octo:security` first"}]}
+    ```'
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+$indented_block
+
+VERDICT: REVISE")")"
+if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: quotes after an indented findings block with an unindented closer are still checked"
+mixed_block='    ```octopus-policy-findings
+    {"findings": [{"source": "RULES.md", "line_start": 3, "quote": "run the audit"}]}
+```'
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+$mixed_block
+
+src/pricing.ts:2 reads \`$invented\`.
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a fence after an indented findings block with an unindented closer is still checked"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+$mixed_block
+
+src/pricing.ts:2 reads:
+
+\`\`\`ts
+$invented
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a findings fence closed by a wider marker stays a quote unit"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\`octopus-policy-findings
+[{\"quote\": \"$invented\"}]
+\`\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked >= 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "#3244: a findings label after a space stays a quote unit"
+r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
+
+\`\`\` octopus-policy-findings
+[{\"quote\": \"$invented\"}]
+\`\`\`
+
+VERDICT: APPROVE")")"
+if jq -e '.quotes_checked >= 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+ROOT="$policy_original_root"
+# These table fixtures require a complete diff for definitive negative
+# grounding. Isolate them from the suite's non-repository evidence root.
+table_previous_root="$ROOT"
+ROOT="$(mktemp -d "$TEST_TMP_DIR/table-root.XXXXXX")"
+mkdir -p "$ROOT/src"
+git -C "$ROOT" init -q
+git -C "$ROOT" -c user.name=Test -c user.email=test@example.invalid \
+    -c core.hooksPath=/dev/null commit --allow-empty -qm fixture
 
 # ── sail-cruisey #3125: '||' quoted inside a Markdown table cell is written '\|\|'.
 printf 'export function tierOf(member) {\n  const tier = member.tier || member.legacyTier || DEFAULT_TIER;\n  return tier;\n}\n' > "$ROOT/src/tier-3125.ts"
@@ -403,6 +1512,8 @@ VERDICT: APPROVE")"
 r="$(_report "$even_backslash")"
 if jq -e '.quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+ROOT="$table_previous_root"
+
 # codex writes a quoted line as a string literal inside the code span:
 # `"if (url.pathname.startsWith(\"//\")) continue;"` (sail-cruisey #3139, #3193,
 # #3234 flagged it blind on real lines every time).
@@ -451,348 +1562,6 @@ VERDICT: APPROVE')"
 r="$(_report "$fenced_lit")"
 if jq -e '.quotes_verified == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-# An `octopus-policy-findings` block is the feature workflow's structured
-# findings format (checked by digest in feature-workflow.py), not a code quote.
-# sail-cruisey #3244 CP1: codex's only "quote" was this block, so it was
-# marked fabricated beside real citations.
-test_case "#3244: an octopus-policy-findings block is not a code quote"
-policy='src/pricing.ts:2 keeps the fallback, but the plan skips a required audit.
-
-```octopus-policy-findings
-{
-  "findings": [
-    {
-      "source": "RULES.md",
-      "line_start": 3,
-      "quote": "**Audit:** run `/octo:security` when the\ndiff touches external input\nhandling.",
-      "recommendation": "Run the audit before CP2."
-    }
-  ]
-}
-```
-
-VERDICT: REVISE'
-r="$(_report "$(_resp "$policy")")"
-if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3244: an invented quote beside an octopus-policy-findings block is still fabricated"
-policy_fab="$policy
-src/pricing.ts:2 has \`const base = await fetchCabinPrice(cabin.id, { cache: true });\`."
-r="$(_report "$(_resp "$policy_fab")")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-# Only an exact-label block whose body is findings JSON is skipped; the
-# feature workflow reads no other form. Anything else stays a quote unit, so a
-# seat cannot hide an invented quote behind the label.
-invented='const base = await fetchCabinPrice(cabin.id, { cache: true });'
-test_case "#3244: an octopus-policy-findings fence that is not findings JSON does not hide a quote"
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-\`\`\`octopus-policy-findings
-$invented
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3244: a case-variant findings label does not hide a quote"
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-\`\`\`OCTOPUS-POLICY-FINDINGS
-$invented
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-# A seat's own arithmetic is a computed value, not a quote of the payload
-# (sail-cruisey #3246 CP1: codex disputed a size estimate with its own sum and
-# was marked fabricated on it).
-test_case "#3246: a seat's own arithmetic in backticks is not a quote"
-sum_resp="$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 KB` adds up.
-VERDICT: APPROVE')"
-r="$(_report "$sum_resp")"
-if jq -e '.quotes_checked == 0 and .fabricated == false and .unverified_samples == []' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: arithmetic in scientific notation is a computed value"
-r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `1.5e6 + 2.5E+6 = 4.0e6 tokens` adds up.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: an identifier beside scientific notation is still a code quote"
-r="$(_report "$(_resp 'src/pricing.ts:2 computes `const total = 1.5e6 + base * 2e3;` before returning.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: arithmetic with digit-group underscores is a computed value"
-r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `1_000_000 * 3 = 3_000_000 rows` adds up.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: an underscore identifier beside a grouped number is still a code quote"
-r="$(_report "$(_resp 'src/pricing.ts:2 computes `const cap = max_rows * 1_000;` before returning.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: arithmetic a citation computes is still checked"
-r="$(_report "$(_resp 'src/pricing.ts:2 computes `1024 * 1024 * 1024 * 10 x` for the cap.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-# sail-cruisey #3247 chunk A: a seat describing a test input it built is not
-# quoting the file it cites. Its only checked quote failed, so the seat was
-# fabricated and blind despite eight real citations.
-test_case "#3247: an input the seat constructed is its own, not a quote"
-r="$(_report "$(_resp 'At src/pricing.ts:2, a 360-character row constructed as `"Order total $5.00".padEnd(80, " ") + "invalid".repeat(40)` becomes a valid total.
-VERDICT: REVISE')")"
-if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: an invented quote the citation reads is still fabricated"
-r="$(_report "$(_resp "src/pricing.ts:2 reads \`$FAKE\` and the row is constructed later.
-VERDICT: REVISE")")"
-if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-# sail-cruisey #3247 chunk C: a fence of mostly real lines verifies at the
-# two-thirds threshold even when one line is invented. The report now counts
-# such a fence as partial, without changing the verdict.
-test_case "#3247: a fence that verifies with an invented line is counted as partial"
-r="$(_report "$(_resp "src/pricing.ts:1 reads:
-
-\`\`\`ts
-export function priceFor(cabin, sailing) {
-  const base = cabin.basePrice ?? sailing.defaultPrice;
-  if (!base) return null;
-  $FAKE
-  return applyTaxes(base, sailing.portFees);
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e --arg fake "$FAKE" '.quotes_verified == 1 and .quotes_partial == 1 and .partial_samples == [$fake] and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-# A content verb before the proposal wording is a claim about the file, so
-# the span is checked. A first-person subject between them still marks the
-# seat's own input.
-test_case "#3247: code a citation contains, built as an invented quote, is checked"
-r="$(_report "$(_resp "src/pricing.ts:2 contains the code built as \`$FAKE\` today.
-VERDICT: REVISE")")"
-if jq -e '.quotes_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: an input the seat itself built after a content verb stays its own"
-r="$(_report "$(_resp 'src/pricing.ts:2 reads the base price from a row I constructed as `"Order total $5.00".padEnd(80, " ") + "invalid".repeat(40)` for this test.
-VERDICT: REVISE')")"
-if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: an invented short line in a fence that verifies is counted as partial"
-r="$(_report "$(_resp "src/pricing.ts:1 reads:
-
-\`\`\`ts
-  const base = cabin.basePrice ?? sailing.defaultPrice;
-  return true;
-  return applyTaxes(base, sailing.portFees);
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_verified == 1 and .quotes_partial == 1 and (.partial_samples | index("return true;")) and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: a real short line in a fence that verifies is not partial"
-r="$(_report "$(_resp "src/pricing.ts:1 reads:
-
-\`\`\`ts
-  const base = cabin.basePrice ?? sailing.defaultPrice;
-  return applyTaxes(base, sailing.portFees);
-}
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: an invented short line between elision markers is counted as partial"
-r="$(_report "$(_resp "src/pricing.ts:1 reads:
-
-\`\`\`ts
-  const base = cabin.basePrice ?? sailing.defaultPrice;
-  ...
-  return true;
-  ...
-  return applyTaxes(base, sailing.portFees);
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_verified == 1 and .quotes_partial == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: an elided fence of real lines is not partial"
-r="$(_report "$(_resp "src/pricing.ts:1 reads:
-
-\`\`\`ts
-  const base = cabin.basePrice ?? sailing.defaultPrice;
-  ...
-  return applyTaxes(base, sailing.portFees);
-}
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: a blockquote with an unmatched line is not a partial fence"
-r="$(_report "$(_resp "src/pricing.ts:1 reads:
-
-> const base = cabin.basePrice ?? sailing.defaultPrice;
-> const invented = fetchUnknownReservations(sailing);
-> return applyTaxes(base, sailing.portFees);
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: a fence complete in a later cited file is not partial"
-PROOT="$(mktemp -d "${TEST_TMP_DIR:-/tmp}/quote-partial.XXXXXX")"
-mkdir -p "$PROOT/src"
-printf '%s\n' 'export function priceFor(cabin, sailing) {' '  const base = cabin.basePrice ?? sailing.defaultPrice;' \
-    '  return applyTaxes(base, sailing.portFees);' '}' > "$PROOT/src/a.ts"
-printf '%s\n' 'export function priceFor(cabin, sailing) {' '  const base = cabin.basePrice ?? sailing.defaultPrice;' \
-    '  const fees = sailing.portFees.filter(Boolean);' '  return applyTaxes(base, sailing.portFees);' '}' > "$PROOT/src/b.ts"
-r="$(council_response_quote_verification_json "$(_resp "src/a.ts:1 and src/b.ts:1 read:
-
-\`\`\`ts
-  const base = cabin.basePrice ?? sailing.defaultPrice;
-  const fees = sailing.portFees.filter(Boolean);
-  return applyTaxes(base, sailing.portFees);
-\`\`\`
-
-VERDICT: APPROVE")" "$PROOT")"
-if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3247: an exact fence is not partial"
-r="$(_report "$(_resp "src/pricing.ts:1 reads:
-
-\`\`\`ts
-export function priceFor(cabin, sailing) {
-  const base = cabin.basePrice ?? sailing.defaultPrice;
-  if (!base) return null;
-  return applyTaxes(base, sailing.portFees);
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: arithmetic with variables is still a code quote"
-var_resp="$(_resp 'src/pricing.ts:2 computes `const total = base + taxes * 2;` before returning.
-VERDICT: APPROVE')"
-r="$(_report "$var_resp")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: a long unit word after a number still makes arithmetic a computed value"
-r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The estimate `8 + 10 + 0.5 = 18.5 kilobytes` adds up.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: modulo arithmetic is a computed value"
-r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Check: `100000 % 1000 % 100 % 10` is zero.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: a conditional expression is not taken for numbers with units"
-r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. Elsewhere it computes `100 if 1000 > 500 else 1` first.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: arithmetic a seat says a cited file contains is still verified"
-r="$(_report "$(_resp 'src/pricing.ts:2 reads `1024 * 1024 * 1024 * 10`.
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 1 and .quotes_attributed == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: an unverified quote says why, naming the cited file"
-cited_fab="$(_resp 'src/pricing.ts:2 reads `const base = await fetchCabinPrice(cabin.id, { cache: true });`.
-VERDICT: APPROVE')"
-r="$(_report "$cited_fab")"
-if jq -e '(.unverified_reasons | length) == (.unverified_samples | length) and (.unverified_reasons[0] | test("cited file src/pricing.ts"))' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: an unattributed unverified quote says it is in no readable file"
-loose="$(_resp 'src/pricing.ts:2 looks right.
-
-Elsewhere the code does `await fetchCabinPrice(cabin.id, { cache: true, ttl: 30 })` too.
-VERDICT: APPROVE')"
-r="$(_report "$loose")"
-if jq -e '.quotes_unverified >= 1 and (.unverified_reasons | length) == (.unverified_samples | length) and (.unverified_reasons[0] | test("not found in any readable file"))' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-# The exempt form follows feature-analysis.py's fences(): any indentation, the
-# label right after the marker, a closing marker of the same width, and a
-# findings list or an object whose "findings" is one.
-findings_json='{
-  "findings": [
-    {"source": "RULES.md", "line_start": 3, "quote": "run `/octo:security` first", "recommendation": "Run the audit."}
-  ],
-  "summary": "one gap"
-}'
-test_case "#3244: a findings object with other keys is not a code quote"
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-\`\`\`octopus-policy-findings
-$findings_json
-\`\`\`
-
-VERDICT: REVISE")")"
-if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3244: an indented octopus-policy-findings block is not a code quote"
-indented_block='- Policy:
-
-    ```octopus-policy-findings
-    {"findings": [{"source": "RULES.md", "line_start": 3, "quote": "run `/octo:security` first"}]}
-    ```'
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-$indented_block
-
-VERDICT: REVISE")")"
-if jq -e '.quotes_checked == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3244: quotes after an indented findings block with an unindented closer are still checked"
-mixed_block='    ```octopus-policy-findings
-    {"findings": [{"source": "RULES.md", "line_start": 3, "quote": "run the audit"}]}
-```'
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-$mixed_block
-
-src/pricing.ts:2 reads \`$invented\`.
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3244: a fence after an indented findings block with an unindented closer is still checked"
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-$mixed_block
-
-src/pricing.ts:2 reads:
-
-\`\`\`ts
-$invented
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3244: a findings fence closed by a wider marker stays a quote unit"
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-\`\`\`octopus-policy-findings
-[{\"quote\": \"$invented\"}]
-\`\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_checked >= 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3244: a findings label after a space stays a quote unit"
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback.
-
-\`\`\` octopus-policy-findings
-[{\"quote\": \"$invented\"}]
-\`\`\`
-
-VERDICT: APPROVE")")"
-if jq -e '.quotes_checked >= 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
 test_case "no diff available: a quote the seat says was removed is unverifiable, not fabricated"
 claimed="$(_resp "At src/pricing.ts:2 the check \`if (cabin.soldOut) return { price: null };\` was deleted in this change.
 VERDICT: REVISE")"
@@ -803,8 +1572,7 @@ if jq -e '.quotes_unverifiable == 1 and .quotes_unverifiable_claimed_removed == 
 test_case "summary grounding carries the new diff counters"
 record="$(council_contribution_record_json "$removed_only" "$GROOT" sha256:t)"
 if jq -e '.grounding | has("quotes_verified_in_diff_removed") and has("quotes_verified_in_diff_added") and has("quotes_unverifiable_claimed_removed") and has("diff_sources")' <<< "$record" >/dev/null &&
-   jq -e 'has("quotes_verified_in_diff_removed") and has("quotes_verified_in_context")' <<< "$COUNCIL_EMPTY_GROUNDING_JSON" >/dev/null &&
-   jq -e '.grounding | has("quotes_verified_in_context")' <<< "$record" >/dev/null; then test_pass; else test_fail "record: $record"; fi
+   jq -e 'has("quotes_verified_in_diff_removed")' <<< "$COUNCIL_EMPTY_GROUNDING_JSON" >/dev/null; then test_pass; else test_fail "record: $record"; fi
 
 # ── sail-cruisey #3005: quotes the seat attributes to a citation must be in the
 # cited file. Real quotes elsewhere in the body no longer excuse invented ones.
@@ -838,7 +1606,7 @@ r3005="$(_resp "The sync writes \`SET royalup_price = (mut.bid_amount * 2)::nume
 VERDICT: APPROVE")"
 r="$(_rreport "$r3005")"
 if jq -e '.quotes_verified >= 2 and .quotes_attributed == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null &&
-   jq -e '.unverified_samples | index("c.royalup_price = ub.bid_amount * 2,")' <<< "$r" >/dev/null &&
+   jq -e '.unverified_samples == []' <<< "$r" >/dev/null &&
    council_response_is_blind "$r3005" "$RROOT"; then test_pass; else test_fail "report: $r"; fi
 
 test_case "#3005: a reconstructed block where only generic lines are real does not verify"
@@ -908,28 +1676,6 @@ else
     test_fail "blind=$blind report: $r"
 fi
 
-test_case "#3246: arithmetic followed by its citation is still verified"
-r="$(_report "$(_resp 'The cap is `1024 * 1024 * 1024 * 10` (src/pricing.ts:2).
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: an arithmetic line in a fence does not lower the fence's match threshold"
-r="$(_report "$(_resp "src/pricing.ts:2 keeps the fallback. The block:
-\`\`\`ts
-${REAL_NEAR}
-1024 * 1024 * 1024 * 10
-\`\`\`
-VERDICT: APPROVE")")"
-if jq -e '.quotes_checked == 1 and .quotes_verified == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
-test_case "#3246: an arithmetic line claimed as a diff removal is still checked"
-r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The change:
-```diff
--1024 * 1024 * 1024 * 10
-```
-VERDICT: APPROVE')")"
-if jq -e '.quotes_checked == 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
 test_case "#3032: without the context file the ambiguous bare plan name stays unresolved, never fabricated"
 r="$(_hreport "$plancite")"
 if jq -e '.citations == 1 and .citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
@@ -948,6 +1694,103 @@ VERDICT: APPROVE")"
 r="$(_hreport "$escaped")"
 if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_attributed == 1 and .fabricated == false' <<< "$r" >/dev/null &&
    ! council_response_is_blind "$escaped" "$HROOT"; then test_pass; else test_fail "report: $r"; fi
+
+for block_style in single escaped multiline; do
+    test_case "a real $block_style blockquote with inline formatting stays grounded"
+    prefix='>'
+    [[ "$block_style" != escaped ]] || prefix='&gt;'
+    quoted="$prefix \`$REAL_NEAR\`"
+    [[ "$block_style" != multiline ]] || quoted="$quoted
+> \`return applyTaxes(base, sailing.portFees);\`"
+    formatted="$(_resp "src/pricing.ts:2 reads:
+$quoted
+
+VERDICT: APPROVE")"
+    r="$(_report "$formatted")"
+    record="$(council_contribution_record_json "$formatted" "$ROOT" sha256:blockquote)"
+    if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+       jq -e '.validation_result == "valid-grounded"' <<< "$record" >/dev/null &&
+       ! council_response_is_blind "$formatted" "$ROOT"; then
+        test_pass
+    else
+        test_fail "real formatted blockquote rejected: $r $record"
+    fi
+done
+
+test_case "an invented formatted blockquote remains fabricated beside a real quote"
+formatted_fake="$(_resp "src/pricing.ts:2 reads \`$REAL_NEAR\`.
+
+src/pricing.ts:2 reads:
+> \`$FAKE\`
+
+VERDICT: APPROVE")"
+r="$(_report "$formatted_fake")"
+if jq -e '.quotes_verified > 0 and .quotes_attributed_unverified > 0 and .fabricated == true' <<< "$r" >/dev/null &&
+   council_response_is_blind "$formatted_fake" "$ROOT"; then
+    test_pass
+else
+    test_fail "invented formatted blockquote gained grounding: $r"
+fi
+
+test_case "literal source backticks inside a blockquote remain source content"
+printf 'export const message = `hello from source`;\n' > "$ROOT/src/literal.ts"
+literal="$(_resp 'src/literal.ts:1 reads:
+> export const message = `hello from source`;
+
+VERDICT: APPROVE')"
+r="$(_report "$literal")"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$literal" "$ROOT"; then
+    test_pass
+else
+    test_fail "literal source backticks were changed: $r"
+fi
+
+test_case "nested inline formatting does not exhaust the quote-unit budget"
+formatted_budget="$(_resp "$(for i in $(seq 1 130); do
+    printf 'src/pricing.ts:2 reads:\n> `%s`\n\n' "$REAL_NEAR"
+done)
+VERDICT: APPROVE")"
+r="$(_report "$formatted_budget")"
+if jq -e '.quotes_checked == 130 and .quotes_verified == 130 and .quotes_omitted == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   ! council_response_is_blind "$formatted_budget" "$ROOT"; then
+    test_pass
+else
+    test_fail "nested formatting consumed duplicate quote units: $r"
+fi
+
+for proposal_gap in $'\n\n' $'\n \t\n\n'; do
+    test_case "blank lines preserve the nearest proposal lead-in"
+    spaced_proposal="$(_resp "src/pricing.ts:2 should become:${proposal_gap}\`\`\`ts
+$FAKE
+\`\`\`
+VERDICT: REVISE")"
+    r="$(_report "$spaced_proposal")"
+    if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+       ! council_response_is_blind "$spaced_proposal" "$ROOT"; then
+        test_pass
+    else
+        test_fail "proposed code was labeled fabricated: $r"
+    fi
+done
+
+test_case "an earlier proposal cannot excuse a later current-source claim"
+later_claim="$(_resp "We should revise this path.
+
+src/pricing.ts:2 reads:
+
+
+\`\`\`ts
+$FAKE
+\`\`\`
+VERDICT: APPROVE")"
+r="$(_report "$later_claim")"
+if jq -e '.quotes_unverifiable_proposed == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null &&
+   council_response_is_blind "$later_claim" "$ROOT"; then
+    test_pass
+else
+    test_fail "earlier proposal excused invented current source: $r"
+fi
 
 test_case "#3032: a blockquote attributed to an upstream file outside the root is unverifiable, not checked against local files"
 upstream="$(_resp "- \`functions-v2/_lib/handler.ts:2\`:
@@ -1028,8 +1871,8 @@ VERDICT: APPROVE")"
 r="$(_report "$dotdot")"
 if jq -e '.citations_unresolved == 1 and .quotes_unverifiable_unresolved_citation == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-# ── One verifier run per response (CodeRabbit on #1207).
-test_case "the verifier runs once per response across the blind check and the contribution record"
+# Preliminary checks share a report; contribution records always reverify.
+test_case "preliminary checks share one verifier run and each contribution record runs afresh"
 count_file="$TEST_TMP_DIR/qv-count"; : > "$count_file"
 shim_dir="$TEST_TMP_DIR/qv-shim"; mkdir -p "$shim_dir"
 real_python="$(command -v python3)"
@@ -1051,38 +1894,214 @@ cached="$(_resp "In src/pricing.ts:2 the base price is \`$FAKE\` which caches co
 VERDICT: APPROVE")"
 council_response_is_substantive "$cached" "$ROOT" || true
 council_response_is_blind "$cached" "$ROOT" || true
+preliminary="$(wc -l < "$count_file" | tr -d ' ')"
 council_contribution_record_json "$cached" "$ROOT" sha256:t >/dev/null
 first="$(wc -l < "$count_file" | tr -d ' ')"
 printf 'In src/pricing.ts:2 the fallback `%s` is correct.\nVERDICT: APPROVE\n' "$REAL_NEAR" > "$cached"
 record="$(council_contribution_record_json "$cached" "$ROOT" sha256:t)"
 second="$(wc -l < "$count_file" | tr -d ' ')"
 PATH="$saved_path"
-if [[ "$first" == 1 && "$second" == 2 ]] && jq -e '.validation_result == "valid-grounded"' <<< "$record" >/dev/null; then
+if [[ "$preliminary" == 1 && "$first" == 2 && "$second" == 3 ]] && jq -e '.validation_result == "valid-grounded"' <<< "$record" >/dev/null; then
     test_pass
 else
-    test_fail "runs: first=$first second=$second record=$record"
+    test_fail "runs: preliminary=$preliminary first=$first second=$second record=$record"
+fi
+
+test_case "contribution records reverify a changed ignored cited file"
+cache_root="$TEST_TMP_DIR/cache-evidence"; mkdir -p "$cache_root/src"
+git -C "$cache_root" init -q
+printf 'src/\n' > "$cache_root/.gitignore"
+git -C "$cache_root" add .gitignore
+git -C "$cache_root" -c user.name=Test -c user.email=test@example.invalid commit -qm initial
+printf '%s\n' "$REAL_NEAR" > "$cache_root/src/pricing.ts"
+cache_response="$(_resp "src/pricing.ts:1 reads \`$REAL_NEAR\`.
+VERDICT: APPROVE")"
+record="$(
+    council_response_quote_report_cached "$cache_response" "$cache_root"
+    jq -e '.quotes_verified == 1' <<< "$COUNCIL_QUOTE_REPORT" >/dev/null || exit 1
+    printf '%s\n' "$FAKE" > "$cache_root/src/pricing.ts"
+    council_contribution_record_json "$cache_response" "$cache_root" sha256:t
+)"
+if jq -e '.validation_result == "invalid-ungrounded" and .grounding.fabricated == true
+          and .grounding.quotes_verified == 0' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "changed ignored evidence reused grounding: $record"
+fi
+
+test_case "contribution records reverify context contents when the configured path is unchanged"
+cache_context="$TEST_TMP_DIR/cache-context.md"
+printf '%s\n' "$REAL_NEAR" > "$cache_context"
+cache_response="$(_resp "cache-context.md:1 reads \`$REAL_NEAR\`.
+VERDICT: APPROVE")"
+record="$(
+    COUNCIL_CONTEXT_FILES=("$cache_context")
+    council_response_quote_report_cached "$cache_response" "$cache_root"
+    jq -e '.quotes_verified == 1' <<< "$COUNCIL_QUOTE_REPORT" >/dev/null || exit 1
+    printf '%s\n' "$FAKE" > "$cache_context"
+    council_contribution_record_json "$cache_response" "$cache_root" sha256:t
+)"
+if jq -e '.validation_result == "invalid-ungrounded" and .grounding.fabricated == true
+          and .grounding.quotes_verified == 0' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "changed context reused grounding: $record"
+fi
+
+test_case "contribution records reverify resolved diffs when the configured base is unchanged"
+cache_diff_root="$TEST_TMP_DIR/cache-diff"; mkdir -p "$cache_diff_root/src"
+git -C "$cache_diff_root" init -q
+printf '%s\n' "$REAL_NEAR" > "$cache_diff_root/src/pricing.ts"
+git -C "$cache_diff_root" add src/pricing.ts
+git -C "$cache_diff_root" -c user.name=Test -c user.email=test@example.invalid commit -qm original
+printf '%s\n' "$FAKE" > "$cache_diff_root/src/pricing.ts"
+cache_response="$(_resp "src/pricing.ts:1 reads \`$REAL_NEAR\` in the reviewed diff.
+VERDICT: APPROVE")"
+record="$(
+    OCTOPUS_COUNCIL_DIFF_BASE=HEAD
+    council_response_quote_report_cached "$cache_response" "$cache_diff_root"
+    jq -e '.quotes_verified_in_diff_removed == 1' <<< "$COUNCIL_QUOTE_REPORT" >/dev/null || exit 1
+    git -C "$cache_diff_root" add src/pricing.ts
+    git -C "$cache_diff_root" -c user.name=Test -c user.email=test@example.invalid commit -qm replacement
+    council_contribution_record_json "$cache_response" "$cache_diff_root" sha256:t
+)"
+if jq -e '.validation_result == "invalid-ungrounded" and .grounding.fabricated == true
+          and .grounding.quotes_verified == 0' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "changed diff reused grounding: $record"
+fi
+
+_advice_with_refreshed_evidence() (
+    # Mutate evidence exactly when the contribution is serialized. The response
+    # has already passed the old advice-phase checks at this boundary.
+    local mutation="$1" d
+    d="$(mktemp -d "$TEST_TMP_DIR/quorum-refresh.XXXXXX")"
+    mkdir -p "$d/evidence/src" "$d/run/responses"
+    printf '%s\n' "$REAL_NEAR" > "$d/evidence/src/changing.ts"
+    printf '%s\n' "$REAL_FAR" > "$d/evidence/src/stable.ts"
+    OCTOPUS_PROJECT_DIR="$d/evidence"
+    COUNCIL_RUN_DIR="$d/run"; COUNCIL_DEPTH="standard"; COUNCIL_FIXTURE=""
+    COUNCIL_TASK="Review the source"; COUNCIL_RUN_START_EPOCH=""
+    COUNCIL_CONTEXT_FILES=()
+    COUNCIL_ROSTER_JSON='[
+      {"persona":"code-reviewer","provider":"codex","seat":"member","model_family":"gpt"},
+      {"persona":"backend-architect","provider":"agy","seat":"member","model_family":"gemini"}
+    ]'
+    [[ "$mutation" != chair ]] || COUNCIL_ROSTER_JSON="$(jq -c '.[0].seat = "chair"' <<< "$COUNCIL_ROSTER_JSON")"
+    local citation="src/changing.ts:1"
+    if [[ "$mutation" == context ]]; then
+        printf '%s\n' "$REAL_NEAR" > "$d/context.md"
+        COUNCIL_CONTEXT_FILES=("$d/context.md")
+        citation="context.md:1"
+    elif [[ "$mutation" == diff ]]; then
+        git -C "$d/evidence" init -q
+        git -C "$d/evidence" add src
+        git -C "$d/evidence" -c user.name=Test -c user.email=test@example.invalid commit -qm original
+        printf '%s\n' "$FAKE" > "$d/evidence/src/changing.ts"
+        OCTOPUS_COUNCIL_DIFF_BASE=HEAD
+    fi
+    council_dispatch_member_detached() {
+        if [[ "$(jq -r '.provider' <<< "$1")" == codex ]]; then
+            printf 'Reviewed %s: `%s` handles the fallback.\nVERDICT: APPROVE\n' "$citation" "$REAL_NEAR" > "$3"
+        else
+            printf 'Reviewed src/stable.ts:1: `%s` defines the discount rules.\nVERDICT: APPROVE\n' "$REAL_FAR" > "$3"
+        fi
+    }
+    council_run_chair_fallback() { :; }
+    eval "$(declare -f council_contribution_record_json | sed '1s/council_contribution_record_json/_contribution_before_mutation/')"
+    council_contribution_record_json() {
+        if [[ "$1" == *00-code-reviewer.md ]]; then
+            case "$mutation" in
+                source|chair) printf '%s\n' "$FAKE" > "$d/evidence/src/changing.ts" ;;
+                context) printf '%s\n' "$FAKE" > "$d/context.md" ;;
+                diff)
+                    git -C "$d/evidence" add src/changing.ts
+                    git -C "$d/evidence" -c user.name=Test -c user.email=test@example.invalid commit -qm replacement
+                    ;;
+                verdict) sed 's/VERDICT: APPROVE/VERDICT: REVISE/' "$1" > "$d/revised.md"; cp "$d/revised.md" "$1" ;;
+                failure) return 1 ;;
+            esac
+        fi
+        _contribution_before_mutation "$@"
+    }
+    council_run_advice_phase >/dev/null 2>&1 || return 1
+    jq -cn --argjson seats "$COUNCIL_SEAT_RECORDS_JSON" \
+        --argjson received "$COUNCIL_RESPONSES_RECEIVED" --argjson met "$COUNCIL_QUORUM_MET" \
+        --argjson chair "$COUNCIL_CHAIR_RESPONSE_RECEIVED" \
+        --arg providers "$COUNCIL_RESPONDING_PROVIDERS" --arg approving "$COUNCIL_APPROVING_PROVIDERS" \
+        --arg families "$COUNCIL_RESPONDING_MODEL_FAMILIES" --arg approving_families "$COUNCIL_APPROVING_MODEL_FAMILIES" \
+        --argjson distinct "$COUNCIL_DISTINCT_APPROVING_PROVIDERS" \
+        --argjson distinct_families "$COUNCIL_DISTINCT_APPROVING_MODEL_FAMILIES" \
+        '{seats:$seats, received:$received, met:$met, chair:$chair, providers:$providers, approving:$approving,
+          families:$families, approving_families:$approving_families,
+          distinct:$distinct, distinct_families:$distinct_families}'
+)
+
+for mutation in source context diff failure chair; do
+    test_case "advice quorum excludes a contribution rejected after $mutation changes"
+    record="$(_advice_with_refreshed_evidence "$mutation")"
+    if jq -e '.received == 1 and .met == false and .chair == false and .distinct == 1 and .distinct_families == 1
+            and (.providers | contains("codex") | not) and (.families | contains("gpt") | not)
+            and (.approving | contains("codex") | not) and (.approving_families | contains("gpt") | not)
+            and .seats[0].status != "responded" and .seats[0].counted_as_approver == false
+            and (.seats[0].contribution.validation_result | startswith("invalid-"))
+            and .seats[1].status == "responded" and .seats[1].counted_as_approver == true' <<< "$record" >/dev/null; then
+        test_pass
+    else
+        test_fail "rejected contribution still affected quorum: $record"
+    fi
+done
+
+test_case "advice quorum uses the verdict serialized in the refreshed contribution"
+record="$(_advice_with_refreshed_evidence verdict)"
+if jq -e '.received == 2 and .met == false and .distinct == 1 and .distinct_families == 1
+        and .seats[0].verdict == "REVISE" and .seats[0].contribution.verdict == "REVISE"
+        and .seats[0].status == "responded" and .seats[0].counted_as_approver == false' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "preliminary verdict overrode refreshed contribution: $record"
+fi
+
+test_case "unchanged grounded contributions still reach advice quorum"
+record="$(_advice_with_refreshed_evidence unchanged)"
+if jq -e '.received == 2 and .met == true and .distinct == 2 and .distinct_families == 2
+        and all(.seats[]; .status == "responded" and .counted_as_approver == true
+            and .contribution.validation_result == "valid-grounded")' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "stable grounded votes were lost: $record"
 fi
 
 test_case "a path cited many times is resolved once"
 resolve_count="$TEST_TMP_DIR/qv-resolve-count"; : > "$resolve_count"
 # Wrap both resolvers with a call counter just before the citation loop.
-cat > "$shim_dir/python3" <<SHIM
-#!/usr/bin/env bash
-if [[ "\$1" == "-I" && "\$2" == "-" ]]; then
-    script="\$(cat)"
-    if [[ "\$script" == *quotes_unverifiable_proposed* ]]; then
-        hook='def _counted(f):
+# Keep source rewriting in Python. Bash 3.2 string substitution over the full
+# verifier can consume its process-group budget on native macOS.
+resolve_loader="$TEST_TMP_DIR/qv-resolve-loader.py"
+cat > "$resolve_loader" <<'PY_RESOLVE_LOADER'
+import sys
+
+counter_path = sys.argv.pop(1)
+sys.argv[0] = "-"
+script = sys.stdin.read()
+hook = f'''def _counted(f):
     def g(*a):
-        with open("$resolve_count", "a") as h:
+        with open({counter_path!r}, "a") as h:
             h.write("r\\n")
         return f(*a)
     return g
 resolve_citation = _counted(resolve_citation)
 resolve_outside_form = _counted(resolve_outside_form)
-for match in CITATION.finditer(resp):'
-        script="\${script/for match in CITATION.finditer(resp):/\$hook}"
-    fi
-    printf '%s' "\$script" | exec "$real_python" "\$@"
+for match in CITATION.finditer(resp):'''
+assert script.count("for match in CITATION.finditer(resp):") == 1
+script = script.replace("for match in CITATION.finditer(resp):", hook, 1)
+exec(compile(script, "<stdin>", "exec"))
+PY_RESOLVE_LOADER
+cat > "$shim_dir/python3" <<SHIM
+#!/usr/bin/env bash
+if [[ "\$1" == "-I" && "\$2" == "-" ]]; then
+    exec "$real_python" -I "$resolve_loader" "$resolve_count" "\${@:3}"
 fi
 exec "$real_python" "\$@"
 SHIM
@@ -1121,50 +2140,623 @@ bounded() {
 }
 r="$(bounded 10 bash -c 'source "$1"; council_response_quote_verification_json "$2" "$3"' _ \
     "$PROJECT_ROOT/scripts/lib/council.sh" "$many" "$ROOT" 2>/dev/null || true)"
-if jq -e '.citations == 1 and .quotes_verified == 1 and .fabricated == false' <<< "$r" >/dev/null 2>&1; then
+if jq -e '.citations == 1 and .quotes_verified == 1 and .quotes_omitted == 0 and .fabricated == false' <<< "$r" >/dev/null 2>&1; then
     test_pass
 else
     test_fail "verifier did not finish inside 10s or misreported: ${r:0:200}"
 fi
 
-# sail-cruisey #3340: a seat that ran the code under review names the INPUT it
-# fed in. That string is the seat's own, not a quote of a file, so it is
-# unverifiable rather than fabricated.
-probe_cases=(
-    'At `src/pricing.ts:2`, the fallback runs first. Direct probing returns `[]` for `## Review record\n- Residual: no follow-ups were filed`.'
-    'The prefix check at `src/pricing.ts:3` lets `## Disclosures\n- None of the failed imports are purged` pass.'
-    'Likewise, `- Nothing prevents duplicate charges here` and `- None of the failed imports are purged` pass through the matcher at src/pricing.ts:3.'
-    'The check at src/pricing.ts:3 is too broad. I reproduced both `## Disclosures - Nothing prevents duplicate charges` and `## Disclosures - None of the failed imports are purged`: the validator returns `[]`.'
-    'Heading detection at `src/pricing.ts:2` is loose. A read-only probe showed it: synthetic heading `## Bug: confirmation emails not delivered after rebooking` followed by `- Restore confirmation email dispatch after rebooking.` becomes an offender.'
-)
-for probe in "${probe_cases[@]}"; do
-    test_case "#3340: a seat's probe input is not a fabricated quote: ${probe:0:60}"
-    r="$(_report "$(_resp "$probe
-VERDICT: REVISE")")"
-    if jq -e '.quotes_unverified == 0 and .quotes_unverifiable_proposed >= 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+test_case "quote supervision preserves provider dispatch accounting"
+verification_events="$TEST_TMP_DIR/verification-events.jsonl"
+verification_peer_marker="$TEST_TMP_DIR/verification-peer-started"
+r="$(OCTO_EVENT_LOG="$verification_events" OCTOPUS_AUTO_PEER_DISPATCH_MARKER="$verification_peer_marker" \
+    council_response_quote_verification_json "$real" "$ROOT")"
+if jq -e '.verification_failed == false and .quotes_verified == 1' <<< "$r" >/dev/null &&
+   [[ ! -e "$verification_events" && ! -e "$verification_peer_marker" ]]; then
+    test_pass
+else
+    test_fail "verification changed dispatch accounting or lost grounding: ${r:0:200}"
+fi
+
+test_case "a verifier that stalls after valid partial output is contained and rejects the report"
+stalled_pid="$TEST_TMP_DIR/stalled-verifier.pid"
+r="$(bounded 20 bash -c '
+    source "$1"
+    # Keep the marker outside the worker argv contract.
+    worker_marker="$4"
+    python3() {
+        trap "" TERM
+        /bin/sh -c '\''printf "%s\n" "$PPID"'\'' > "$worker_marker"
+        printf "%s\n" "$COUNCIL_EMPTY_GROUNDING_JSON"
+        while :; do sleep 1; done
+    }
+    council_response_quote_verification_json "$2" "$3"
+' _ "$PROJECT_ROOT/scripts/lib/council.sh" "$real" "$ROOT" "$stalled_pid" 2>/dev/null || true)"
+if jq -e '.verification_failed == true and .quotes_verified == 0 and .fabricated == false' <<< "$r" >/dev/null 2>&1 &&
+   [[ -s "$stalled_pid" ]] && ! kill -0 "$(cat "$stalled_pid")" 2>/dev/null &&
+   council_response_quotes_fabricated "$real" "$ROOT" "$r"; then
+    test_pass
+else
+    test_fail "stalled worker survived or partial output gained grounding: ${r:0:200}"
+fi
+
+test_case "unavailable verifier supervision fails closed"
+r="$(
+    _council_registry_dir="$TEST_TMP_DIR/missing-verifier-libs"
+    unset -f _octo_run_bare_probe_with_timeout
+    council_response_quote_verification_json "$real" "$ROOT"
+)"
+if jq -e '.verification_failed == true and .quotes_verified == 0 and .fabricated == false' <<< "$r" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "missing supervisor granted grounding: ${r:0:200}"
+fi
+
+test_case "a sub-megabyte adversarial response returns a correct report or fails closed within the deadline"
+adversarial="$TEST_TMP_DIR/adversarial-fence-markers.md"
+python3 - "$adversarial" "$REAL_NEAR" <<'PY_ADVERSARIAL'
+import sys
+with open(sys.argv[1], "w") as out:
+    out.write("src/pricing.ts:2 reads `%s`.\nVERDICT: APPROVE\n" % sys.argv[2])
+    out.write("`" * 300000)
+PY_ADVERSARIAL
+r="$(bounded 20 bash -c 'source "$1"; council_response_quote_verification_json "$2" "$3"' _ \
+    "$PROJECT_ROOT/scripts/lib/council.sh" "$adversarial" "$ROOT" 2>/dev/null || true)"
+# The marker scan can finish this formerly pathological input. A complete
+# report must verify the real quote; a timed-out run must discard partial output.
+if jq -e '.verification_failed == false and .quotes_checked == 1 and .quotes_verified == 1
+        and .quotes_unverified == 0 and .quotes_omitted == 0 and .fabricated == false' <<< "$r" >/dev/null 2>&1; then
+    test_pass
+elif jq -e '.verification_failed == true and .quotes_verified == 0 and .fabricated == false' <<< "$r" >/dev/null 2>&1 &&
+     council_response_quotes_fabricated "$adversarial" "$ROOT" "$r"; then
+    test_pass
+else
+    test_fail "adversarial response exceeded the deadline or returned an incorrect report: ${r:0:200}"
+fi
+
+test_case "short inline identifiers do not consume the checkable quote budget"
+identifiers="$(_resp "$(for i in $(seq 1 100); do printf '\140id\140 \140null\140 \140value\140 '; done)
+src/pricing.ts:2 reads \`$REAL_NEAR\`.
+VERDICT: APPROVE")"
+r="$(_report "$identifiers")"
+record="$(council_contribution_record_json "$identifiers" "$ROOT" sha256:short-identifiers)"
+if jq -e '.quotes_checked == 1 and .quotes_verified == 1 and .quotes_omitted == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+   jq -e '.validation_result == "valid-grounded"' <<< "$record" >/dev/null &&
+   ! council_response_is_blind "$identifiers" "$ROOT"; then
+    test_pass
+else
+    test_fail "short identifiers exhausted the quote budget: $r $record"
+fi
+
+for distant_case in before after boundary overflow unresolved; do
+    test_case "uncited spans do not consume the citation-bound quote budget: $distant_case"
+    distant="$TEST_TMP_DIR/distant-$distant_case.md"
+    python3 - "$distant" "$distant_case" "$REAL_NEAR" "$FAKE" <<'PY_DISTANT_UNITS'
+from pathlib import Path
+import sys
+path, case, real, fake = sys.argv[1:]
+quote = lambda text: '\nsrc/pricing.ts:2 reads `%s`.\n' % text
+spans = '\n'.join('`const distant_%d = inventedValue + 99;`' % i for i in range(300))
+padding = '\n\n' + ' ' * 2000 + '\n\n'
+if case == 'after':
+    response = quote(real) + padding + spans
+elif case == 'unresolved':
+    response = ('\nmissing/upstream.ts:1 reads `%s`.\n' % fake) * 300 + padding + quote(real)
+else:
+    response = spans + padding + quote(real) * (256 if case in ('boundary', 'overflow') else 1)
+    if case == 'overflow':
+        response += quote(fake)
+Path(path).write_text(response + '\nVERDICT: APPROVE\n')
+PY_DISTANT_UNITS
+    record="$(council_contribution_record_json "$distant" "$ROOT" sha256:distant-quotes)"
+    if [[ "$distant_case" == overflow ]]; then
+        if jq -e '.validation_result == "invalid-ungrounded" and .evidence_paths == []
+                and .grounding.quotes_checked == 256 and .grounding.quotes_verified == 256
+                and .grounding.quotes_omitted == 1 and .grounding.fabricated == false' <<< "$record" >/dev/null; then
+            test_pass
+        else test_fail "bound overflow was not rejected: $record"; fi
+    else
+        expected_verified=1
+        [[ "$distant_case" != boundary ]] || expected_verified=256
+        expected_unresolved=0
+        [[ "$distant_case" != unresolved ]] || expected_unresolved=300
+        if jq -e --argjson verified "$expected_verified" --argjson unresolved "$expected_unresolved" \
+            '.validation_result == "valid-grounded" and .grounding.quotes_omitted == 0
+             and .grounding.quotes_verified == $verified
+             and .grounding.quotes_unverifiable_unresolved_citation == $unresolved
+             and .grounding.fabricated == false' <<< "$record" >/dev/null; then
+            test_pass
+        else test_fail "unbound spans exhausted matching capacity: $record"; fi
+    fi
 done
 
-test_case "#3340: an invented quote the citation reads is still fabricated beside a probe"
-r="$(_report "$(_resp "src/pricing.ts:2 reads \`$FAKE\`. Probing returns \`[]\` for \`## Disclosures\\n- None of the failed imports are purged\`.
-VERDICT: REVISE")")"
+for quote_limit_case in boundary overflow mixed; do
+    test_case "$quote_limit_case quote units cannot bypass the grounding gate"
+    limited="$TEST_TMP_DIR/quote-limit-$quote_limit_case.md"
+    python3 - "$limited" "$quote_limit_case" "$REAL_NEAR" "$FAKE" <<'PY_QUOTE_LIMIT'
+import sys
+path, case, real, fake = sys.argv[1:]
+quote = lambda text: "\nsrc/pricing.ts:2 reads `%s`.\n" % text
+if case == "boundary":
+    parts = [quote(real)] * 256
+elif case == "overflow":
+    parts = [quote(fake)] * 257
+else:
+    parts = [quote(real)] * 256 + [quote(fake)]
+open(path, "w").write("".join(parts) + "\nVERDICT: APPROVE\n")
+PY_QUOTE_LIMIT
+    r="$(_report "$limited")"
+    record="$(council_contribution_record_json "$limited" "$ROOT" sha256:quote-limit)"
+    if [[ "$quote_limit_case" == boundary ]]; then
+        if jq -e '.quotes_omitted == 0 and .quotes_checked == 256 and .quotes_verified == 256 and .fabricated == false' <<< "$r" >/dev/null &&
+           jq -e '.validation_result == "valid-grounded"' <<< "$record" >/dev/null &&
+           ! council_response_is_blind "$limited" "$ROOT"; then
+            test_pass
+        else
+            test_fail "exact quote boundary lost grounding: $r $record"
+        fi
+    elif jq -e --arg case "$quote_limit_case" '.quotes_omitted == 1 and .quotes_checked == 256
+             and .fabricated == ($case == "overflow")' <<< "$r" >/dev/null &&
+         jq -e '.validation_result == "invalid-ungrounded" and .evidence_paths == [] and .grounding.quotes_omitted == 1' <<< "$record" >/dev/null &&
+         council_response_is_blind "$limited" "$ROOT" &&
+         ! council_response_is_substantive "$limited" "$ROOT"; then
+        test_pass
+    else
+        test_fail "omitted quotes retained grounding: $r $record"
+    fi
+done
+
+test_case "citation filenames cannot label fabricated source as proposed code"
+proposal_names_passed=true
+for basename in example expected cover; do
+    cp "$ROOT/src/pricing.ts" "$ROOT/src/${basename}.ts"
+    f="$(_resp "src/${basename}.ts:2 reads \`$FAKE\`.
+VERDICT: APPROVE")"
+    r="$(_report "$f")"
+    if ! jq -e '.quotes_checked == 1 and .quotes_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then
+        proposal_names_passed=false
+        test_fail "citation filename was mistaken for proposal prose: ${basename}.ts report: $r"
+        break
+    fi
+done
+[[ "$proposal_names_passed" != true ]] || test_pass
+
+test_case "quote verification never executes repository textconv or fsmonitor commands"
+diff_root="$TEST_TMP_DIR/textconv-root"
+mkdir -p "$diff_root/src"
+git -C "$diff_root" init -q
+printf '*.ts diff=fixture\n' > "$diff_root/.gitattributes"
+printf 'export const originalValue = 1;\n' > "$diff_root/src/service.ts"
+git -C "$diff_root" add .
+git -C "$diff_root" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm baseline
+textconv="$TEST_TMP_DIR/fixture-textconv"
+textconv_marker="$TEST_TMP_DIR/textconv-ran"
+printf '#!/bin/sh\nprintf ran > "%s"\ncat "$1"\n' "$textconv_marker" > "$textconv"
+chmod 755 "$textconv"
+git -C "$diff_root" config diff.fixture.textconv "$textconv"
+fsmonitor="$TEST_TMP_DIR/fixture-fsmonitor"
+fsmonitor_marker="$TEST_TMP_DIR/fsmonitor-ran"
+printf '#!/bin/sh\nprintf ran > "%s"\nexit 1\n' "$fsmonitor_marker" > "$fsmonitor"
+chmod 755 "$fsmonitor"
+git -C "$diff_root" config core.fsmonitor "$fsmonitor"
+printf 'export const updatedValue = 2;\n' > "$diff_root/src/service.ts"
+# Prove this Git actually executes the fixture before testing its suppression.
+GIT_OPTIONAL_LOCKS=0 git -C "$diff_root" diff --no-ext-diff --no-textconv HEAD -- >/dev/null
+fsmonitor_control=false
+[[ ! -e "$fsmonitor_marker" ]] || fsmonitor_control=true
+rm -f "$fsmonitor_marker"
+f="$(_resp 'src/service.ts:1 reads `export const inventedValue = 3;`.
+VERDICT: APPROVE')"
+r="$(council_response_quote_verification_json "$f" "$diff_root")"
+if [[ "$fsmonitor_control" == true && ! -e "$textconv_marker" && ! -e "$fsmonitor_marker" ]] &&
+   jq -e '.quotes_checked == 1 and .fabricated == true' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "fsmonitor control failed, a repository command ran, or the quote result was lost"
+fi
+
+for attribute_source in tracked info configured; do
+    for filter_spec in clean:fixture.with.dots process:fixture.with.dots clean:fixture=x process:fixture=x; do
+        filter_kind="${filter_spec%%:*}"
+        filter_name="${filter_spec#*:}"
+        test_case "$attribute_source attributes cannot execute a repository $filter_kind filter named $filter_name"
+        filter_root="$TEST_TMP_DIR/filter-$attribute_source-$filter_kind-$filter_name"
+        mkdir -p "$filter_root/src"
+        git -C "$filter_root" init -q
+        printf 'export const originalValue = 1;\n' > "$filter_root/src/service.ts"
+        git -C "$filter_root" add .
+        git -C "$filter_root" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm baseline
+        attributes="$filter_root/.gitattributes"
+        if [[ "$attribute_source" == info ]]; then
+            attributes="$filter_root/.git/info/attributes"
+        elif [[ "$attribute_source" == configured ]]; then
+            attributes="$TEST_TMP_DIR/configured-$filter_kind-$filter_name.attributes"
+            git -C "$filter_root" config core.attributesFile "$attributes"
+        fi
+        printf '*.ts filter=%s\n' "$filter_name" > "$attributes"
+        filter_script="$TEST_TMP_DIR/filter-$attribute_source-$filter_kind-$filter_name.sh"
+        filter_marker="$TEST_TMP_DIR/filter-$attribute_source-$filter_kind-$filter_name-ran"
+        printf '#!/bin/sh\nprintf ran > "%s"\n' "$filter_marker" > "$filter_script"
+        if [[ "$filter_kind" == clean ]]; then
+            printf 'cat\n' >> "$filter_script"
+        else
+            # A process filter starts a protocol exchange; exit after the marker
+            # instead of implementing a fake Git filter protocol.
+            printf 'exit 1\n' >> "$filter_script"
+        fi
+        chmod 755 "$filter_script"
+        git -C "$filter_root" config "filter.$filter_name.$filter_kind" "$filter_script"
+        printf 'export const updatedValue = 2;\n' > "$filter_root/src/service.ts"
+        GIT_OPTIONAL_LOCKS=0 git -C "$filter_root" -c core.fsmonitor=false diff --no-ext-diff --no-textconv HEAD -- >/dev/null 2>&1 || true
+        filter_control=false
+        [[ ! -e "$filter_marker" ]] || filter_control=true
+        rm -f "$filter_marker"
+        f="$(_resp 'src/service.ts:1 reads `export const inventedValue = 3;`.
+VERDICT: APPROVE')"
+        r="$(council_response_quote_verification_json "$f" "$filter_root")"
+        real_removed="$(_resp 'src/service.ts:1 reads `export const originalValue = 1;` in the reviewed diff.
+VERDICT: REVISE')"
+        removed_r="$(council_response_quote_verification_json "$real_removed" "$filter_root")"
+        if [[ "$filter_control" != true || -e "$filter_marker" ]]; then
+            test_fail "repository $filter_kind filter ran or control failed: $filter_name"
+        elif [[ "$filter_name" == fixture=x ]]; then
+            if jq -e '.quotes_checked == 1 and .fabricated == false and .diff_unavailable == true and .quotes_unverifiable_diff_incomplete == 1' <<< "$r" >/dev/null &&
+               jq -e '.fabricated == false and .diff_unavailable == true and .quotes_unverifiable_diff_incomplete == 1' <<< "$removed_r" >/dev/null; then
+                test_pass
+            else
+                test_fail "unsafe driver name lost diff uncertainty: $r $removed_r"
+            fi
+        elif jq -e '.quotes_checked == 1 and .fabricated == true and .diff_unavailable == false' <<< "$r" >/dev/null &&
+           jq -e '.quotes_verified_in_diff_removed == 1 and .diff_unavailable == false' <<< "$removed_r" >/dev/null; then
+            test_pass
+        else
+            test_fail "repository $filter_kind filter ran, control failed or evidence was lost: $r $removed_r"
+        fi
+    done
+done
+
+# Prose blockquote admission controls.
+prose_root="$(mktemp -d "$TEST_TMP_DIR/prose-blockquote.XXXXXX")"
+mkdir -p "$prose_root/src"
+cp "$ROOT/src/pricing.ts" "$prose_root/src/pricing.ts"
+git -C "$prose_root" init -q
+git -C "$prose_root" add src
+git -C "$prose_root" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit -qm initial
+for prose_mode in plain html attributed code; do
+    test_case "blockquote prose admission preserves source checks: $prose_mode"
+    prose_quote='The reviewer must confirm the refresh path is covered.'
+    prose_lead='At src/pricing.ts:2 the review requirement was'
+    prose_marker='>'
+    case "$prose_mode" in
+        html) prose_marker='&gt;' ;;
+        attributed) prose_lead='src/pricing.ts:2 reads' ;;
+        code) prose_quote='const status = await fetchCabinPrice(cabin.id);' ;;
+    esac
+    prose_response="$(_resp "$prose_lead
+$prose_marker $prose_quote
+VERDICT: APPROVE")"
+    r="$(council_response_quote_verification_json "$prose_response" "$prose_root")"
+    record="$(council_contribution_record_json "$prose_response" "$prose_root" sha256:test)"
+    if jq -e --arg mode "$prose_mode" --argjson record "$record" '
+        .verification_failed == false and .diff_unavailable == false and .quotes_checked == 1
+        and (if $mode == "plain" or $mode == "html" then
+            .quotes_unverifiable_prose == 1 and .quotes_unverified == 0 and .fabricated == false
+            and $record.validation_result == "valid-grounded"
+        else
+            .quotes_unverifiable_prose == 0 and .quotes_unverified == 1 and .fabricated == true
+            and $record.validation_result == "invalid-ungrounded"
+        end)' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "blockquote admission: $r $record"
+    fi
+done
+# End prose blockquote admission controls.
+
+for prose in \
+    'the response counted as blind' \
+    'the response counted as blind!' \
+    'the response counted as blind?' \
+    'the response counted as blind:' \
+    'the response counted as blind;' \
+    'outcome: the response counted as blind' \
+    'the response counted as blind (after review)' \
+    '(the response counted as blind)' \
+    '[the response counted as blind]' \
+    'the response counted as blind; no seat voted' \
+    'the summary.json record remains valid' \
+    'the cabin.soldOut value remains false' \
+    'the version 1.2.3 remains supported' \
+    'summary.json remains valid' \
+    'the e.g. wording remains ordinary prose'; do
+    test_case "unattributed prose in backticks is unverifiable: $prose"
+    f="$(_resp "At src/pricing.ts:2 the outcome was \`$prose\`, which describes the review result.
+VERDICT: APPROVE")"
+    r="$(_report "$f")"
+    if jq -e '.quotes_checked == 1 and .quotes_unverifiable_prose == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null &&
+       ! council_response_is_blind "$f" "$ROOT"; then test_pass; else test_fail "report: $r"; fi
+done
+
+for source_quote in 'return await fetchCabinPrice(cabin)' 'return available ? cabin : sailing' \
+    'return cabin.soldOut and sailing.isBookable'; do
+    test_case "unattributed fabricated code remains checkable: $source_quote"
+    f="$(_resp "At src/pricing.ts:2 the outcome was \`$source_quote\`, which describes the review result.
+VERDICT: APPROVE")"
+    r="$(_report "$f")"
+    if jq -e '.quotes_unverified == 1 and .quotes_unverifiable_prose == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
+
+test_case "a long question-filled prose span finishes inside the verifier budget"
+punctuated="$(mktemp "$TEST_TMP_DIR/punctuated.XXXXXX")"
+python3 - "$punctuated" <<'PY_PUNCTUATED'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text('At src/pricing.ts:2 the outcome was `' + 'word ? value ' * 60_000 + '`, which describes the review result.\nVERDICT: APPROVE\n')
+PY_PUNCTUATED
+r="$(bounded 10 bash -c 'source "$1"; council_response_quote_verification_json "$2" "$3"' _ \
+    "$PROJECT_ROOT/scripts/lib/council.sh" "$punctuated" "$ROOT" 2>/dev/null || true)"
+if jq -e '.quotes_checked == 1 and .quotes_unverifiable_prose == 1 and .fabricated == false' <<< "$r" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "punctuated prose exceeded 10s or was rejected: ${r:0:200}"
+fi
+
+test_case "an explicit source attribution still checks a plain-text quotation"
+f="$(_resp 'src/pricing.ts:2 reads `the response counted as blind`.
+VERDICT: APPROVE')"
+r="$(_report "$f")"
 if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-test_case "#3340: an invented unattributed quote with no probe wording is still fabricated"
-r="$(_report "$(_resp "The guard near src/pricing.ts:2 uses \`$FAKE\` to load the price.
-VERDICT: REVISE")")"
-if jq -e '.quotes_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+test_case "a quote beyond the attached diff byte limit is unverifiable"
+large_context="$TEST_TMP_DIR/large-context.diff"
+python3 - "$large_context" "$FAKE" <<'PY_DIFF'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text('diff --git a/pad.ts b/pad.ts\n--- a/pad.ts\n+++ b/pad.ts\n@@ -1 +1 @@\n+const visibleCounter = count + 1;\n+' + 'x' * 8_388_608 + '\n-' + sys.argv[2] + '\n')
+PY_DIFF
+f="$(_resp "src/pricing.ts:2 reads \`$FAKE\` in the reviewed diff.
+VERDICT: APPROVE")"
+r="$(COUNCIL_CONTEXT_FILES=("$large_context"); _report "$f")"
+if jq -e '.diff_truncated == true and .quotes_unverifiable_diff_incomplete == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-# sail-cruisey #3311: what a command the seat ran printed is not file content.
-tool_cases=(
-    'The guard at src/pricing.ts:3 looks right. Test execution was unavailable: the targeted Vitest command exited with `vitest: command not found`.'
-    'The guard at src/pricing.ts:3 looks right. Targeted execution was unavailable because dependencies are absent (`vitest: command not found`).'
-    'The guard at src/pricing.ts:3 looks right. The suite could not start: `Cannot find package '"'"'vite'"'"' imported from the config`.'
-)
-for tool in "${tool_cases[@]}"; do
-    test_case "#3311: a seat's tool output is not a fabricated quote: ${tool:60:50}"
-    r="$(_report "$(_resp "$tool
-VERDICT: APPROVE")")"
-    if jq -e '.quotes_unverified == 0 and .quotes_unverifiable_command == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+test_case "a matching quote in a truncated diff prefix remains verified"
+f="$(_resp 'src/pricing.ts:2 reads `const visibleCounter = count + 1;` in the reviewed diff.
+VERDICT: APPROVE')"
+r="$(COUNCIL_CONTEXT_FILES=("$large_context"); _report "$f")"
+if jq -e '.diff_truncated == true and .quotes_verified_in_diff_added == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "a real removal beyond the git diff byte limit is unverifiable"
+large_root="$TEST_TMP_DIR/large-diff-root"
+mkdir -p "$large_root"
+git -C "$large_root" init -q
+python3 - "$large_root/a-padding.ts" old <<'PY_PAD'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(sys.argv[2] + 'x' * 8_388_608 + '\n')
+PY_PAD
+printf '%s\n' "$FAKE" > "$large_root/z-service.ts"
+git -C "$large_root" add .
+git -C "$large_root" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm baseline
+python3 - "$large_root/a-padding.ts" new <<'PY_PAD'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text(sys.argv[2] + 'x' * 8_388_608 + '\n')
+PY_PAD
+printf 'export const updatedValue = 2;\n' > "$large_root/z-service.ts"
+f="$(_resp "z-service.ts:1 reads \`$FAKE\` in the reviewed diff.
+VERDICT: APPROVE")"
+r="$(council_response_quote_verification_json "$f" "$large_root")"
+if jq -e '.diff_truncated == true and .quotes_unverifiable_diff_incomplete == 1 and .quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "distinct unresolved citations finish within the lookup budget in a large root"
+indexed_root="$TEST_TMP_DIR/indexed-root"
+indexed_response="$TEST_TMP_DIR/indexed-response.md"
+python3 - "$indexed_root" "$indexed_response" "$REAL_NEAR" <<'PY_INDEX'
+import sys
+from pathlib import Path
+root, response = map(Path, sys.argv[1:3])
+root.mkdir()
+for i in range(20_000):
+    (root / ('file-%05d.ts' % i)).touch()
+(root / '.hidden' / 'src').mkdir(parents=True)
+(root / '.hidden' / 'src' / 'target.ts').write_text(sys.argv[3] + '\n')
+response.write_text('\n'.join('Unresolved: missing/path-%d.ts:1 not read' % i for i in range(8_000)) +
+                    '\n\nsrc/target.ts:1 reads `' + sys.argv[3] + '`.\nVERDICT: APPROVE\n')
+PY_INDEX
+r="$(bounded 10 bash -c 'source "$1"; council_response_quote_verification_json "$2" "$3"' _ \
+    "$PROJECT_ROOT/scripts/lib/council.sh" "$indexed_response" "$indexed_root" 2>/dev/null || true)"
+if jq -e '.citations == 1 and .citations_unresolved == 8000 and .quotes_verified == 1 and .fabricated == false' <<< "$r" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "citation lookup exceeded 10s or lost evidence: ${r:0:200}"
+fi
+
+test_case "suffix lookup preserves ambiguity and requires a path-component boundary"
+mkdir -p "$indexed_root/.other/src" "$indexed_root/.hidden/othersrc"
+printf '%s\n' "$REAL_NEAR" > "$indexed_root/.other/src/target.ts"
+printf '%s\n' "$REAL_NEAR" > "$indexed_root/.hidden/src/unique.ts"
+printf '%s\n' "$REAL_NEAR" > "$indexed_root/.hidden/othersrc/unique.ts"
+f="$(_resp "src/target.ts:1 reads \`$FAKE\`.
+src/unique.ts:1 reads \`$REAL_NEAR\`.
+VERDICT: APPROVE")"
+r="$(council_response_quote_verification_json "$f" "$indexed_root")"
+if jq -e '.citations == 1 and .citations_unresolved == 1 and .quotes_verified == 1 and .quotes_unverifiable_unresolved_citation == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+# Execute the real embedded verifier with a deterministic directory stream.
+# Duplicate suffixes live on disk; synthetic skipped entries exercise the real
+# 50,000-entry budget without creating a large filesystem fixture.
+index_runner="$TEST_TMP_DIR/index-limits.py"
+cat > "$index_runner" <<'PY_INDEX_LIMITS'
+import contextlib
+import io
+import json
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+source, fixture, mode = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
+root = fixture / mode
+root.mkdir(parents=True)
+real_quote = 'const verifiedPrice = cabin.basePrice ?? sailing.defaultPrice;'
+direct_quote = 'const directControl = verifiedPrice + portFees;'
+(root / 'direct.ts').write_text(direct_quote + '\n')
+visible = root / 'z-visible' / 'src'
+visible.mkdir(parents=True)
+(visible / 'target.ts').write_text('const unrelatedValue = 17;\n')
+hidden = root / 'a-hidden'
+if mode == 'depth':
+    hidden = hidden.joinpath(*(['nested'] * 32))
+(hidden / 'src').mkdir(parents=True)
+(hidden / 'src' / 'target.ts').write_text(real_quote + '\n')
+response = fixture / (mode + '.md')
+response.write_text('src/target.ts:1 reads `' + real_quote + '`.\n\n'
+                    'direct.ts:1 reads `' + direct_quote + '`.\nVERDICT: APPROVE\n')
+function = Path(source).read_text().split('council_response_quote_verification_json() {', 1)[1]
+script = function.split("<<'PY'", 1)[1].split('\n', 1)[1].split('\nPY\n', 1)[0]
+native_scandir = os.scandir
+consumed = 0
+
+class SkippedEntry:
+    def is_symlink(self):
+        return True
+
+class Scan:
+    def __init__(self, entries):
+        self.entries = iter(entries)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        global consumed
+        entry = next(self.entries)
+        consumed += 1
+        if mode == 'stream' and consumed > 50_000:
+            raise AssertionError('directory stream consumed beyond the entry budget')
+        return entry
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.entries.close() if hasattr(self.entries, 'close') else None
+
+def directory_entries(directory):
+    with native_scandir(directory) as entries:
+        # Only this small root needs deterministic traversal order, so the
+        # misleading match is visited before the genuine duplicate.
+        if directory == root:
+            yield from sorted(entries, key=lambda entry: entry.name)
+        else:
+            yield from entries
+    if mode in ('cap', 'stream') and directory == visible:
+        yield from (SkippedEntry() for _ in range(60_000))
+
+def scandir(directory):
+    directory = Path(directory)
+    if mode == 'unreadable' and directory == hidden:
+        raise PermissionError('fixture directory cannot be scanned')
+    return Scan(directory_entries(directory))
+
+output = io.StringIO()
+sys.argv = ['-', str(response), str(root)]
+with patch('os.scandir', scandir), contextlib.redirect_stdout(output):
+    try:
+        exec(compile(script, source, 'exec'), {'__name__': '__main__'})
+    except SystemExit as error:
+        assert error.code == 0, error.code
+report = json.loads(output.getvalue())
+assert report['citations'] == 1 and report['citations_unresolved'] == 1, report
+assert report['quotes_verified'] == 1, report
+assert report['quotes_unverifiable_unresolved_citation'] == 1, report
+assert report['quotes_attributed_unverified'] == 0 and not report['fabricated'], report
+if mode == 'stream':
+    assert consumed <= 50_000, consumed
+print(json.dumps({'mode': mode, 'consumed': consumed, 'report': report}))
+PY_INDEX_LIMITS
+
+for index_mode in cap stream depth unreadable; do
+    test_case "incomplete suffix scan stays unresolved: $index_mode"
+    if index_output="$(python3 "$index_runner" "$PROJECT_ROOT/scripts/lib/council.sh" \
+        "$TEST_TMP_DIR/index-limits" "$index_mode" 2>&1)"; then
+        test_pass
+    else
+        test_fail "index limit $index_mode: ${index_output:0:1200}"
+    fi
+done
+
+test_case "an oversized git diff producer is stopped while its retained prefix verifies"
+fake_git_bin="$TEST_TMP_DIR/streaming-git-bin"
+mkdir -p "$fake_git_bin"
+printf '%s\n' "$FAKE" > "$ROOT/removed-quote.txt"
+cat > "$fake_git_bin/git" <<'PY_GIT'
+#!/usr/bin/env python3
+import os
+import sys
+import time
+from pathlib import Path
+root = Path(sys.argv[sys.argv.index('-C') + 1])
+if 'config' in sys.argv:
+    failure = root / 'filter-config-failure'
+    if failure.exists():
+        if failure.read_text() == 'oversized':
+            sys.stdout.buffer.write(b'x' * 65537)
+            sys.exit(0)
+        sys.exit(1)
+    sys.exit(0)
+if (root / 'filter-config-failure').exists():
+    (root / 'unsafe-diff-ran').touch()
+if (root / 'stall-diff').exists():
+    (root / 'diff-producer-pid').write_text(str(os.getpid()))
+    time.sleep(30)
+prefix = ('diff --git a/service.ts b/service.ts\n--- a/service.ts\n+++ b/service.ts\n@@ -1 +0,0 @@\n-' +
+          (root / 'removed-quote.txt').read_text() + '\n').encode()
+sys.stdout.buffer.write(prefix)
+chunk = b'+' + b'x' * 65534 + b'\n'
+for _ in range(1024):
+    sys.stdout.buffer.write(chunk)
+sys.stdout.buffer.flush()
+(root / 'diff-producer-completed').write_text('unbounded output consumed\n')
+PY_GIT
+chmod 755 "$fake_git_bin/git"
+f="$(_resp "src/pricing.ts:2 reads \`$FAKE\` in the reviewed diff.
+VERDICT: APPROVE")"
+r="$(PATH="$fake_git_bin:$PATH" _report "$f")"
+if [[ ! -e "$ROOT/diff-producer-completed" ]] &&
+   jq -e '.diff_truncated == true and .quotes_verified_in_diff_removed == 1 and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "producer completed or retained evidence was lost: $r"
+fi
+
+test_case "a stalled git diff producer reaches its deadline and is reaped"
+touch "$ROOT/stall-diff"
+r="$(PATH="$fake_git_bin:$PATH" bounded 15 bash -c \
+    'source "$1"; council_response_quote_verification_json "$2" "$3"' _ \
+    "$PROJECT_ROOT/scripts/lib/council.sh" "$f" "$ROOT" 2>/dev/null || true)"
+producer_pid="$(cat "$ROOT/diff-producer-pid" 2>/dev/null || true)"
+if [[ "$producer_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$producer_pid" 2>/dev/null &&
+   jq -e '.quotes_checked == 1 and .diff_unavailable == true and .quotes_unverifiable_diff_incomplete == 1
+          and .quotes_unverified == 0 and .fabricated == false and .diff_sources == []' <<< "$r" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "diff deadline failed or left the producer alive: ${r:0:200}"
+fi
+rm -f "$ROOT/stall-diff"
+
+for config_failure in unavailable oversized; do
+    test_case "an $config_failure filter configuration prevents the worktree diff"
+    printf '%s' "$config_failure" > "$ROOT/filter-config-failure"
+    rm -f "$ROOT/unsafe-diff-ran"
+    r="$(PATH="$fake_git_bin:$PATH" _report "$f")"
+    if [[ ! -e "$ROOT/unsafe-diff-ran" ]] &&
+       jq -e '.diff_unavailable == true and .quotes_verified == 0 and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "unknown filter configuration allowed a diff or lost uncertainty: $r"
+    fi
+    rm -f "$ROOT/filter-config-failure"
 done
 
 # sail-cruisey #3386: a seat that ran the code quotes the error it threw. That
@@ -1318,6 +2910,15 @@ test_case "#3338: a span holding only a backslash closes on the next backtick"
 r="$(_xreport 'A comment ending in `\` hides the next line. At `scripts/entry.mjs:2` the scanner joins `\`+newline lines before it strips comments.')"
 if jq -e '.quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "#3338: an unclosed backtick in link text does not pair with the next paragraph"
+r="$(_xreport '1. `PreToolUse` runs the guard ([`scripts/entry.mjs:2](file:///scripts/entry.mjs#L2)).
+2. `UserPromptSubmit` runs it too ([scripts/entry.mjs:3](file:///scripts/entry.mjs#L3)).
+  Using `import { run } from "./run.mjs";` keeps the entry stable across working directories.
+
+#### B. Limits
+- **Latency** caps the scan, which would otherwise fail the hook open.')"
+if jq -e '.quotes_unverified == 0 and .quotes_verified == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3338: a citation of a file with no extension binds its quote"
 r="$(_xreport 'The node check at `.githooks/pre-commit:4` sits after `[ -f "$hook" ] || exit 0` in `scripts/entry.mjs:2`.')"
 if jq -e '.citations == 2 and .quotes_verified == 1 and .quotes_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
@@ -1359,9 +2960,7 @@ for owner_case in "reads what my teammate built as" "reads code I reviewed that 
     test_case "an invented quote another author built is still checked: $owner_case"
     r="$(_report "$(_resp "src/pricing.ts:2 $owner_case \`$FAKE\`.
 VERDICT: APPROVE")")"
-    # Workflow attributes on reading words only, so the claim is checked as an
-    # unattributed quote: unverified, not the seat's own proposal.
-    if jq -e '.quotes_unverifiable_proposed == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+    if jq -e '.quotes_unverifiable_proposed == 0 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 done
 
 test_case "a chair-fallback seat record carries grounding like an advice seat"
@@ -1379,5 +2978,1146 @@ unset -f council_pick_provider council_provider_is_available council_dispatch_me
 source "$PROJECT_ROOT/scripts/lib/council.sh"
 rec="$(jq -c '[.[] | select(.seat == "chair")][0] // {}' <<< "$COUNCIL_SEAT_RECORDS_JSON")"
 if jq -e '.grounding.quotes_verified == 1 and .grounding == .contribution.grounding' <<< "$rec" >/dev/null; then test_pass; else test_fail "record: $rec"; fi
+
+# Chair fallback rejection retention controls.
+for fallback_access in available failed; do
+for fallback_scenario in quiet failure retry missing; do
+test_case "chair fallback retains $fallback_access access rejected evidence and $fallback_scenario diagnostics without admission"
+record="$(
+    d="$(mktemp -d "$TEST_TMP_DIR/fallback-refresh.XXXXXX")"
+    mkdir -p "$d/evidence/src" "$d/run/responses" "$d/run/stderr"
+    # A known empty diff must not preserve uncertainty about the removed quote.
+    printf '%s\n' "$FAKE" > "$d/evidence/src/pricing.ts"
+    git -C "$d/evidence" init -q
+    git -C "$d/evidence" add src
+    git -C "$d/evidence" -c user.name=Test -c user.email=test@example.invalid commit -qm baseline
+    printf '%s\n' "$REAL_NEAR" > "$d/evidence/src/pricing.ts"
+    OCTOPUS_COUNCIL_DIFF_BASE=HEAD
+    OCTOPUS_PROJECT_DIR="$d/evidence"; COUNCIL_RUN_DIR="$d/run"; COUNCIL_FIXTURE=""
+    COUNCIL_RESPONSES_RECEIVED=0; COUNCIL_CHAIR_RESPONSE_RECEIVED=false
+    COUNCIL_CHAIR_FALLBACK_USED=false; COUNCIL_SEAT_RECORDS_JSON='[]'
+    COUNCIL_TIMEOUT_WARNINGS=""
+    COUNCIL_RUN_START_EPOCH=""; COUNCIL_CONTEXT_FILES=()
+    council_synthesis_capable_persona() { [[ "$1" == strategy-analyst ]]; }
+    council_persona_should_fail() { return 1; }
+    council_pick_provider() { printf 'claude\n'; }
+    council_provider_is_available() { return 0; }
+    council_dispatch_member_detached() {
+        if [[ "$fallback_access" == failed ]]; then
+            printf 'I cannot read the file.\n' > "$3"
+        else
+            : > "$3"
+        fi
+        printf 'Reviewed src/pricing.ts:1: `%s` handles the fallback.\nVERDICT: APPROVE\n' "$REAL_NEAR" >> "$3"
+        if [[ "$fallback_scenario" == failure || "$fallback_scenario" == retry ]]; then
+            printf '== 2026-10-21T20:00:00Z claude exited 17: transport failure\n-- stderr --\nError: fixture transport failure\n' > "$_OCTOPUS_SEAT_STDERR_FILE"
+        fi
+        [[ "$fallback_scenario" != failure && "$fallback_scenario" != missing ]] || return 17
+    }
+    eval "$(declare -f council_contribution_record_json | sed '1s/council_contribution_record_json/_fallback_contribution_before_mutation/')"
+    council_contribution_record_json() {
+        printf '%s\n' "$FAKE" > "$d/evidence/src/pricing.ts"
+        _fallback_contribution_before_mutation "$@"
+    }
+    rc=0
+    council_run_chair_fallback sha256:t >/dev/null 2>&1 || rc=$?
+    jq -cn --argjson rc "$rc" --argjson seats "$COUNCIL_SEAT_RECORDS_JSON" \
+        --argjson received "$COUNCIL_RESPONSES_RECEIVED" --argjson chair "$COUNCIL_CHAIR_RESPONSE_RECEIVED" \
+        --argjson used "$COUNCIL_CHAIR_FALLBACK_USED" \
+        --arg warnings "$COUNCIL_TIMEOUT_WARNINGS" \
+        --argjson responses "$(find "$d/run/responses" -type f | wc -l | tr -d '[:space:]')" \
+        --argjson captures "$(find "$d/run/stderr" -type f | wc -l | tr -d '[:space:]')" \
+        '{rc:$rc, seats:$seats, received:$received, chair:$chair, used:$used,
+          warnings:$warnings, responses:$responses, captures:$captures}'
+)"
+if jq -e --arg scenario "$fallback_scenario" --arg access "$fallback_access" '.rc != 0 and .received == 0 and .chair == false and .used == false
+        and .responses == 1 and (.seats | length == 1)
+        and (.seats[0] | .seat == "chair" and .status == "no-response"
+            and .counted_as_approver == false
+            and .contribution.access_state == (if $access == "failed" then "failed" else "evidence-rejected" end)
+            and .grounding.fabricated == true and .grounding == .contribution.grounding)
+        and (if $scenario == "quiet" then .warnings == "" and .captures == 0
+             elif $scenario == "missing" then .captures == 1 and (.warnings | contains("exited 17: no provider diagnostics were retained;"))
+             else .captures == 1 and (.warnings | contains("exited 17: Error: fixture transport failure;")) end)' <<< "$record" >/dev/null; then
+    test_pass
+else
+    test_fail "invalid contribution became a recovered chair: $record"
+fi
+done
+done
+# End chair fallback rejection retention controls.
+
+# Retained chair response admission controls.
+for reuse_mode in grounded unverified invalid-verdict record-failure malformed-record; do
+    test_case "retained chair response requires current contribution admission: $reuse_mode"
+    record="$(
+        d="$(mktemp -d "$TEST_TMP_DIR/retained-chair.XXXXXX")"
+        mkdir -p "$d/evidence" "$d/run/responses" "$d/run/stderr"
+        response="$d/run/responses/00-chair-fallback-strategy-analyst.md"
+        if [[ "$reuse_mode" == unverified ]]; then
+            printf 'The review recommends checking the refresh behavior before publishing.\nVERDICT: APPROVE\n' > "$response"
+        else
+            mkdir -p "$d/evidence/src"
+            cp "$ROOT/src/pricing.ts" "$d/evidence/src/pricing.ts"
+            printf 'Reviewed src/pricing.ts:2: `%s` handles the fallback.\n' "$REAL_NEAR" > "$response"
+            [[ "$reuse_mode" == invalid-verdict ]] || printf 'VERDICT: APPROVE\n' >> "$response"
+        fi
+        git -C "$d/evidence" init -q
+        git -C "$d/evidence" add .
+        git -C "$d/evidence" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit --allow-empty -qm initial
+        OCTOPUS_PROJECT_DIR="$d/evidence"; COUNCIL_RUN_DIR="$d/run"
+        COUNCIL_CONTEXT_FILES=(); COUNCIL_RUN_START_EPOCH=""; COUNCIL_FIXTURE=""
+        COUNCIL_RESPONSES_RECEIVED=1; COUNCIL_CHAIR_RESPONSE_RECEIVED=false
+        COUNCIL_CHAIR_FALLBACK_USED=false; COUNCIL_CHAIR_FALLBACK_PERSONA=""
+        COUNCIL_SEAT_RECORDS_JSON='[{"persona":"strategy-analyst","seat":"adviser","status":"responded","contribution":{"validation_result":"valid-grounded"}}]'
+        council_synthesis_capable_persona() { [[ "$1" == strategy-analyst ]]; }
+        council_persona_should_fail() { return 1; }
+        council_pick_provider() { printf 'claude\n'; }
+        council_provider_is_available() { return 1; }
+        if [[ "$reuse_mode" == record-failure ]]; then
+            council_contribution_record_json() { return 1; }
+        elif [[ "$reuse_mode" == malformed-record ]]; then
+            council_contribution_record_json() { printf '{'; }
+        fi
+        rc=0
+        council_run_chair_fallback sha256:test >/dev/null 2>&1 || rc=$?
+        jq -cn --argjson rc "$rc" --argjson chair "$COUNCIL_CHAIR_RESPONSE_RECEIVED" \
+            --argjson used "$COUNCIL_CHAIR_FALLBACK_USED" --arg persona "$COUNCIL_CHAIR_FALLBACK_PERSONA" \
+            --argjson received "$COUNCIL_RESPONSES_RECEIVED" --argjson seats "$COUNCIL_SEAT_RECORDS_JSON" \
+            --argjson retained "$([[ -s "$response" ]] && printf true || printf false)" \
+            '{rc:$rc,chair:$chair,used:$used,persona:$persona,received:$received,seats:$seats,retained:$retained}'
+    )"
+    if jq -e --arg mode "$reuse_mode" '.received == 1 and (.seats | length == 1) and .retained
+        and (if $mode == "grounded" or $mode == "unverified" then
+            .rc == 0 and .chair and .used and .persona == "strategy-analyst"
+        else .rc != 0 and .chair == false and .used == false and .persona == "" end)' <<< "$record" >/dev/null; then
+        test_pass
+    else
+        test_fail "retained response bypassed current admission: $record"
+    fi
+done
+# End retained chair response admission controls.
+
+# Begin mixed-diff and context-structure regression controls.
+struct_root="$(mktemp -d "$TEST_TMP_DIR/structured-diff.XXXXXX")"
+mkdir -p "$struct_root/src"
+old_a='const previousValue = loadPreviousValue(input);'
+old_b='const previousState = loadPreviousState(input);'
+new_a='const actualValue = loadCurrentValue(input);'
+new_b='const actualState = loadCurrentState(input);'
+not_source='const inventedValue = fabricateResult(input);'
+printf '%s\n' "$new_a" "$new_b" > "$struct_root/src/demo.ts"
+git -C "$struct_root" init -q
+git -C "$struct_root" add src/demo.ts
+git -C "$struct_root" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit -qm baseline
+struct_diff="$TEST_TMP_DIR/structured.diff"
+printf 'diff --git a/src/demo.ts b/src/demo.ts\n--- a/src/demo.ts\n+++ b/src/demo.ts\n@@ -1,2 +1,2 @@\n-%s\n-%s\n+%s\n+%s\n' \
+    "$old_a" "$old_b" "$new_a" "$new_b" > "$struct_diff"
+for mixed_case in fake-added fake-removed minority-added minority-removed genuine majority-added majority-removed diff-only; do
+    test_case "mixed diff quote verifies both portions: $mixed_case"
+    removed_text="$old_a"; added_text="$new_a"; expected=valid-grounded
+    case "$mixed_case" in
+        fake-added) added_text="$not_source
++const inventedState = fabricateState(input);
++return approveImaginaryResult(input);"; expected=invalid-ungrounded ;;
+        fake-removed) removed_text="$not_source"; expected=invalid-ungrounded ;;
+        minority-added) added_text="$new_a
++$not_source
++return approveImaginaryResult(input);"; expected=invalid-ungrounded ;;
+        minority-removed) removed_text="$old_a
+-$not_source
+-return approveImaginaryResult(input);"; expected=invalid-ungrounded ;;
+        majority-added) added_text="$new_a
++$new_b
++$not_source" ;;
+        majority-removed) removed_text="$old_a
+-$old_b
+-$not_source" ;;
+        diff-only) added_text='const futureValue = loadFutureValue(input);' ;;
+    esac
+    selected_diff="$struct_diff"
+    if [[ "$mixed_case" == diff-only ]]; then
+        selected_diff="$TEST_TMP_DIR/future.diff"
+        printf '@@ -1 +1 @@\n-%s\n+%s\n' "$old_a" "$added_text" > "$selected_diff"
+    fi
+    mixed_response="$(_resp "src/demo.ts:1 reads:
+\`\`\`diff
+-$removed_text
++$added_text
+\`\`\`
+VERDICT: APPROVE")"
+    record="$(COUNCIL_CONTEXT_FILES=("$selected_diff"); council_contribution_record_json "$mixed_response" "$struct_root" sha256:test)"
+    if jq -e --arg expected "$expected" '.validation_result == $expected and .grounding.verification_failed == false
+        and .grounding.diff_unavailable == false and .grounding.quotes_checked == 1
+        and (if $expected == "invalid-ungrounded" then .evidence_paths == []
+            and .grounding.quotes_verified == 0 and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated
+        else .grounding.quotes_verified == 1 and .grounding.quotes_verified_in_diff_removed == 1
+            and .grounding.fabricated == false end)' <<< "$record" >/dev/null; then
+        test_pass
+    else
+        test_fail "mixed diff was admitted or rejected incorrectly: $record"
+    fi
+done
+# A mixed fence makes claims about both versions. A kept portion that is
+# partial in the cited file but exact on the added side is not partial; a
+# partial removed portion still is.
+extra_new='const extraState = loadExtraState(input);'
+extra_diff="$TEST_TMP_DIR/extra-added.diff"
+printf 'diff --git a/src/demo.ts b/src/demo.ts\n--- a/src/demo.ts\n+++ b/src/demo.ts\n@@ -1,2 +1,3 @@\n-%s\n-%s\n+%s\n+%s\n+%s\n' \
+    "$old_a" "$old_b" "$new_a" "$new_b" "$extra_new" > "$extra_diff"
+for partial_case in kept-exact-on-added removed-partial; do
+    test_case "#3247: mixed fence partial counts each portion on its own side: $partial_case"
+    removed_text="$old_a"; expected_partial=0
+    if [[ "$partial_case" == removed-partial ]]; then
+        removed_text="$old_a
+-$old_b
+-$not_source"; expected_partial=1
+    fi
+    mixed_response="$(_resp "src/demo.ts:1 reads:
+\`\`\`diff
+-$removed_text
++$new_a
++$new_b
++$extra_new
+\`\`\`
+VERDICT: APPROVE")"
+    r="$(COUNCIL_CONTEXT_FILES=("$extra_diff"); council_response_quote_verification_json "$mixed_response" "$struct_root")"
+    if jq -e --argjson p "$expected_partial" '.quotes_verified == 1 and .quotes_verified_in_diff_removed == 1
+        and .quotes_partial == $p and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "report: $r"
+    fi
+done
+for structure_case in rule file-header git-header malformed-hunk after-hunk unified hunk-only markdown-diff crlf; do
+    test_case "attached context imports only unified hunk lines: $structure_case"
+    plan_file="$TEST_TMP_DIR/structure-$structure_case.md"
+    expected=invalid-ungrounded
+    case "$structure_case" in
+        rule) printf '# Plan\n\n--- \n- %s\n' "$not_source" > "$plan_file" ;;
+        file-header) printf '%s\n' '+++ Plan' "- $not_source" > "$plan_file" ;;
+        git-header) printf 'diff --git a/plan b/plan\n- %s\n' "$not_source" > "$plan_file" ;;
+        malformed-hunk) printf '@@ summary @@\n- %s\n' "$not_source" > "$plan_file" ;;
+        after-hunk) cat "$struct_diff" > "$plan_file"; printf -- '- %s\n' "$not_source" >> "$plan_file" ;;
+        unified) cp "$struct_diff" "$plan_file"; not_source_selected="$old_a"; expected=valid-grounded ;;
+        hunk-only) printf '@@ -1 +1 @@\n-%s\n+%s\n' "$old_a" "$new_a" > "$plan_file"; not_source_selected="$old_a"; expected=valid-grounded ;;
+        markdown-diff) printf '# Review\n```diff\n' > "$plan_file"; cat "$struct_diff" >> "$plan_file"; printf '```\n- %s\n' "$not_source" >> "$plan_file"; not_source_selected="$old_a"; expected=valid-grounded ;;
+        crlf) python3 -c 'import sys; sys.stdout.buffer.write(open(sys.argv[1], "rb").read().replace(b"\n", b"\r\n"))' "$struct_diff" > "$plan_file"; not_source_selected="$old_a"; expected=valid-grounded ;;
+    esac
+    [[ "$expected" != invalid-ungrounded ]] || not_source_selected="$not_source"
+    structure_response="$(_resp "src/demo.ts:1 reads \`$not_source_selected\`.
+VERDICT: APPROVE")"
+    record="$(COUNCIL_CONTEXT_FILES=("$plan_file"); council_contribution_record_json "$structure_response" "$struct_root" sha256:test)"
+    if jq -e --arg expected "$expected" '.validation_result == $expected and .grounding.verification_failed == false
+        and .grounding.diff_unavailable == false and .grounding.quotes_checked == 1
+        and (if $expected == "invalid-ungrounded" then .evidence_paths == []
+            and .grounding.quotes_verified_in_diff_removed == 0 and .grounding.fabricated
+        else .grounding.quotes_verified_in_diff_removed == 1 and .grounding.fabricated == false end)' <<< "$record" >/dev/null; then
+        test_pass
+    else
+        test_fail "non-source context became diff evidence or a real hunk was lost: $record"
+    fi
+done
+# A source prefix operator gains a third sign in a unified diff. It remains
+# source inside a hunk or a headerless excerpt, even when the side is too short
+# to meet the standalone specificity floor.
+for prefix_layout in excerpt hunk headers; do
+    for prefix_case in fake-added-short fake-removed-short fake-added-specific fake-removed-specific genuine-added-short genuine-removed-short genuine-added-specific genuine-removed-specific fake-both-added-short fake-both-removed-short genuine-both-short; do
+        test_case "mixed diff preserves prefix operators: $prefix_layout/$prefix_case"
+        removed_truth="$old_a"; added_truth="$new_a"
+        case "$prefix_case" in
+            *both*) removed_truth='-- previousCounter;'; added_truth='++ actualCounter;' ;;
+            *added*) added_truth='++ actualCounter;' ;;
+            *removed*) removed_truth='-- previousCounter;' ;;
+        esac
+        if [[ "$prefix_case" == *specific ]]; then
+            [[ "$prefix_case" != *added* ]] || added_truth="$added_truth // actual added source"
+            [[ "$prefix_case" != *removed* ]] || removed_truth="$removed_truth // actual removed source"
+        fi
+        removed_text="$removed_truth"; added_text="$added_truth"; expected=valid-grounded
+        case "$prefix_case" in
+            fake-added*|fake-both-added*) added_text="${added_truth/actualCounter/inventedCounter}"; expected=invalid-ungrounded ;;
+            fake-removed*|fake-both-removed*) removed_text="${removed_truth/previousCounter/inventedCounter}"; expected=invalid-ungrounded ;;
+        esac
+        prefix_diff="$TEST_TMP_DIR/prefix.diff"
+        printf '@@ -1 +1 @@\n-%s\n+%s\n' "$removed_truth" "$added_truth" > "$prefix_diff"
+        prefix_body="$(printf -- '-%s\n+%s\n' "$removed_text" "$added_text")"
+        case "$prefix_layout" in
+            hunk) prefix_body="$(printf '@@ -1 +1 @@\n%s\n' "$prefix_body")" ;;
+            headers) prefix_body="$(printf -- '--- a/src/demo.ts\n+++ b/src/demo.ts\n@@ -1 +1 @@\n%s\n' "$prefix_body")" ;;
+        esac
+        prefix_response="$(_resp "src/demo.ts:1 reads:
+\`\`\`diff
+$prefix_body
+\`\`\`
+VERDICT: APPROVE")"
+        record="$(COUNCIL_CONTEXT_FILES=("$prefix_diff"); council_contribution_record_json "$prefix_response" "$struct_root" sha256:test)"
+        if jq -e --arg expected "$expected" '.validation_result == $expected and .grounding.verification_failed == false
+            and .grounding.diff_unavailable == false and .grounding.quotes_checked == 1
+            and (if $expected == "invalid-ungrounded" then .evidence_paths == []
+                and .grounding.quotes_verified == 0 and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated
+            else .grounding.quotes_verified == 1 and .grounding.quotes_verified_in_diff_removed == 1
+                and .grounding.fabricated == false end)' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "prefix source was discarded or invented source admitted: $record"
+        fi
+    done
+done
+for short_kept in "$new_a" '++ actualCounter;'; do
+    test_case "short removed portion without diff evidence remains uncertain: $short_kept"
+    prefix_response="$(_resp "src/demo.ts:1 reads:
+\`\`\`diff
+--- previousCounter;
++$short_kept
+\`\`\`
+VERDICT: APPROVE")"
+    record="$(COUNCIL_CONTEXT_FILES=(); council_contribution_record_json "$prefix_response" "$struct_root" sha256:test)"
+    if jq -e '.grounding.quotes_checked == 1 and .grounding.quotes_verified == 0
+        and .grounding.quotes_unverifiable_claimed_removed == 1 and .grounding.quotes_unverified == 0
+        and .grounding.verification_failed == false and .grounding.diff_unavailable == false
+        and .grounding.fabricated == false' <<< "$record" >/dev/null; then
+        test_pass
+    else
+        test_fail "short removal lost missing-diff uncertainty: $record"
+    fi
+done
+# Git can omit the marker on empty context lines. Generate both real Git
+# formats in a separate repository so the evidence root's own diff cannot
+# accidentally verify a removal that the attached patch parser discarded.
+blank_patch_root="$(mktemp -d "$TEST_TMP_DIR/blank-context-git.XXXXXX")"
+mkdir -p "$blank_patch_root/src"
+blank_old_head='const previousMode = readPreviousMode(input);'
+blank_new_head='const currentMode = readCurrentMode(input);'
+blank_tail='const retainedTail = readRetainedTail(input);'
+printf '%s\n\n%s\n%s\n' "$blank_old_head" "$old_a" "$blank_tail" > "$blank_patch_root/src/demo.ts"
+git -C "$blank_patch_root" init -q
+git -C "$blank_patch_root" add src/demo.ts
+git -C "$blank_patch_root" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit -qm baseline
+printf '%s\n\n%s\n%s\n' "$blank_new_head" "$new_a" "$blank_tail" > "$blank_patch_root/src/demo.ts"
+for blank_case in canonical suppressed crlf clipped-canonical clipped-suppressed unbalanced; do
+    test_case "attached patch bounds empty context lines: $blank_case"
+    blank_patch="$TEST_TMP_DIR/blank-context-$blank_case.diff"
+    suppress_blank=true; expected=valid-grounded
+    case "$blank_case" in canonical|clipped-canonical) suppress_blank=false ;; esac
+    git -C "$blank_patch_root" -c diff.suppressBlankEmpty="$suppress_blank" diff --no-ext-diff --no-textconv HEAD > "$blank_patch"
+    python3 - "$blank_patch" "$blank_case" <<'PY'
+from pathlib import Path
+import sys
+path, kind = Path(sys.argv[1]), sys.argv[2]
+raw = path.read_bytes()
+if kind == "crlf":
+    raw = raw.replace(b"\n", b"\r\n")
+elif kind.startswith("clipped-"):
+    raw = raw.replace(b"@@ -1,4 +1,4 @@", b"@@ -1 +1 @@")
+elif kind == "unbalanced":
+    raw = raw.replace(b"@@ -1,4 +1,4 @@", b"@@ -1,2 +1 @@")
+path.write_bytes(raw)
+PY
+    case "$blank_case" in clipped-*|unbalanced) expected=invalid-ungrounded ;; esac
+    blank_response="$(_resp "src/demo.ts:1 reads \`$old_a\`.
+VERDICT: APPROVE")"
+    record="$(COUNCIL_CONTEXT_FILES=("$blank_patch"); council_contribution_record_json "$blank_response" "$struct_root" sha256:test)"
+    if jq -e --arg expected "$expected" '.validation_result == $expected and .grounding.verification_failed == false
+        and .grounding.diff_unavailable == false and .grounding.quotes_checked == 1
+        and (if $expected == "invalid-ungrounded" then .grounding.quotes_verified == 0
+            and .grounding.fabricated and .evidence_paths == []
+        else .grounding.quotes_verified_in_diff_removed == 1 and .grounding.fabricated == false end)' <<< "$record" >/dev/null; then
+        test_pass
+    else
+        test_fail "empty context lost source or exceeded a hunk boundary: $record"
+    fi
+done
+for blank_endings in lf crlf; do
+    for blank_prefix_case in genuine invented; do
+        test_case "empty context preserves prefix source inside a quoted hunk: $blank_endings/$blank_prefix_case"
+        blank_prefix_old='-- previousCounter; // actual previous source'
+        blank_prefix_new='++ actualCounter; // actual current source'
+        blank_prefix_patch="$TEST_TMP_DIR/blank-prefix.diff"
+        printf '@@ -1,2 +1,2 @@\n\n-%s\n+%s\n@@ -3 +3 @@\n-%s\n+%s\n' \
+            "$blank_prefix_old" "$blank_prefix_new" "$old_a" "$new_a" > "$blank_prefix_patch"
+        expected=valid-grounded
+        if [[ "$blank_prefix_case" == invented ]]; then
+            blank_prefix_old="${blank_prefix_old/previousCounter/inventedCounter}"; expected=invalid-ungrounded
+        fi
+        blank_prefix_body="$(printf '@@ -1,2 +1,2 @@\n\n-%s\n+%s\n@@ -3 +3 @@\n-%s\n+%s\n' \
+            "$blank_prefix_old" "$blank_prefix_new" "$old_a" "$new_a")"
+        blank_response="$(_resp "src/demo.ts:1 reads:
+\`\`\`diff
+$blank_prefix_body
+\`\`\`
+VERDICT: APPROVE")"
+        if [[ "$blank_endings" == crlf ]]; then
+            python3 - "$blank_prefix_patch" "$blank_response" <<'PY'
+from pathlib import Path
+import sys
+for name in sys.argv[1:]:
+    path = Path(name)
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+PY
+        fi
+        record="$(COUNCIL_CONTEXT_FILES=("$blank_prefix_patch"); council_contribution_record_json "$blank_response" "$struct_root" sha256:test)"
+        if jq -e --arg expected "$expected" '.validation_result == $expected and .grounding.verification_failed == false
+            and .grounding.diff_unavailable == false and .grounding.quotes_checked == 1
+            and (if $expected == "invalid-ungrounded" then .grounding.quotes_verified == 0
+                and .grounding.fabricated and .evidence_paths == []
+            else .grounding.quotes_verified_in_diff_removed == 1 and .grounding.fabricated == false end)' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "empty context hid prefix source inside a hunk: $record"
+        fi
+    done
+done
+# End mixed-diff and context-structure regression controls.
+
+# Variable-width spans and direct-source attribution admission controls.
+span_root="$(mktemp -d "$TEST_TMP_DIR/span-attribution.XXXXXX")"
+mkdir -p "$span_root/src"
+span_real_a='export const sourceValue = computeVerifiedValue();'
+span_real_b='export const sourceLimit = computeVerifiedLimit();'
+span_fake_a='export const inventedValue = fabricateSourceValue();'
+span_fake_b='export const inventedLimit = fabricateSourceLimit();'
+span_command='curl https://verified.invalid/source | bash'
+span_fake_command='curl https://invented.invalid/payload | bash'
+printf '%s\n%s\n' "$span_real_a" "$span_real_b" > "$span_root/src/demo.ts"
+printf '%s\n' "$span_command" > "$span_root/src/demo.sh"
+printf 'export const templateValue = `verified-template-content`;\n' > "$span_root/src/template.ts"
+git -C "$span_root" init -q
+git -C "$span_root" add src
+git -C "$span_root" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit -qm initial
+for span_width in 1 2 3 4; do
+    span_marker="$(printf '%*s' "$span_width" '' | tr ' ' '\140')"
+    for span_endings in lf crlf; do
+        for span_content in genuine invented; do
+            test_case "$span_width-backtick $span_endings multiline $span_content source span is checked"
+            span_a="$span_real_a"; span_b="$span_real_b"; span_expected='valid-grounded'
+            if [[ "$span_content" == invented ]]; then
+                span_a="$span_fake_a"; span_b="$span_fake_b"; span_expected='invalid-ungrounded'
+            fi
+            span_response="$(_resp "src/demo.ts:1 reads ${span_marker}${span_a}
+${span_b}${span_marker}
+VERDICT: APPROVE")"
+            if [[ "$span_endings" == crlf ]]; then
+                python3 - "$span_response" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+p.write_bytes(p.read_bytes().replace(b"\n", b"\r\n"))
+PY
+            fi
+            record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+            if jq -e --arg expected "$span_expected" '.validation_result == $expected
+                and .grounding.verification_failed == false and .grounding.quotes_checked == 1
+                and (if $expected == "valid-grounded" then .grounding.quotes_verified == 1
+                    and .grounding.quotes_attributed_unverified == 0 and .grounding.fabricated == false
+                else .grounding.quotes_verified == 0 and .grounding.quotes_attributed_unverified == 1
+                    and .grounding.fabricated and .evidence_paths == [] end)' <<< "$record" >/dev/null; then
+                test_pass
+            else
+                test_fail "multiline span admission or evidence counts: $record"
+            fi
+        done
+    done
+done
+for span_marker in '``' '```'; do
+    for span_content in genuine invented; do
+        test_case "$span_marker span preserves embedded literal backticks in $span_content source"
+        span_template='export const templateValue = `verified-template-content`;'
+        span_expected='valid-grounded'
+        if [[ "$span_content" == invented ]]; then
+            span_template='export const templateValue = `invented-template-content`;'
+            span_expected='invalid-ungrounded'
+        fi
+        span_response="$(_resp "src/template.ts:1 reads ${span_marker}${span_template}${span_marker}
+VERDICT: APPROVE")"
+        record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+        if jq -e --arg expected "$span_expected" '.validation_result == $expected
+            and .grounding.quotes_checked == 1 and .grounding.verification_failed == false
+            and (if $expected == "valid-grounded" then .grounding.quotes_verified == 1
+                else .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated end)' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "embedded backticks changed source meaning: $record"
+        fi
+    done
+done
+for span_marker in '`' '``'; do
+    test_case "multiline $span_marker formatting of reviewer prose remains unverifiable"
+    span_response="$(_resp "At src/demo.ts:1 the outcome was ${span_marker}the response counted
+as blind after review${span_marker}.
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+    if jq -e '.validation_result == "valid-grounded" and .grounding.quotes_checked == 1
+        and .grounding.quotes_unverifiable_prose == 1 and .grounding.quotes_unverified == 0
+        and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "multiline prose: $record"; fi
+done
+
+test_case "an unmatched delimiter does not hide a later valid source span"
+span_response="$(_resp "An unmatched \` marker precedes the citation.
+
+src/demo.ts:1 reads \`\`$span_fake_a\`\`
+VERDICT: APPROVE")"
+record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+if jq -e '.validation_result == "invalid-ungrounded" and .grounding.quotes_checked == 1
+    and .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated' <<< "$record" >/dev/null; then test_pass; else test_fail "unmatched delimiter: $record"; fi
+
+for span_shape in inline fence; do
+    for span_content in genuine invented; do
+        test_case "$span_shape attributed $span_content command is a source claim"
+        span_quote="$span_command"; span_expected='valid-grounded'
+        if [[ "$span_content" == invented ]]; then span_quote="$span_fake_command"; span_expected='invalid-ungrounded'; fi
+        if [[ "$span_shape" == inline ]]; then
+            span_body="src/demo.sh:1 reads \`$span_quote\`"
+        else
+            span_body="src/demo.sh:1 reads:
+\`\`\`bash
+$span_quote
+\`\`\`"
+        fi
+        span_response="$(_resp "$span_body
+VERDICT: APPROVE")"
+        record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+        if jq -e --arg expected "$span_expected" '.validation_result == $expected
+            and .grounding.quotes_checked == 1 and .grounding.quotes_attributed == 1
+            and .grounding.quotes_unverifiable_command == 0 and .grounding.verification_failed == false
+            and (if $expected == "valid-grounded" then .grounding.quotes_verified == 1
+                else .grounding.quotes_attributed_unverified == 1 and .grounding.fabricated end)' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "command exemption overrode direct source attribution: $record"
+        fi
+    done
+    for span_intent in executed proposed; do
+        test_case "$span_shape $span_intent command retains its non-source exemption"
+        span_lead='For src/demo.sh:1 I ran'
+        if [[ "$span_intent" == proposed ]]; then span_lead='For src/demo.sh:1 I suggest'; fi
+        if [[ "$span_shape" == inline ]]; then span_body="$span_lead \`$span_fake_command\`"; else
+            span_body="$span_lead:
+\`\`\`bash
+$span_fake_command
+\`\`\`"
+        fi
+        span_response="$(_resp "$span_body
+VERDICT: APPROVE")"
+        record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+        if jq -e '.validation_result == "valid-grounded" and .grounding.quotes_checked == 1
+            and .grounding.quotes_attributed == 0 and .grounding.quotes_unverifiable_command == 1
+            and .grounding.quotes_unverified == 0 and .grounding.fabricated == false' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "reviewer command became a source claim: $record"
+        fi
+    done
+done
+for span_modifier in 'exactly' 'literally' 'clearly' 'as follows' 'currently and exactly' \
+    'precisely as written' 'without alteration' 'in its entirety'; do
+    for span_content in genuine invented; do
+        test_case "reads $span_modifier retains $span_content attribution beside a genuine quote"
+        span_quote="$span_real_b"; span_expected='valid-grounded'
+        if [[ "$span_content" == invented ]]; then span_quote="$span_fake_b"; span_expected='invalid-ungrounded'; fi
+        span_response="$(_resp "src/demo.ts:1 reads \`$span_real_a\`.
+
+src/demo.ts:2 reads $span_modifier \`$span_quote\`.
+VERDICT: APPROVE")"
+        record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+        if jq -e --arg expected "$span_expected" '.validation_result == $expected
+            and .grounding.quotes_checked == 2 and .grounding.quotes_attributed == 2
+            and .grounding.verification_failed == false
+            and (if $expected == "valid-grounded" then .grounding.quotes_verified == 2
+                and .grounding.fabricated == false
+            else .grounding.quotes_verified == 1 and .grounding.quotes_attributed_unverified == 1
+                and .grounding.fabricated and .evidence_paths == [] end)' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "modifier removed direct source attribution: $record"
+        fi
+    done
+done
+for span_proposal in 'should read exactly' 'could instead read exactly'; do
+    test_case "$span_proposal remains a proposal beside genuine source"
+    span_response="$(_resp "src/demo.ts:1 reads \`$span_real_a\`.
+
+src/demo.ts:2 $span_proposal \`$span_fake_b\`.
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+    if jq -e '.validation_result == "valid-grounded" and .grounding.quotes_verified == 1
+        and .grounding.quotes_attributed == 1 and .grounding.quotes_unverifiable_proposed == 1
+        and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "proposal attributed: $record"; fi
+done
+
+test_case "a source verb in an earlier sentence does not attribute a command the reviewer ran"
+span_response="$(_resp "src/demo.sh:1 shows a problem. I ran \`$span_fake_command\`.
+VERDICT: APPROVE")"
+record="$(council_contribution_record_json "$span_response" "$span_root" sha256:test)"
+if jq -e '.validation_result == "valid-grounded" and .grounding.quotes_attributed == 0
+    and .grounding.quotes_unverifiable_command == 1 and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "sentence boundary: $record"; fi
+# End variable-width spans and direct-source attribution controls.
+
+# Negative source claims describe absence, not quoted source evidence.
+absence_root="$(mktemp -d "$TEST_TMP_DIR/negative-source.XXXXXX")"
+mkdir -p "$absence_root/src"
+absence_real='export const fallbackValue = cabin.defaultPrice;'
+absence_fake='const legacyValue = fallbackValue ?? cachedPrice;'
+printf '%s\n' "$absence_real" > "$absence_root/src/pricing.ts"
+git -C "$absence_root" init -q
+git -C "$absence_root" add src/pricing.ts
+git -C "$absence_root" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit -qm initial
+for absence_lead in 'does not contain' "doesn't define" 'does not currently contain' \
+    'does not contain a class and does not define' 'does not define a class and does not contain'; do
+    for absence_shape in inline fenced; do
+        test_case "$absence_shape negative source claim stays unverifiable: $absence_lead"
+        if [[ "$absence_shape" == inline ]]; then
+            absence_quote="\`$absence_fake\`"
+        else
+            absence_quote="
+\`\`\`ts
+$absence_fake
+\`\`\`"
+        fi
+        response="$(_resp "src/pricing.ts:1 $absence_lead $absence_quote
+VERDICT: APPROVE")"
+        record="$(council_contribution_record_json "$response" "$absence_root" sha256:test)"
+        if jq -e '.validation_result == "valid-grounded" and .grounding.quotes_checked == 1
+            and .grounding.quotes_verified == 0 and .grounding.quotes_unverifiable == 1
+            and .grounding.quotes_attributed == 0 and .grounding.fabricated == false' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "absence was treated as positive source evidence: $record"
+        fi
+    done
+done
+
+for absence_lead in 'does not contain' 'does not contain a class and does not define'; do
+    test_case "a negative claim cannot verify quoted text that happens to exist: $absence_lead"
+    response="$(_resp "src/pricing.ts:1 $absence_lead \`$absence_real\`
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$response" "$absence_root" sha256:test)"
+    if jq -e '.grounding.quotes_checked == 1 and .grounding.quotes_verified == 0
+        and .grounding.quotes_unverifiable == 1 and .grounding.quotes_attributed == 0
+        and .grounding.fabricated == false' <<< "$record" >/dev/null; then test_pass; else test_fail "negative claim verified: $record"; fi
+done
+
+for absence_positive in "does not contain a class but defines" \
+    "does not contain a class and does not define a function but contains" "does not contain a class.
+src/pricing.ts:1 reads"; do
+    test_case "a negative clause cannot excuse a subsequent positive source claim"
+    response="$(_resp "src/pricing.ts:1 reads \`$absence_real\`.
+
+src/pricing.ts:1 does not contain \`$absence_fake\`.
+
+src/pricing.ts:1 $absence_positive \`$absence_fake\`
+VERDICT: APPROVE")"
+    record="$(council_contribution_record_json "$response" "$absence_root" sha256:test)"
+    if jq -e '.validation_result == "invalid-ungrounded" and .grounding.quotes_verified == 1
+        and .grounding.quotes_unverifiable == 1 and .grounding.quotes_attributed_unverified == 1
+        and .grounding.fabricated == true' <<< "$record" >/dev/null; then test_pass; else test_fail "negative clause excused positive source: $record"; fi
+done
+# End negative source claim controls.
+
+# Begin contribution report admission controls.
+source "$PROJECT_ROOT/scripts/lib/council.sh"
+# Bash 5.2 cannot reparse declare -f output for this grouped heredoc. Load the
+# verifier from source so instrumentation leaves its shell structure intact.
+admission_verifier="$TEST_TMP_DIR/admission-real-verifier.sh"
+sed -n '/^council_response_quote_verification_json() {$/,/^}$/p' \
+    "$PROJECT_ROOT/scripts/lib/council.sh" | sed '1s/council_response_quote_verification_json/_admission_real_verifier/' > "$admission_verifier"
+source "$admission_verifier"
+# Each fixture runs in its own subshell. The real verifier supplies the first
+# report; a later failure models the bounded verifier's existing timeout path.
+_admission_report_case() (
+    local admission_case_flow="$1" admission_case_failure="$2" d response admission_case_calls rc=0 warnings
+    d="$(mktemp -d "$TEST_TMP_DIR/admission-report.XXXXXX")"
+    mkdir -p "$d/evidence/src" "$d/run/responses" "$d/run/stderr"
+    printf '%s\n' 'const originalValue = loadOriginalValue(input);' > "$d/evidence/src/demo.ts"
+    git -C "$d/evidence" init -q
+    git -C "$d/evidence" add src/demo.ts
+    git -C "$d/evidence" -c user.name=Test -c user.email=test@example.invalid -c core.hooksPath=/dev/null commit -qm original
+    OCTOPUS_PROJECT_DIR="$d/evidence"; COUNCIL_RUN_DIR="$d/run"
+    COUNCIL_DEPTH=quick; COUNCIL_TASK='Review source'; COUNCIL_FIXTURE=''
+    COUNCIL_CONTEXT_FILES=(); COUNCIL_RUN_START_EPOCH=''
+    COUNCIL_RESPONSES_RECEIVED=0; COUNCIL_CHAIR_RESPONSE_RECEIVED=false
+    COUNCIL_CHAIR_FALLBACK_USED=false; COUNCIL_TIMEOUT_WARNINGS=''
+    COUNCIL_BLIND_SEATS=''; COUNCIL_SEAT_RECORDS_JSON='[]'
+    COUNCIL_QUOTE_REPORT_KEY=''; COUNCIL_QUOTE_REPORT=''
+    admission_case_calls="$d/verifier-calls"; : > "$admission_case_calls"
+    council_response_quote_verification_json() {
+        local count
+        printf 'call\n' >> "$admission_case_calls"
+        count="$(wc -l < "$admission_case_calls" | tr -d '[:space:]')"
+        if { [[ "$admission_case_failure" == second-failure || "$admission_case_failure" == fresh-failure ]] && (( count > 1 )); } \
+                || { [[ "$admission_case_failure" == first-failure || "$admission_case_failure" == preliminary-failed ]] && (( count == 1 )); }; then
+            printf '%s\n' "$COUNCIL_FAILED_GROUNDING_JSON"
+        else
+            _admission_real_verifier "$@"
+        fi
+    }
+    council_dispatch_member_detached() {
+        printf 'src/demo.ts:1 reads `const originalValue = loadOriginalValue(input);`.\nVERDICT: APPROVE\n' > "$3"
+        if [[ "$admission_case_failure" == preliminary-failed || "$admission_case_failure" == fresh-failure ]]; then
+            council_response_quote_report_cached "$3" "$d/evidence"
+        fi
+    }
+    if [[ "$admission_case_flow" == advice ]]; then
+        COUNCIL_ROSTER_JSON='[{"persona":"code-reviewer","provider":"codex","seat":"member","model_family":"gpt"}]'
+        council_run_chair_fallback() { :; }
+        council_run_advice_phase >/dev/null 2>&1 || rc=$?
+    else
+        council_synthesis_capable_persona() { [[ "$1" == strategy-analyst ]]; }
+        council_persona_should_fail() { return 1; }
+        council_pick_provider() { printf 'claude\n'; }
+        council_provider_is_available() { [[ "$admission_case_flow" != retained-chair ]]; }
+        if [[ "$admission_case_flow" == retained-chair ]]; then
+            response="$d/run/responses/00-chair-fallback-strategy-analyst.md"
+            council_dispatch_member_detached '' '' "$response"
+            COUNCIL_RESPONSES_RECEIVED=1
+            COUNCIL_SEAT_RECORDS_JSON='[{"persona":"strategy-analyst","seat":"adviser","status":"responded","contribution":{"validation_result":"valid-grounded"}}]'
+        fi
+        council_run_chair_fallback sha256:test >/dev/null 2>&1 || rc=$?
+    fi
+    warnings="$(council_print_run_warnings)"
+    jq -cn --arg flow "$admission_case_flow" --argjson rc "$rc" \
+        --argjson calls "$(wc -l < "$admission_case_calls" | tr -d '[:space:]')" \
+        --argjson seats "$COUNCIL_SEAT_RECORDS_JSON" --argjson received "$COUNCIL_RESPONSES_RECEIVED" \
+        --argjson chair "$COUNCIL_CHAIR_RESPONSE_RECEIVED" --arg warnings "$warnings" \
+        '{flow:$flow,rc:$rc,calls:$calls,seats:$seats,received:$received,chair:$chair,warnings:$warnings}'
+)
+
+for admission_flow in advice fresh-chair retained-chair; do
+    for admission_failure in stable second-failure first-failure preliminary-failed fresh-failure; do
+        test_case "$admission_flow uses one fresh report: $admission_failure"
+        record="$(_admission_report_case "$admission_flow" "$admission_failure")"
+        if jq -e --arg failure "$admission_failure" '.calls ==
+                (if $failure == "preliminary-failed" or $failure == "fresh-failure" then 2 else 1 end)
+            and (if $failure == "first-failure" or $failure == "fresh-failure" then
+                if .flow == "retained-chair" then .rc != 0 and .chair == false
+                else .received == 0 and .chair == false
+                    and .seats[0].contribution.access_state == "evidence-rejected"
+                    and .seats[0].contribution.validation_result == "invalid-ungrounded"
+                    and .seats[0].contribution.grounding.verification_failed
+                    and (.seats[0].counted_as_approver == false)
+                    and (if .flow == "advice" then
+                        (.warnings | contains("grounding verification failed"))
+                        and (.warnings | contains("switch that provider") | not)
+                        else true end)
+                end
+            elif .flow == "retained-chair" then .rc == 0 and .chair and .received == 1
+            else .rc == 0 and .received == 1
+                and .seats[0].status == "responded"
+                and .seats[0].contribution.validation_result == "valid-grounded"
+                and .seats[0].grounding.quotes_verified == 1
+                and .seats[0].grounding == .seats[0].contribution.grounding
+                and (if .flow == "advice" then .seats[0].counted_as_approver else .chair end)
+            end)' <<< "$record" >/dev/null; then
+            test_pass
+        else
+            test_fail "record and admission did not share a fresh report: $record"
+        fi
+    done
+done
+# End contribution report admission controls.
+
+# PR #1237: an unrelated first-person pronoun does not own a construction.
+for builder in "I reviewed that my teammate built as" "my teammate's code built as" "we reviewed code crafted as" "the row from my.module built as" "the row (important!) built as" "I just reviewed code my teammate built as" "we have reviewed code crafted as"; do
+    test_case "construction ownership requires the builder as subject: $builder"
+    r="$(_report "$(_resp "src/pricing.ts:2 contains code $builder \`$FAKE\` today.
+VERDICT: REVISE")")"
+    if jq -e '.quotes_attributed_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "invented source quote bypassed verification: $r"
+    fi
+done
+
+for own_input in 'the current code. An input built as' 'the current code; an input built as' 'a row I constructed as' 'a row we built as' 'a row I just built as' 'a row we have crafted as' 'a row I had carefully constructed as'; do
+    test_case "new clauses and direct builders retain proposed input: $own_input"
+    r="$(_report "$(_resp "src/pricing.ts:2 contains $own_input \`$FAKE\` for this test.
+VERDICT: REVISE")")"
+    if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_attributed == 0 and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "own input incorrectly treated as source: $r"
+    fi
+done
+
+for copula_subject in 'the code my teammate' 'a row I just'; do
+    test_case "construction attribution after is: $copula_subject"
+    r="$(_report "$(_resp "src/pricing.ts:2 is $copula_subject built as \`$FAKE\` today.
+VERDICT: REVISE")")"
+    if [[ "$copula_subject" == 'a row I just' ]]; then
+        assertion='.quotes_unverifiable_proposed == 1 and .fabricated == false'
+    else
+        assertion='.quotes_attributed_unverified == 1 and .fabricated == true'
+    fi
+    if jq -e "$assertion" <<< "$r" >/dev/null; then test_pass; else test_fail "copula lost builder ownership: $r"; fi
+done
+
+for earlier_proposal in 'A test input I built as a long row exercises the parser.' 'I suggest checking a long input.'; do
+    test_case "earlier proposal sentences cannot hide a current source claim: $earlier_proposal"
+    r="$(_report "$(_resp "src/pricing.ts:2: $earlier_proposal The file contains \`$FAKE\` today.
+VERDICT: REVISE")")"
+    if jq -e '.quotes_attributed_unverified == 1 and .quotes_unverifiable_proposed == 0 and .fabricated == true' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "earlier proposal hid a current source claim: $r"
+    fi
+done
+
+test_case "a standalone proposed fence lead-in may end with a period"
+r="$(_report "$(_resp "src/pricing.ts:2. I propose this replacement.
+\`\`\`ts
+$FAKE
+\`\`\`
+VERDICT: REVISE")")"
+if jq -e '.quotes_unverifiable_proposed == 1 and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "terminal punctuation lost the proposal lead-in: $r"
+fi
+
+# Complete evidence on either diff side clears only partial reporting.
+for exact_side in removed added; do
+    test_case "a partial source fence complete in the $exact_side diff is not partial"
+    complete_diff="$TEST_TMP_DIR/complete-$exact_side.diff"
+    diff_prefix=+
+    [[ "$exact_side" == removed ]] && diff_prefix=-
+    {
+        printf 'diff --git a/src/pricing.ts b/src/pricing.ts\n--- a/src/pricing.ts\n+++ b/src/pricing.ts\n'
+        if [[ "$exact_side" == removed ]]; then printf '@@ -1,3 +0,0 @@\n'; else printf '@@ -0,0 +1,3 @@\n'; fi
+        printf '%s%s\n' "$diff_prefix" "$REAL_NEAR" "$diff_prefix" "$FAKE" "$diff_prefix" 'return applyTaxes(base, sailing.portFees);'
+    } > "$complete_diff"
+    r="$(COUNCIL_CONTEXT_FILES=("$complete_diff"); _report "$(_resp "src/pricing.ts:2 reads:
+\`\`\`ts
+$REAL_NEAR
+$FAKE
+return applyTaxes(base, sailing.portFees);
+\`\`\`
+VERDICT: APPROVE")")"
+    if jq -e '.quotes_verified == 1 and .quotes_partial == 0 and .quotes_verified_in_diff_removed == 0
+        and .quotes_verified_in_diff_added == 0 and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "complete diff failed to clear source partial: $r"
+    fi
+done
+
+# Dotted abbreviations belong to their surrounding proposal clause.
+for abbreviation in 'e.g.' 'i.e.'; do
+    test_case "dotted abbreviation preserves a proposed replacement: $abbreviation"
+    r="$(_report "$(_resp "src/pricing.ts:2 should use $abbreviation the following code: \`$FAKE\`.
+VERDICT: REVISE")")"
+    if jq -e '.quotes_unverifiable_proposed == 1 and .quotes_attributed == 0 and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "abbreviation split a proposal clause: $r"
+    fi
+done
+
+test_case "long abbreviation-heavy proposals stay within the verifier budget"
+long_proposal="$TEST_TMP_DIR/long-proposal.md"
+python3 - "$long_proposal" "$FAKE" <<'PY_LONG_PROPOSAL'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text("We should use " + "e.g. " * 40000 + "src/pricing.ts:2: `" + sys.argv[2] + "`\nVERDICT: REVISE\n")
+PY_LONG_PROPOSAL
+r="$(_report "$long_proposal")"
+if jq -e '.verification_failed == false and .quotes_unverifiable_proposed == 1 and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "long proposal exhausted verification: $r"
+fi
+
+test_case "gutter-only blank fence lines do not make a complete quote partial"
+r="$(_report "$(_resp "src/pricing.ts:1 reads:
+\`\`\`ts
+1 | export function priceFor(cabin, sailing) {
+2 | $REAL_NEAR
+3 |
+4 | return applyTaxes(base, sailing.portFees);
+5 | }
+\`\`\`
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "blank gutter counted as missing: $r"; fi
+
+test_case "an earlier construction sentence cannot hide a later attributed fabricated quote"
+r="$(_report "$(_resp "The service is built as a singleton. src/pricing.ts:2 contains \`$FAKE\`.
+src/pricing.ts:2 reads \`$REAL_NEAR\`.
+VERDICT: APPROVE")")"
+if jq -e '.quotes_verified == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "earlier prefix hid source attribution: $r"; fi
+
+partial_quote_bin="$TEST_TMP_DIR/partial-quote-bin"
+partial_quote_marker="$TEST_TMP_DIR/partial-quote-git-called"
+mkdir -p "$partial_quote_bin"
+cat > "$partial_quote_bin/git" <<'GIT_PARTIAL_QUOTE'
+#!/usr/bin/env bash
+printf called > "$OCTO_TEST_PARTIAL_GIT_MARKER"
+exit 1
+GIT_PARTIAL_QUOTE
+chmod +x "$partial_quote_bin/git"
+test_case "the partial-fence Git shim runs as a positive control"
+partial_fence_response="$(_resp "src/pricing.ts:2 reads:
+\`\`\`ts
+$REAL_NEAR
+$FAKE
+return applyTaxes(base, sailing.portFees);
+\`\`\`
+VERDICT: APPROVE")"
+r="$(OCTO_TEST_PARTIAL_GIT_MARKER="$partial_quote_marker" PATH="$partial_quote_bin:$PATH" _report "$partial_fence_response")"
+if [[ -e "$partial_quote_marker" ]] && jq -e '.verification_failed == false and .quotes_verified == 1 and .quotes_partial == 1' <<< "$r" >/dev/null; then test_pass; else test_fail "partial fence did not reach the Git shim: $r"; fi
+rm -f "$partial_quote_marker"
+test_case "a verified partial blockquote does not look up a Git diff"
+partial_quote_response="$(_resp "src/pricing.ts:2 reads:
+> $REAL_NEAR
+> $FAKE
+> return applyTaxes(base, sailing.portFees);
+VERDICT: APPROVE")"
+r="$(OCTO_TEST_PARTIAL_GIT_MARKER="$partial_quote_marker" PATH="$partial_quote_bin:$PATH" _report "$partial_quote_response")"
+if [[ ! -e "$partial_quote_marker" ]] && jq -e '.verification_failed == false and .quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "verified blockquote consulted Git: $r"; fi
+
+# PR #1237 follow-up: short inline elisions obey the same matching contract
+# as specific lines, including failure when a retained fragment is invented.
+printf '%s\n' "$REAL_NEAR" 'if (x) { return result; }' 'foo(actualArgument);' \
+    'if (isReady) { return result; }' \
+    'return applyTaxes(base, sailing.portFees);' > "$ROOT/src/elision.ts"
+for short_elision in 'if (x) { ... }' 'foo(...);' 'foo(…);' 'bar(...);' 'if (isReady) { ... }' 'if (isWrong) { ... }'; do
+    test_case "short inline elision reports only missing fragments: $short_elision"
+    expected_partial=0
+    case "$short_elision" in 'bar(...);'|'if (isWrong) { ... }') expected_partial=1 ;; esac
+    r="$(_report "$(_resp "src/elision.ts:1 reads:
+\`\`\`ts
+$REAL_NEAR
+$short_elision
+return applyTaxes(base, sailing.portFees);
+\`\`\`
+VERDICT: APPROVE")")"
+    if jq -e --argjson partial "$expected_partial" '.verification_failed == false and .quotes_verified == 1
+        and .quotes_partial == $partial and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "short elision lost its fragment classification: $r"
+    fi
+done
+
+for repeated_prefix in 'has built as ' 'has built as built as ' 'built as '; do
+    test_case "repeated construction wording stays within the verifier budget: $repeated_prefix"
+    repeated_proposal="$TEST_TMP_DIR/repeated-construction.md"
+    python3 - "$repeated_proposal" "$repeated_prefix" "$REAL_NEAR" <<'PY_REPEATED_CONSTRUCTION'
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text("has " + sys.argv[2] * 40000 + "src/pricing.ts:2 contains `" + sys.argv[3] + "`\nVERDICT: REVISE\n")
+PY_REPEATED_CONSTRUCTION
+    r="$(_report "$repeated_proposal")"
+    if jq -e '.verification_failed == false and .quotes_attributed == 1 and .quotes_verified == 1
+        and .quotes_unverifiable_proposed == 0 and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "repeated construction wording exhausted verification: $r"
+    fi
+done
+
+for short_pattern in repeated distinct present-reversed embedded-reversed; do
+test_case "$short_pattern short fence lines do not multiply full-file partial scans"
+large_partial_response="$TEST_TMP_DIR/large-partial.md"
+python3 - "$ROOT/src/large-partial.ts" "$large_partial_response" "$REAL_NEAR" "$short_pattern" <<'PY_LARGE_PARTIAL'
+import sys
+from pathlib import Path
+first = sys.argv[3]
+last = 'return applyTaxes(base, sailing.portFees);'
+short = ('return true;\n' * 60000 if sys.argv[4] == 'repeated' else
+         ''.join('return a%05d;\n' % i for i in range(60000)))
+source_short = short if sys.argv[4] == 'present-reversed' else (short.replace('\n', ' ') if sys.argv[4] == 'embedded-reversed' else '')
+source = first + '\n' + source_short + last + '\n'
+Path(sys.argv[1]).write_text(source + 'x' * (1400097 - len(source)))
+if sys.argv[4] in {'present-reversed', 'embedded-reversed'}:
+    short = '\n'.join(reversed(short.splitlines())) + '\n'
+Path(sys.argv[2]).write_text('src/large-partial.ts:1 reads:\n```ts\n' + first + '\n' +
+                            short + last + '\n```\nVERDICT: APPROVE\n')
+PY_LARGE_PARTIAL
+r="$(_report "$large_partial_response")"
+expected_partial=1
+[[ "$short_pattern" == *reversed ]] && expected_partial=0
+if jq -e --argjson partial "$expected_partial" '.verification_failed == false and .quotes_verified == 1 and .quotes_partial == $partial
+    and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "$short_pattern short lines exhausted partial accounting: $r"
+fi
+done
+
+# Optional diff lookup must not exhaust source-verified report generation.
+slow_partial_bin="$TEST_TMP_DIR/slow-partial-bin"
+mkdir -p "$slow_partial_bin"
+python3 - "$slow_partial_bin/git" <<'PY_SLOW_PARTIAL'
+import os
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text('#!' + sys.executable + '\nimport sys, time\ntime.sleep(7)\nsys.exit(1)\n')
+os.chmod(sys.argv[1], 0o755)
+PY_SLOW_PARTIAL
+for later_missing in no yes; do
+    test_case "slow optional diff preserves source evidence and later uncertainty: $later_missing"
+    slow_partial_text="src/pricing.ts:2 reads:
+\`\`\`ts
+$REAL_NEAR
+$FAKE
+return applyTaxes(base, sailing.portFees);
+\`\`\`"
+    expected_uncertain=0
+    if [[ "$later_missing" == yes ]]; then
+        slow_partial_text="$slow_partial_text
+src/pricing.ts:2 reads \`const unknown = loadInventedCustomerRecords();\`."
+        expected_uncertain=1
+    fi
+    r="$(PATH="$slow_partial_bin:$PATH" _report "$(_resp "$slow_partial_text
+VERDICT: APPROVE")")"
+    if jq -e --argjson uncertain "$expected_uncertain" '.verification_failed == false
+        and .quotes_verified == 1 and .quotes_partial == 1 and .diff_unavailable == ($uncertain == 1)
+        and .quotes_unverifiable_diff_incomplete == $uncertain and .fabricated == false' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "optional diff lost source evidence or uncertainty: $r"
+    fi
+done
+
+# Optional timeouts cannot decide a later quote that requires diff evidence.
+retry_diff_bin="$TEST_TMP_DIR/retry-diff-bin"
+retry_diff_calls="$TEST_TMP_DIR/retry-diff-calls"
+mkdir -p "$retry_diff_bin"
+python3 - "$retry_diff_bin/git" <<'PY_RETRY_DIFF'
+import os
+import sys
+from pathlib import Path
+Path(sys.argv[1]).write_text('#!' + sys.executable + '''
+import os, sys, time
+with open(os.environ["OCTO_TEST_DIFF_CALLS"], "a") as log:
+    log.write(("config" if "config" in sys.argv else "diff") + "\\n")
+if "config" in sys.argv:
+    time.sleep(1.3)
+else:
+    print("diff --git a/src/pricing.ts b/src/pricing.ts")
+    print("--- a/src/pricing.ts\\n+++ b/src/pricing.ts\\n@@ -1 +0,0 @@")
+    print("-const previousPrice = loadPreviousCabinPrice(cabin);")
+''')
+os.chmod(sys.argv[1], 0o755)
+PY_RETRY_DIFF
+for later_claim in removed invented; do
+    test_case "a required $later_claim quote retries after an optional timeout"
+    rm -f "$retry_diff_calls"
+    later_text='src/pricing.ts:2 reads `const previousPrice = loadPreviousCabinPrice(cabin);`.'
+    [[ "$later_claim" == invented ]] && later_text='src/pricing.ts:2 reads `const unknown = loadInventedCustomerRecords();`.'
+    retry_response="$(_resp "$(cat "$partial_fence_response")
+$later_text")"
+    r="$(OCTO_TEST_DIFF_CALLS="$retry_diff_calls" PATH="$retry_diff_bin:$PATH" _report "$retry_response")"
+    if [[ "$(cat "$retry_diff_calls")" == $'config\nconfig\ndiff' ]] &&
+       jq -e --arg claim "$later_claim" '.verification_failed == false and .diff_unavailable == false
+           and .quotes_partial == 1 and .quotes_unverifiable_diff_incomplete == 0
+           and (if $claim == "removed" then .quotes_verified == 2 and .quotes_verified_in_diff_removed == 1
+                and .fabricated == false else .quotes_verified == 1 and .quotes_attributed_unverified == 1
+                and .fabricated == true end)' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "optional timeout suppressed required evidence: $r; calls: $(cat "$retry_diff_calls")"
+    fi
+done
+
+# Compare the batch index to literal substring membership, including nested
+# suffix patterns and absent patterns amid highly repeated evidence.
+test_case "batched literal presence preserves substring and suffix matches"
+if python3 - "$PROJECT_ROOT/scripts/lib/council.sh" <<'PY_BATCH_PRESENCE'
+import random
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+function = 'def plain_line_present(' + source.split('\ndef plain_line_present(', 1)[1].split('\n# Presence is independent', 1)[0]
+rng = random.Random(1260)
+needles = {'a' * size for size in range(1, 65)} | {'absent-pattern', 'he', 'she', 'hers', 'his', '|', 'μg'}
+needles.update(''.join(rng.choices('abcd', k=8)) for _ in range(80))
+scope = dict(plain_needles=needles, plain_automaton=None, plain_hits={})
+exec(compile(function, str(sys.argv[1]), 'exec'), scope)
+for hay in ['ushers his μg | ' + 'a' * 100000, ''.join(rng.choices('abcd', k=10000)), 'nothing matches']:
+    for needle in needles:
+        assert scope['plain_line_present'](needle, hay) == (needle in hay), (needle, hay[:80])
+assert scope['plain_line_present']('not indexed', 'anything') is None
+PY_BATCH_PRESENCE
+then test_pass; else test_fail "batch index changed literal substring matching"; fi
+
+# Count scans rather than relying on host timing for the non-fence hot path.
+test_case "partial matching reuses plain-variant scans without weakening elisions"
+if python3 - "$PROJECT_ROOT/scripts/lib/council.sh" <<'PY_MATCH_CACHE'
+import collections
+import re
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+function = 'def match_unit(' + source.split('\ndef match_unit(', 1)[1].split('\nall_cited =', 1)[0]
+calls = collections.Counter()
+fragment_scans = []
+def match_variant(variant, entry):
+    calls[variant] += 1
+    # The verdict may admit an elision at its specificity floor.
+    return [1] if variant in entry[0] or '...' in variant else []
+def find_lines(hay, starts, numbers, first, following):
+    fragment_scans.append(first)
+    end = 0
+    for piece in [first] + list(following):
+        at = hay.find(piece, end)
+        if at < 0:
+            return []
+        end = at + len(piece)
+    return [1]
+scope = dict(match_variant=match_variant, find_lines=find_lines, partial_presence={},
+             plain_line_present=lambda needle, hay: None,
+             norm=lambda text: ' '.join(text.split()), ELLIPSIS=re.compile(r'\.\.\.|…'))
+exec(compile(function, str(sys.argv[1]), 'exec'), scope)
+known = 'const actual = loadActualPrice(input);'
+missing = 'const invented = loadInventedPrice(input);'
+entry = (known, [0], [1])
+misses = []
+assert scope['match_unit']([], [[known], [known], [missing]], entry, misses) == [1]
+assert misses == [1], misses
+assert calls == {known: 1, missing: 1}, calls
+assert not fragment_scans, fragment_scans
+# Short retained fragments must still all match, in order, below the floor.
+for variant, expected in [('const ...Price(input);', 0), ('wrong ...Price(input);', 1)]:
+    misses = []
+    assert scope['match_unit']([variant], [[variant]], entry, misses) == [1]
+    assert misses == [expected], (variant, misses)
+assert len(fragment_scans) == 2, fragment_scans
+# Repeated non-fence units reuse presence checks, retaining partial status.
+for variant, expected in [('const ...Price(input);', 0), ('wrong ...Price(input);', 1)]:
+    misses = []
+    assert scope['match_unit']([variant], [[variant]], entry, misses) == [1]
+    assert misses == [expected], (variant, misses)
+assert len(fragment_scans) == 2, fragment_scans
+# A boolean partial result must stop at the first distinct missing short line.
+misses = []
+assert scope['match_unit']([], [[known], [known]], entry, misses,
+    [[missing], ['return another;']]) == [1]
+assert misses == [1], misses
+assert 'return another;' not in calls, calls
+PY_MATCH_CACHE
+then test_pass; else test_fail "matching rescanned plain variants or skipped retained fragments"; fi
+
+# A paragraph break keeps this quote unattributed, so both citations stay
+# in source order. An adjacent label would bind it only to b.ts.
+test_case "a partial blockquote retains a later cited file's near-line match"
+near_root="$TEST_TMP_DIR/later-near"
+mkdir -p "$near_root"
+{
+    for i in $(seq 1 50); do printf '// distant filler %s\n' "$i"; done
+    printf '%s\n' "$REAL_NEAR" 'return applyTaxes(base, sailing.portFees);'
+} > "$near_root/a.ts"
+printf '%s\n' "$REAL_NEAR" 'return applyTaxes(base, sailing.portFees);' > "$near_root/b.ts"
+r="$(council_response_quote_verification_json "$(_resp "a.ts:1 and b.ts:1
+
+> $REAL_NEAR
+> $FAKE
+> return applyTaxes(base, sailing.portFees);
+VERDICT: APPROVE")" "$near_root")"
+if jq -e '.quotes_verified == 1 and .quotes_near_line == 1 and .quotes_partial == 0
+    and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "non-fence optimization lost later near-line accounting: $r"
+fi
 
 test_summary

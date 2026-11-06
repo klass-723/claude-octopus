@@ -22,7 +22,6 @@ trap _octo_hook_exit EXIT
 
 SESSION_FILE="${HOME}/.claude-octopus/session.json"
 METRICS_DIR="${HOME}/.claude-octopus/metrics"
-MEMORY_DIR="${HOME}/.claude/projects"
 
 # Session state is a best-effort cache shared by workflow commands and hooks.
 # A stale install, interrupted write, or concurrent process can leave it
@@ -55,29 +54,21 @@ if [[ "$SESSION_JSON_VALID" == "true" ]]; then
     AUTONOMY=$(jq -r '.autonomy // empty' "$SESSION_FILE" 2>/dev/null)
     PROVIDERS=$(jq -r '.providers // empty' "$SESSION_FILE" 2>/dev/null)
 
-    # Find the correct project memory directory
-    # Priority: CLAUDE_PROJECT_DIR (set by CC) > CWD-based lookup > fallback scan
+    # CLAUDE_PROJECT_DIR is the working tree, not Claude's configuration root.
+    # Persist only when this project's auto-memory directory already exists.
     TARGET_MEM_DIR=""
-
-    if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
-        # CC sets this to the project-specific config dir (e.g., ~/.claude/projects/-Users-foo-myproject/)
-        TARGET_MEM_DIR="${CLAUDE_PROJECT_DIR}/memory"
-    else
-        # Derive from CWD: CC encodes paths as -Users-foo-myproject
-        CWD_ENCODED=$(pwd | tr '/' '-' | sed 's/^-//')
-        for candidate in "$MEMORY_DIR"/*"${CWD_ENCODED}"*/memory "$MEMORY_DIR"/*; do
-            if [[ -d "$candidate" ]]; then
-                TARGET_MEM_DIR="$candidate"
-                # If candidate ends in /memory, use it directly; otherwise append
-                [[ "$candidate" != */memory ]] && TARGET_MEM_DIR="${candidate}/memory"
-                break
-            fi
-        done
+    MEMORY_LIB="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd -P)}/hooks/helpers/claude-project-memory.sh"
+    if [[ -r "$MEMORY_LIB" ]]; then
+        # shellcheck source=helpers/claude-project-memory.sh
+        source "$MEMORY_LIB"
+        TARGET_MEM_DIR="$(octo_claude_project_memory_dir)" || TARGET_MEM_DIR=""
     fi
+    [[ -w "$TARGET_MEM_DIR" ]] || TARGET_MEM_DIR=""
 
-    if [[ -n "$TARGET_MEM_DIR" && -n "$AUTONOMY" && "$AUTONOMY" != "null" ]]; then
+    OCTOPUS_MEM="${TARGET_MEM_DIR}/octopus-preferences.md"
+    if [[ -n "$TARGET_MEM_DIR" && -n "$AUTONOMY" && "$AUTONOMY" != "null" ]] \
+        && [[ ! -e "$OCTOPUS_MEM" || ( -f "$OCTOPUS_MEM" && -w "$OCTOPUS_MEM" ) ]]; then
         mkdir -p "$TARGET_MEM_DIR"
-        OCTOPUS_MEM="${TARGET_MEM_DIR}/octopus-preferences.md"
         {
             echo "# Octopus User Preferences"
             echo ""
@@ -91,8 +82,9 @@ fi
 # --- 3. Learnings layer — meta-reflection across sessions (v8.41.0) ---
 # Appends session-level learnings (errors hit, patterns discovered, tools used)
 # to octopus-learnings.md for cross-session meta-reflection.
-if [[ -n "${TARGET_MEM_DIR:-}" ]] && [[ "$SESSION_JSON_VALID" == "true" ]]; then
-    LEARNINGS_FILE="${TARGET_MEM_DIR}/octopus-learnings.md"
+LEARNINGS_FILE="${TARGET_MEM_DIR:-}/octopus-learnings.md"
+if [[ -n "${TARGET_MEM_DIR:-}" && "$SESSION_JSON_VALID" == "true" ]] \
+    && [[ ! -e "$LEARNINGS_FILE" || ( -f "$LEARNINGS_FILE" && -r "$LEARNINGS_FILE" && -w "$LEARNINGS_FILE" ) ]]; then
     # Extract session signals for learnings
     PHASE=$(jq -r '.current_phase // .phase // "none"' "$SESSION_FILE" 2>/dev/null)
     WORKFLOW=$(jq -r '.workflow // "none"' "$SESSION_FILE" 2>/dev/null)
@@ -132,7 +124,7 @@ fi
 # --- 4. Cross-task learning extraction (v9.8.0) ---
 # Extracts structured learnings from the session and persists them as individual
 # JSON files in .claude-octopus/learnings/. Capped at 5 learnings per session
-# to stay within budget. These are consumed at session start for relevance matching.
+# to stay within budget. SessionStart hooks do not read these files.
 LEARNINGS_DIR="${HOME}/.claude-octopus/learnings"
 if [[ "$SESSION_JSON_VALID" == "true" ]]; then
     mkdir -p "$LEARNINGS_DIR"

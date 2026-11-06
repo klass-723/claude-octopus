@@ -53,6 +53,401 @@
   that holds only a citation counts as verified evidence when it matches. New
   `grounding` counters in `summary.json` show which rule applied to each quote.
 
+- A council seat is no longer marked fabricated for a test input it built
+  itself (sail-cruisey #3247). A span introduced as "constructed as", "built
+  as" or "crafted as" is the seat's own proposal, like one introduced by
+  "such as", so a seat whose only checked quote was such an input is no longer
+  dropped as blind beside real citations. After a content verb, as in
+  "x.ts:2 contains the code built as", the span is still the file's code and is
+  checked, unless "I" or "we" built it. Quote reports also gain
+  `quotes_partial`, which counts fences that verify at the two-thirds
+  threshold in a cited file or diff side, but lack a complete match in any
+  checked source, short lines included. Lines can match separately and out of
+  order. Mixed diff fences check the removed portion against the removed side
+  and the kept portion against a cited file or the added side. A complete
+  match clears partial status for that portion. An optional diff lookup may
+  time out, so partial status does not prove a line is absent from all evidence.
+  It does not change the verdict. Optional diff refinement no longer
+  prevents a later quote from receiving the normal required lookup after a
+  timeout. Partial accounting stops at its first missing line, batches short
+  literal matches into one source scan and reuses retained-fragment checks
+  across quotes, preserving near-line accounting.
+  First-person builders also recognize modifiers such as "I just built as"
+  without excusing code attributed to someone else.
+
+## [11.17.1] - 2026-11-05
+
+### Fixed
+
+- A council seat is no longer marked fabricated for its own arithmetic. An
+  inline code span made only of numbers (`1.5e6` and `1_000` included), known
+  units right after a number (`KB`, `kilobytes`, `ms`, `%`, `tokens`, ...),
+  and operators including `%`, such as `8 + 10 + 0.5 = 18.5 KB`, is a value
+  the seat computed, not a quote of the code. The verifier found it in no
+  file, and when it was the only quote the seat was dropped as blind. Any
+  identifier or keyword, as in `base + taxes * 2` or
+  `100 if 1000 > 500 else 1`, still makes it a checked code quote. Arithmetic
+  a citation claims, before or right after the span, is still verified against
+  cited evidence. The exemption never covers a code fence or a diff removal: their
+  arithmetic lines go through the usual checks, so a specific enough line is
+  still verified.
+- Vibe setup and readiness now recognize a key stored by `vibe --setup` in
+  the OS keyring when Vibe is explicitly selected for a provider check. The
+  local presence check is silent, read-only and bounded, and receives a
+  minimal environment. Automatic discovery defers keyring inspection.
+  Standard Python user-site installations work without enabling user-site
+  loader hooks. Import and probe failures, including successful package exits,
+  cannot report a key as present. It does not launch Vibe or make a model
+  request. Addresses #1191; automatic scans still defer keyring inspection.
+  Explicit single-provider probes carry the Vibe selection into preflight,
+  without treating a general cached pass as proof that Vibe is ready.
+  Successful selected checks preserve general readiness cache entries, avoiding
+  repeated discovery in other provider workflows.
+
+- Council quote verification recognizes valid `octopus-policy-findings` JSON
+  without marking the seat fabricated. Entity-encoded quotes remain intact,
+  and runtime policy extraction accepts the same indented, backtick and tilde
+  fences as analysis. Invalid blocks and invented quotes outside a findings
+  block still undergo quote verification.
+  Overflowing JSON numbers are rejected by every findings reader, and failed
+  policy extraction or verification defers implementation instead of dropping
+  blocking findings.
+  [#1230](https://github.com/nyldn/claude-octopus/pull/1230).
+- Define, develop, deliver and ship now validate the report names the engine
+  writes, within the current session and after the current invocation starts.
+  A failed command, stale report or missing completion status cannot pass the
+  skill's result gate. Reports from other invocations are identified before
+  their bodies are loaded, so unrelated large output cannot exhaust the
+  validator's memory. Execution and validation use the installation that loaded
+  the skill, even when the stable link still points at an older copy. Truncated
+  UTF-8 in task or provider text preserves the launcher's completion checks.
+  Feature development checks every owned wave before returning the final
+  wave report. Descriptor-based reads reject symlink replacements and special
+  files without blocking the validator. Fixes #1170.
+
+## [11.17.0] - 2026-11-05
+
+### Added
+
+- Deck and document export recognize standalone and alternate-plugin renderer
+  skills advertised by the session. An explicit or saved renderer can receive a
+  house template and the approved slide skeleton, visual callouts and appendix
+  list. Ambiguous selections and unavailable explicit or saved renderers fail
+  visibly instead of forcing another plugin or discarding the selected renderer. Fixes [#1218](https://github.com/nyldn/claude-octopus/issues/1218).
+
+### Fixed
+
+- The develop quality challenger now sees provider output and bounded change
+  excerpts from the run's starting commit. Long executor prompts no longer
+  hide the implementation. Change excerpts exclude credential paths,
+  directories and symlinks and are marked as untrusted content. Fixes #1171.
+  Collecting those excerpts disables Git clean/process filters and filesystem
+  monitors, and ignores inherited Git routing and global configuration.
+  Binary diff markers and nontext excerpts are omitted before shell capture.
+  UTF-8 excerpts retain complete characters at the byte limit, and collection
+  examines at most 200 candidate paths per pass.
+- A code-span quote written inside a Markdown table cell now matches its
+  source line. Seats escape `|` as `\|` in a table, so a quote of
+  `member.tier || member.legacyTier` arrived as `member.tier \|\| member.legacyTier`
+  and was counted as invented (sail-cruisey #3125). Quote matching now also
+  tries a table-cell code span with `\|` read as `|`. Outside a table, `\|` is
+  literal (it changes a regular expression), and source text keeps its
+  backslashes, so a quote that drops a source line's own `\|` still does not
+  match it.
+
+  Table decoding also requires the whole quote to fit inside one rendered
+  cell. Quotes crossing cells or rows, and cells discarded beyond the header
+  width, keep their literal backslashes.
+
+  Table structure is recognized before HTML entity decoding, so encoded pipes
+  cannot manufacture a delimiter or split a cell. Single-column headers and
+  nonempty body rows without pipes also retain their table context.
+
+## [11.16.0] - 2026-11-02
+
+### Fixed
+
+- Decision support now includes the cost of doing nothing, sets criteria and
+  weights before scoring, and shows raw and weighted scores. Presentation
+  templates no longer recommend the first option before analysis. Uncertain
+  decisions can include an optional scenario stress test.
+  Fixes [#1220](https://github.com/nyldn/claude-octopus/issues/1220).
+  [#1247](https://github.com/nyldn/claude-octopus/pull/1247).
+
+- Workflow skills can now persist phase state through `update_state`, query
+  completed phases and import definition synthesis into the roadmap. History
+  notes cannot change a phase's recorded status. Initializing a project with
+  a missing state file preserves existing issues, lessons and phase plans.
+  Fixes [#1169](https://github.com/nyldn/claude-octopus/issues/1169).
+  [#1248](https://github.com/nyldn/claude-octopus/pull/1248).
+
+- Configured fallback chains now honor `OCTO_ALLOWED_PROVIDERS` and the
+  session or global provider allowlist. `run_agent_sync_fallback_chain`
+  dispatched its primary, preferred fallback and chain candidates without
+  checking the allowlist. With `OCTO_ALLOWED_PROVIDERS="codex claude"`, Tangle
+  decomposition still sent the prompt to its default `agy` researcher seat
+  first. The chain now skips any candidate outside the allowlist and logs the
+  skip. If no candidate is allowed, it fails closed without dispatching.
+  `octo_fallback_agent_available` applies the same check, so
+  `get_fallback_agent` and `octo_fallback_first_available` no longer return a
+  disallowed provider just because its CLI is installed.
+  [#1244](https://github.com/nyldn/claude-octopus/pull/1244).
+
+- Preflight checks the council roster that `OCTOPUS_COUNCIL_DEFAULT_PROVIDERS`
+  pins. A Codex-led session pins `claude,agy`, but preflight ignored the list:
+  the static pass checked every non-Claude provider, the smoke test always
+  tried Codex, and nothing reported on the Claude seat. With a roster set,
+  `orchestrate.sh preflight` checks exactly those seats, Claude included, names
+  the list it used, and fails naming any seat that is not ready. The smoke test
+  and `/octo:preflight` cover only the roster, and the smoke test fails when
+  any roster seat it tested fails. A pinned Codex seat with an expired OAuth
+  token fails the roster even when other seats are ready. A seat with no
+  provider detection, such as `openai-tools`, is listed as not checked instead
+  of failing the roster or counting as degraded. The JSON gains `roster`, `roster_unchecked` and `sandbox`, and cached results are
+  keyed on the roster. Unset or `auto` keeps the previous behavior.
+- Preflight readiness inside a macOS sandbox. The `/octo:preflight` loop sent
+  stderr through `2> >(cat >&2)`, a `/dev/fd` write that Codex and Claude Code
+  sandboxes deny, so every provider read `check-failed` there. Inside such a
+  sandbox (`CODEX_SANDBOX` or `SANDBOX_RUNTIME`), a provider that is not ready
+  now carries a note that keychain logins, network access or files outside the
+  workspace can fail there, with the remedy to re-run preflight outside it.
+  [#1229](https://github.com/nyldn/claude-octopus/pull/1229).
+
+### Maintenance
+
+- Updated the MCP server's Zod dependency.
+  [#1235](https://github.com/nyldn/claude-octopus/pull/1235).
+- The timer regression waits for completion before checking failure precedence.
+  [#1249](https://github.com/nyldn/claude-octopus/pull/1249).
+
+## [11.15.4] - 2026-11-01
+
+### Fixed
+
+- A probe seat now runs for the `OCTOPUS_AGENT_TIMEOUT` budget. `orchestrate.sh
+  probe` gave each seat the 600-second `TIMEOUT` default even with
+  `OCTOPUS_AGENT_TIMEOUT=1200` set, and the timeout message then recommended
+  setting the variable that was already set. Probe seats, `probe-single` and
+  the probe progress watchdog now use the budget `run_agent_sync` uses:
+  `OCTOPUS_AGENT_TIMEOUT`, then `--timeout`, then the default. A timed-out
+  probe seat recommends `OCTOPUS_AGENT_TIMEOUT` when it is set. Other
+  background workflows still wait for their seats against `--timeout`, so
+  their seats keep that budget.
+  [#1241](https://github.com/nyldn/claude-octopus/pull/1241),
+  commit [1f8d395](https://github.com/nyldn/claude-octopus/commit/1f8d3951b2a2b4326d5f2e4710864217812588c3).
+
+## [11.15.3] - 2026-10-30
+
+### Fixed
+
+- Reviews started in the same second without an `artifactId` now reserve
+  separate run IDs before starting seats. Their findings no longer overwrite
+  each other, and one review cannot block another's execution contracts by
+  reusing its ID. If no ID can be reserved, the review stops before writing
+  findings. Explicit `artifactId` values and dry-run behavior are preserved.
+  [#1239](https://github.com/nyldn/claude-octopus/pull/1239).
+- By default, repeated and concurrent workflows within one Claude Code session
+  now write separate proof packets, keeping events, findings and summaries
+  separate. `OCTOPUS_PROOF_RUN_ID` still overrides the complete run ID. Use a
+  unique override per run; reusing one shares the directory and can overwrite
+  the earlier packet.
+  [#1238](https://github.com/nyldn/claude-octopus/pull/1238).
+- Council grounding and quote verification accept a bare filename or path
+  suffix when exactly one eligible file matches. Nested checkout copies no
+  longer make names ambiguous. Grounding rejects missing, ambiguous and unsafe
+  paths, and line numbers past the end of a file. Quote verification checks
+  uniquely matching attached context before repository suffixes and can verify
+  matching file text even when the cited line number is out of range.
+  An unsafe existing path cannot fall back to a different file.
+  [#1236](https://github.com/nyldn/claude-octopus/pull/1236).
+
+
+- Council seats with real citations are no longer marked fabricated for
+  quotes the verifier misread (sail-cruisey #3316, #3338, #3339, #3340). A
+  multi-line condition written on one line verifies, because a space next to
+  punctuation is layout. A code span stays inside one paragraph, a backtick
+  opened in link text is literal, and paired `` \` `` inside a span are
+  literal backticks. Citations of files with no extension, such as
+  `.githooks/pre-commit:48`, bind their quotes. The inputs a seat says it fed
+  to the code under review, and code it says the file avoids, are its own
+  words, not quotes of a file. After a content verb, "built as" marks the
+  seat's own input only when "I" or "we" built it. A fence partial in a cited
+  file but complete in the reviewed diff is not counted as partial.
+
+- Council seats with real citations are no longer marked fabricated for
+  quoting the error a probe threw (`RangeError: Maximum call stack size
+  exceeded`), for an example they made up ("a template like `...`"), or for
+  a quote that drops the file's inner backticks, which a single-backtick span
+  cannot hold (sail-cruisey #3386). A runtime error attributed to a cited
+  file is still checked.
+
+- A quote with `$n` for a numbered placeholder, or abbreviated with `...`
+  (`!== "POST" || !endsWith(...)`), verifies when it matches one line of the
+  cited file (sail-cruisey #3389). A basename that two files share, such as
+  `sentry.ts:169`, now resolves to the one the seat also cited by full path,
+  so its quotes are checked instead of left unresolved (sail-cruisey #3390).
+  A span on a new list item is no longer attributed to the previous item's
+  citation.
+
+- `council-wait.sh --pool --supersede-key` no longer returns the previous
+  round when the wait starts before the new round's run dir exists
+  (sail-cruisey #3364). A keyed round already finished at first sight is held
+  for `--settle` seconds (default 60) while a newer same-key round may appear;
+  `--since` skips the hold. `--background` drops the 570-second bound for a
+  wait run as a background task, and a timeout now says the round may still
+  be running and how to re-arm.
+
+## [11.15.2] - 2026-10-28
+
+### Fixed
+
+- Learned file hints and provider history stay within the current project or
+  Git worktree. Hints record and suggest only existing relative paths inside
+  that root. Older patterns without a root and unscoped provider histories
+  remain on disk but are ignored. Provider history now uses
+  `.octo/providers/<project-key>/` under the Octopus workspace.
+  [#1228](https://github.com/nyldn/claude-octopus/pull/1228),
+  commit [ee7bcb4](https://github.com/nyldn/claude-octopus/commit/ee7bcb42e47ba6740100482e5be4155c3e6ebc46).
+- Provider answers stay readable when stderr contains a large transcript.
+  With a usable stdout answer and stderr over 16 KB, the full transcript goes
+  to a private `.stderr.log` sidecar. The result keeps at most 16 KB from its
+  last 40 lines, preserving UTF-8 and the untrusted-content wrapper. Runs
+  without an answer, unsafe sidecar paths, and transcripts over the private
+  writer's 1 MiB limit keep stderr inline. Result expiry removes the matching
+  transcript while preserving transcripts for retained reports.
+  [#1232](https://github.com/nyldn/claude-octopus/pull/1232),
+  commit [931b13e](https://github.com/nyldn/claude-octopus/commit/931b13e20393e7bb3d4b178e6d6ac97c959e8df0).
+- Smoke-test failures no longer mark a healthy provider quota-dead for later
+  runs unless they are explicit authentication or rate-limit rejections
+  observed outside coding sandboxes. Other failures exclude the provider only
+  for the current run. Unknown failures prevent caching a successful overall
+  check, while timeouts retain the existing slow-provider pass-cache policy.
+  Preflight distinguishes cached quota/auth failures, with their individual
+  timestamps, from current-run failures. Sandbox denials identify the check's
+  restriction and advise retrying outside the sandbox.
+  [#1233](https://github.com/nyldn/claude-octopus/pull/1233),
+  commit [16dd9e6](https://github.com/nyldn/claude-octopus/commit/16dd9e67d4be42e1bed11c89fed251b3cea4d7b5).
+
+## [11.15.1] - 2026-10-23
+
+### Fixed
+
+- `/octo:discover` and `/octo:research` now use the quick, standard, or deep
+  intensity you selected. The command passes `--intensity=` to the research
+  engine, avoiding a bracket token that became prompt text in Bash and failed
+  as an unmatched glob in zsh. Research focus and output format stay in the
+  prompt. [#1213](https://github.com/nyldn/claude-octopus/pull/1213),
+  commit [fa1eab5](https://github.com/nyldn/claude-octopus/commit/fa1eab5e7e2d49d274c06f81dd0d1ebada1ee9c3).
+- Knowledge-work and security-audit examples use supported command arguments.
+  Parallel workflow examples pass the previous phase's result file positionally
+  so the next phase receives it. Focus, depth, and audit scope go in the prompt.
+  [#1223](https://github.com/nyldn/claude-octopus/pull/1223),
+  commit [733e717](https://github.com/nyldn/claude-octopus/commit/733e717f3ef3a8619da9f9edfa381c68c2a88b14).
+- SessionEnd writes preferences and Markdown session learnings to the current
+  project's existing Claude auto-memory directory; SessionStart restores
+  preferences from that directory. The hooks no longer create repository-local
+  `memory/` or fall back to another project's storage. Custom `CLAUDE_CONFIG_DIR`
+  and CWD fallback use the same mapping at session start and end. Structured
+  cross-task JSON learnings remain shared across projects under
+  `~/.claude-octopus/learnings` and are not automatically read by SessionStart.
+  Fixes [#1183](https://github.com/nyldn/claude-octopus/issues/1183).
+  [#1225](https://github.com/nyldn/claude-octopus/pull/1225),
+  commit [286ef4d](https://github.com/nyldn/claude-octopus/commit/286ef4d75c0a782416854d0ac8d8f9b31756e090).
+
+### Development
+
+- Add regression coverage for orchestrator EXIT cleanup when ownership is
+  unknown. [#1210](https://github.com/nyldn/claude-octopus/pull/1210),
+  commit [c06ffc0](https://github.com/nyldn/claude-octopus/commit/c06ffc0ddb35600c5498e51da22eb24394be9b2c).
+
+## [11.15.0] - 2026-10-20
+
+### Fixed
+
+- Council preserves file-access recovery advice when a seat also fails quote
+  grounding, including rejected chair fallbacks. Their responses and grounding
+  reports remain inspectable while their votes stay excluded.
+- Git's no-newline marker no longer counts as source inside quoted diffs.
+  Genuine added and removed source still verifies; invented source stays rejected.
+- Council admission and contribution records share one fresh grounding report,
+  including retained and newly dispatched chair fallbacks. A second verifier
+  failure or stale preliminary report cannot contradict the recorded result.
+- Council checks multiline code spans with matching backtick delimiters and
+  preserves literal backticks within source. Direct source attributions retain
+  verification through ordinary modifiers and command-shaped quoted content.
+- Mixed council diff quotes must verify both their removed and retained or added
+  portions. A genuine portion cannot validate an invented opposite portion.
+  Prefix increment and decrement source lines remain checked, including short
+  portions that resemble diff file headers.
+- Context files supply diff evidence only within unified hunk line counts.
+  Markdown rules and bullets outside hunks cannot fabricate removed source.
+  Git's suppressed blank context markers preserve later source evidence and
+  cannot turn prefix-operator source inside a hunk into file headers.
+- Colored seat-failure reasons receive control-byte cleanup before whole-record
+  redaction, preserving safe error details that certification previously omitted.
+
+- Upgrade the MCP SDK from 1.31.0 to 1.32.0 for
+  [GHSA-22jm-h49p-29qw](https://github.com/advisories/GHSA-22jm-h49p-29qw).
+  Octopus uses stdio without the HTTP task store required by this advisory.
+
+- Unattributed prose blockquotes no longer reject council seats as fabricated.
+  Attributed and code-shaped blockquotes retain source verification.
+- Reused chair responses must pass current contribution validation. Retained
+  output without a verdict or a usable record cannot recover the chair.
+- Council grounding reports omit provider quote excerpts from `summary.json`.
+  Counts and rejection decisions remain available without redaction prerequisites.
+- Council checks source quotes inside malformed backtick fences whose info
+  strings contain backticks, matching verdict parsing so they cannot hide invention.
+- Council recognizes `defines` and `declares` source attributions. A genuine
+  quote cannot mask an invented quote introduced by either verb.
+- Uncited quote spans no longer consume council's citation-bound verification
+  budget. Bound overflow still rejects approval.
+- Colored provider failures retain safe diagnostic text. Control bytes are
+  removed before redaction and certification, with no partial output on failure.
+- Council verifies tilde-fenced source quotes and matches fence markers and
+  widths, preventing invented quotes from bypassing grounding through Markdown.
+- Rejected chair fallbacks retain their grounding report, response and failed
+  attempt diagnostics while remaining excluded from chair admission and quorum.
+- The subshell TERM regression requires proof that its restored trap executed.
+- Council warnings distinguish rejected grounding from provider access failures.
+  Both remain blind and excluded from quorum; only access failures suggest
+  switching provider mode/model or supplying file access.
+- Council quote verification has a 15-second process-group budget. Stalled
+  parsing or evidence reads reject the seat and discard partial reports.
+- Short inline identifiers no longer exhaust council's quote budget. The
+  256-unit limit still rejects unchecked specific quotes beyond the budget.
+- Council quorum counts and chair admission use the refreshed contribution's
+  validation and verdict. Rejected or unavailable records cannot retain a vote
+  from preliminary checks.
+- Council contribution records reverify current evidence instead of reusing
+  preliminary quote reports after source, context or diff contents change.
+- Direct diagnostic-tail callers receive no partial output when sanitization
+  fails. Successful tails retain their exact byte limit and trailing newlines.
+- Blank lines between a proposal lead-in and its code no longer make council
+  label the proposal fabricated. Inline formatting inside a blockquote counts
+  once, preventing duplicate units from exhausting the quote budget.
+- Council verification failures cannot grant grounding. Crashed
+  verifiers and malformed grounding reports reject the seat; partial output is
+  discarded and unverified quotes are not labeled fabricated.
+- Real code wrapped in inline backticks inside a blockquote keeps its council
+  grounding. Markdown formatting no longer creates a duplicate fabricated quote;
+  literal backticks within source expressions are preserved.
+- Council responses with quotes beyond the 256-unit verification budget cannot
+  count toward quorum, including when earlier quotes verify. Git filter driver
+  names containing `=` prevent diff capture because they cannot be safely
+  overridden through `git -c`; unavailable diff evidence retains uncertainty.
+- Council verifier diffs disable repository clean and process filters as well
+  as textconv, external diff drivers and fsmonitor. Filters selected through
+  tracked, private or configured attributes cannot execute repository commands
+  during quote verification. Filter lookup is bounded and fails closed.
+- Multi-line source quotes need the same whole-block or two-thirds match in
+  reviewed diffs as in source files. One real diff line cannot verify an
+  otherwise invented block. Responses above 1 MiB report `response_oversized`
+  and receive `invalid-ungrounded` instead of gaining credit for unchecked
+  citations. Unavailable contribution records retain the grounding schema.
+- Provider stderr diagnostics now use the same redaction and certification as
+  stdout. Log messages preserve literal backslashes after certification, so
+  provider output cannot turn escape text into terminal control bytes.
 - A council seat that exits non-zero now leaves its cause in the run dir. When
   the provider fails, `run_agent_sync` appends the exit code and the provider's
   stderr to `stderr/<seat>.log`, with secrets scrubbed and file mode 0600. When
@@ -77,6 +472,54 @@
   than assuming the provider never ran. Failed-attempt captures also survive a
   retry that exits zero but returns an unusable response, with the original
   failure exit code in seat metadata and warnings.
+- Council grounding now checks the code a seat quotes, not just the shape of
+  its citations. A real `path:line` citation used to make a seat
+  `valid-grounded` even when the code quoted beside it existed nowhere
+  (sail-cruisey #2997, #3005). Each specific quote near a resolving citation is
+  now checked against the cited files and the reviewed diff, including removed
+  lines from a `--context-file` diff or `git diff OCTOPUS_COUNCIL_DIFF_BASE`.
+  - A seat is marked blind, with contribution `invalid-ungrounded`, when none
+    of its quotes verify.
+  - It is also marked blind when a quote it attributes to one citation is in
+    no cited file and not in the diff. Attributed means directly under the
+    citation, or introduced as "`x.ts:12` reads `...`".
+  - A multi-line block verifies as a whole, or when two thirds of its specific
+    lines are in the file.
+
+  Grounded seats are not marked blind in these cases from sail-cruisey #3032:
+  - They cite an attached `--context-file` by basename, or a file under a
+    hidden directory such as `.todo/`.
+  - They quote as `>` or HTML-escaped `&gt;` blockquotes.
+  - They quote a command they ran.
+  - They quote a file outside the evidence root.
+  - They write proposed code.
+
+  Unreadable files and quotes tied to a citation that resolves nowhere are
+  unverifiable, never fabricated. Per-seat counts appear in `summary.json`
+  under `seats[].grounding`. Set `OCTOPUS_COUNCIL_QUOTE_VERIFY=0` to opt out.
+  Repeated checks share a report for unchanged response bytes. Verification
+  disables repository textconv and external diff drivers. Citation filenames
+  such as `example.ts` cannot classify invented source as proposed code.
+- A worker subshell that receives SIGTERM no longer deletes the orchestrator's
+  temporary directory or cancels the whole run. Helpers that save and restore
+  signal traps read them with `$(trap -p TERM)`, which inside a subshell
+  reports the parent's trap, so they re-armed the orchestrator's TERM handler
+  in the worker. When the Tangle correction stall watchdog then sent SIGTERM to
+  the stalled correction, the worker ran that handler, removed
+  `$OCTOPUS_TMP_DIR` and cancelled the active task group while the orchestrator
+  kept running; the next contextual review failed at `mktemp` ("unable to
+  collect complete all-changes diff for tangle review snapshot"). The EXIT and
+  signal handlers now act only in the orchestrator process itself. Unknown
+  ownership also denies cleanup, including when portable PID capture fails.
+  Regression tests wait for the worker to install its traps before signaling.
+- A synchronous provider call that fails now logs a bounded tail of its
+  redacted stdout (`OCTOPUS_SYNC_FAILURE_OUTPUT_TAIL_BYTES`, default 2000,
+  accepted range 1 through 65536) next to the
+  stderr details. Claude Code reports errors such as "Prompt is too long" or
+  "Not logged in" on stdout and exits 1 with only warnings on stderr, so the
+  failure log showed the warnings and the cause was deleted with the temp file.
+  Invalid limits use the default. Diagnostics pass redaction and credential
+  checks before truncation and are omitted if those checks fail.
 
 - Council prompts built by Octopus are now plain ASCII. Two em-dashes in the
   seat prompt template made every council prompt non-ASCII, and the context
