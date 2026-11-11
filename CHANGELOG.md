@@ -4,6 +4,11 @@
 
 ### Added
 
+- `OCTOPUS_AGY_FALLBACK_MODELS` lists Gemini models for agy to retry, in
+  order, when the backend answers 503 "No capacity available for model". The
+  council seat records the model that answered, with `model_fallback.from`, so
+  a busy model no longer stops the council. Non-Gemini entries are skipped.
+
 - A background `orchestrate.sh spawn` now prints `TASK_ID=`, `RESULT_FILE=`,
   `DONE_FILE=` and `RESULT_END_SENTINEL=` lines (absolute paths) before its PID
   line, which is still the last line. The finished worker also appends

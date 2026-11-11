@@ -254,6 +254,7 @@ _council_seat_pool_impl() {
                 COUNCIL_ASYNC_PID=""; COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE=""; rc=0
                 _COUNCIL_POOL_LAUNCH=1 _OCTOPUS_SEAT_STDERR_FILE="${COUNCIL_RUN_DIR}/stderr/$(basename "$output" .md).log" \
                 _OCTOPUS_CONTEXT_REFUSAL_FILE="${COUNCIL_RUN_DIR}/refusals/$(basename "$output" .md).txt" \
+                _OCTOPUS_AGY_MODEL_USED_FILE="${COUNCIL_RUN_DIR}/models/$(basename "$output" .md).txt" \
                     council_dispatch_member_detached "${members[next]}" "$phase" "$output" || rc=$?
                 if [[ -n "$COUNCIL_ASYNC_PID" ]]; then
                     pids[next]="$COUNCIL_ASYNC_PID"; timeouts[next]="$COUNCIL_ASYNC_TIMEOUT"
