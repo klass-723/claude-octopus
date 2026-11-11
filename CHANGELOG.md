@@ -74,6 +74,193 @@
   across quotes, preserving near-line accounting.
   First-person builders also recognize modifiers such as "I just built as"
   without excusing code attributed to someone else.
+- Explicit GPT-5.4 Mini API usage uses the documented $0.75 input and $4.50
+  output rates per million tokens. Capability checks now recognize its image
+  input and reasoning support. Model defaults and saved choices are preserved.
+
+## [11.22.1] - 2026-11-11
+
+### Fixed
+
+- Research verification recognizes section labels such as "(Finding 4)" and
+  references such as "See conflicts 1 & 2". Quantities and thresholds still
+  need evidence. Numbers written separately in totals remain checked,
+  including lists with a comma before "in total".
+
+### Maintenance
+
+- Council deadline tests measure prompt preparation separately from worker
+  startup, preventing false timing failures on busy runners. The watchdog
+  limit and checks for cancelled children and late output are preserved.
+- Focused unit CI retains timeout logs and cleans up owned processes before
+  the job deadline, matching the full unit lane. Interrupted steps preserve
+  collected output alongside the cancellation message.
+- Full unit shard weights include hosted macOS timings to spread process-heavy
+  suites across the four shards.
+
+## [11.22.0] - 2026-11-10
+
+### Added
+
+- GPT-6.1 Terra and Claude Fable 5.2 in the model catalog, with current API
+  pricing, Terra long-context billing and gateway restrictions, and Fable
+  dispatch guards. Existing routing defaults and saved pins are preserved.
+
+### Fixed
+
+- Refinement runs enforce round and stall limits through persisted state, retain
+  the best accepted candidate, and refuse unprepared or stopped dispatches.
+- Input snapshots match the bytes validated and scored. Interrupted rubric
+  corrections retain the prior best and score, preserve stalls, and keep the
+  original stop reason.
+- Successful structured judge answers can discuss context limits without being
+  misclassified as oversized-prompt errors. Genuine provider failures still stop.
+
+### Maintenance
+
+- Skill generation uses the authored entries directly through the existing sync
+  pipeline. Retired flow templates no longer provide competing source copies.
+  Contributor guidance now links the repository map, script index and test tiers.
+
+## [11.21.0] - 2026-11-09
+
+### Added
+
+- Opt-in Claude worker advisors through `OCTOPUS_CLAUDE_ADVISOR`, with version
+  checks, validated launch arguments and fixed refinement judge isolation.
+- Explicit refinement requests route to the existing bounded `/octo:refine`
+  workflow. Ordinary plan editing does not add independent judges.
+- Native Claude plugin eval cases and a bounded `make test-native-evals` target.
+- Guidance for advisor accounting, subagent effort and context, native dynamic
+  workflow handoffs, and the separate implementation needed for Mods and MCP tasks.
+
+### Changed
+
+- Critical synchronous pre-action hooks block on hook failures on Claude Code
+  v2.1.295 or later.
+
+## [11.20.0] - 2026-11-09
+
+### Added
+
+- `/octo:deck --red-team` can review a draft outline through stakeholder seats
+  before approval, map decision-blocking objections to the main deck, and prepare
+  draft answers and appendix backup slides for Q&A. The pass is opt-in and uses
+  the existing debate provider and cost controls. Transports with unbounded
+  follow-up requests are excluded from the pass.
+
+- Deck outlines now start with a confirmed governing question, a brief
+  situation/complication/question opener and an answer supported by two to four
+  pillars. Slide titles form a sentence skeleton that must carry the argument
+  in a titles-only read before the user approves rendering. Informational decks
+  retain their own purpose. Addresses #1215.
+
+- Executive and board decision decks put the recommendation, context, supporting
+  pillars and explicit ask on slide 2. Their outline compares doing nothing
+  with a real alternative, ties data-slide highlights to one proof point,
+  and includes an appendix for expected questions. Missing decision material
+  is identified before outline approval rather than invented. Informational
+  updates keep their own purpose, and short decks can combine evidence and
+  decision slides within the approved target. The action closes the main deck,
+  before appendix backup slides. Addresses #1216.
+
+- Research can optionally share one Keenable web search across its perspectives.
+  Set `OCTOPUS_RESEARCH_WEB_SEARCH=keenable` and include `keenable` in any active
+  provider allowlist. Search suggestions remain untrusted, and lookup failures
+  keep the original research prompts. No API key is required for the public
+  endpoint. Addresses [#1261](https://github.com/nyldn/claude-octopus/issues/1261).
+
+### Improved
+
+- Leading CLI help skips workflow initialization. Complete, valid reviews with
+  no findings skip verifier and synthesis calls after confirming the diff is unchanged.
+- Council advice, critique and revision use bounded concurrency with ordered
+  usage reservations. Refinement can overlap its two pinned, independent judges
+  under one call budget and deadline.
+- Preparation can check an explicit provider panel and validate a short-lived
+  readiness receipt. Fresh dispatch authorization remains required.
+- Discovery and refinement load phase instructions as needed. Brainstorm, PRD
+  and security workflows reuse supplied answers and ask about material gaps.
+- Correction loops detect completed workers sooner. Provider retries distinguish
+  terminal authentication failures from recoverable refresh or transport failures.
+- Worktree metadata sampling, usage reports, context lookup and convergence
+  checks avoid repeated subprocesses, whole-log buffering or unchanged file reads.
+
+### Fixed
+
+- Worktree progress fingerprints preserve stat compatibility for timestamps before
+  1970, including fractional seconds. The batch sampler and shell fallback produce
+  the same digest while ordinary files keep the batch sampling path.
+
+- Code review skips complete file diffs using REVIEW.md path globs. Generated
+  hunks no longer appear under another file's header, and retained code that
+  mentions a skipped path stays intact. Fully skipped diffs launch no reviewers.
+  Standard and no-prefix Git diffs are supported, including quoted, binary
+  and mode-only paths.
+  Fixes [#1279](https://github.com/nyldn/claude-octopus/issues/1279).
+- Provider smoke tests explain environment construction failures instead of
+  failing silently. Search-credential rejection uses the routing error logger,
+  with a stderr fallback for standalone callers.
+- Optional search skips interpreters without total-deadline support and warns
+  when a lookup fails or returns no suggestions, while research continues.
+- Codex subscription probes exclude search credentials and skip execution if
+  provider environment construction fails.
+
+## [11.19.0] - 2026-11-08
+
+### Added
+
+- Deck generation verifies rendered slides before reporting completion. It
+  checks thumbnails, rendered titles and highlighted data claims, then reports
+  each slide's result. Artifacts with missing evidence remain drafts.
+  Addresses [#1219](https://github.com/nyldn/claude-octopus/issues/1219).
+- Cost tiers can now pair a model or capability with reasoning effort in
+  `providers.json`, such as `{"capability":"default","reasoning":"low"}`.
+  Existing string targets still work. Tier effort applies only when that tier
+  selects the model; explicit model routes and effort overrides keep precedence.
+
+### Fixed
+
+- Haiku 5.5 can be saved as a Claude budget pin. Its estimates use the published
+  base rate through 100K input tokens and the whole-request tariff above that
+  boundary. Existing model defaults are unchanged.
+  Fixes [#1250](https://github.com/nyldn/claude-octopus/issues/1250).
+
+- Research verification no longer fails a synthesis for referring to its own
+  numbered points. A synthesis line such as "See point 2." or "Corrected in
+  point 2: ..." next to a workspace citation failed with `number_mismatch`,
+  because the cited file did not contain a standalone 2. A whole number after
+  `point`, `points`, `item` or `items`, or continuing such a list with a comma,
+  "and" or "or", is now skipped when no other word follows it. Numbers with a
+  unit, including formatted units such as `5 **MiB**`, and section numbers are
+  still checked. Compact lists such as `points 2,3` are also recognized, while
+  decimals and thousands-formatted numeric claims remain checked. Scores and
+  counts introduced by a colon, both endpoints of hyphen and Unicode
+  dash ranges, and quantities with either Unicode micro-unit prefix also remain checked.
+  Nested emphasis and whitespace before a percent sign cannot hide quantities.
+  Literal destination backticks and emphasis before attached units also retain
+  unsupported quantities for evidence checks.
+
+## [11.18.0] - 2026-11-07
+
+### Added
+
+- `/octo:refine`, with `/octo:ladder` as an alias, improves artifacts through a frozen rubric, independent Claude/Codex scoring, and bounded rounds. Reports retain each attempted round and the best verified result.
+
+### Fixed
+
+- Guard modes now check forced recursive removal targets, require review of unclassified executable input, and share stable session identity across activation, hooks, and deactivation.
+- Metric-loop instructions direct the host to preserve existing edits and the staged index through isolated candidates, finite iteration/time/call budgets, and resume accounting. These steps depend on host compliance; they are not an executable supervisor.
+- Failed or malformed independent review verification leaves findings unverified and disables publication.
+- Commands, skills, and registered hooks use the current host installation with quoted executable paths, including sessions using different versions or installation paths containing spaces.
+- Budget, standard, and premium shortcuts remain supported; removed the obsolete v11 removal notice.
+
+### Development
+
+- Run affected PR tests on both supported systems and shard full unit coverage into four weighted lanes per system. Run integration beside units and use targeted symlink regressions on every event.
+- Remove duplicate local sync/smoke runs, standalone packaging jobs, repeated full local release requirements, and automatic advisory model reviews unless explicitly enabled. Required CI and approval remain intact.
+- Keep release validation read-only and publish through the gated release process. Reject unknown test-runner flags before execution.
+- Bound full unit steps and retain their output before the job deadline so stalled tests produce actionable diagnostics.
 
 ## [11.17.1] - 2026-11-05
 
