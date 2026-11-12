@@ -991,7 +991,6 @@ r="$(council_response_quote_verification_json "$(_resp "src/a.ts:1 and src/b.ts:
 VERDICT: APPROVE")" "$PROOT")"
 if jq -e '.quotes_verified == 1 and .quotes_partial == 0' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
-
 # A seat's own arithmetic is a computed value, not a quote of the payload
 # (sail-cruisey #3246 CP1: codex disputed a size estimate with its own sum and
 # was marked fabricated on it).
@@ -1246,7 +1245,6 @@ r="$(_report "$(_resp 'src/pricing.ts:2 keeps the fallback. The change:
 ```
 VERDICT: APPROVE')")"
 if jq -e '.quotes_checked == 1' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
-
 # An `octopus-policy-findings` block is the feature workflow's structured
 # findings format (checked by digest in feature-workflow.py), not a code quote.
 # sail-cruisey #3244 CP1: codex's only "quote" was this block, so it was
@@ -3840,6 +3838,33 @@ else
     test_fail "terminal punctuation lost the proposal lead-in: $r"
 fi
 
+# Contracted auxiliaries still identify reviewer-owned construction. Keep a
+# later source-claim control so an earlier builder cannot excuse fabricated code.
+for builder in "I've" "we've" "I'd" "we'd" 'I’ve' 'we’ve' 'I’d' 'we’d'; do
+    for claim in own later-source same-sentence-source same-sentence-own; do
+        test_case "contracted builder $builder preserves $claim attribution"
+        introduction="a row $builder carefully built as"
+        if [[ "$claim" == later-source ]]; then
+            introduction="a row $builder built as a test. The file contains"
+        elif [[ "$claim" == same-sentence-source ]]; then
+            introduction="a fixture $builder built as a test, but the file reads"
+        elif [[ "$claim" == same-sentence-own ]]; then
+            introduction="a fixture $builder built as a test, but the file reads a row $builder carefully built as"
+        fi
+        r="$(_report "$(_resp "src/pricing.ts:2 reads $introduction \`$FAKE\`.
+VERDICT: REVISE")")"
+        if jq -e --arg claim "$claim" '.verification_failed == false and
+            (if ($claim == "own" or $claim == "same-sentence-own") then .quotes_unverifiable_proposed == 1
+                and .quotes_attributed == 0 and .fabricated == false
+             else .quotes_unverifiable_proposed == 0
+                and .quotes_attributed_unverified == 1 and .fabricated == true end)' <<< "$r" >/dev/null; then
+            test_pass
+        else
+            test_fail "contracted builder changed quote ownership: $r"
+        fi
+    done
+done
+
 # Complete evidence on either diff side clears only partial reporting.
 for exact_side in removed added; do
     test_case "a partial source fence complete in the $exact_side diff is not partial"
@@ -4097,14 +4122,56 @@ function = 'def plain_line_present(' + source.split('\ndef plain_line_present(',
 rng = random.Random(1260)
 needles = {'a' * size for size in range(1, 65)} | {'absent-pattern', 'he', 'she', 'hers', 'his', '|', 'μg'}
 needles.update(''.join(rng.choices('abcd', k=8)) for _ in range(80))
-scope = dict(plain_needles=needles, plain_automaton=None, plain_hits={})
+scope = dict(plain_needles=needles, plain_automaton=None, plain_hits={}, plain_batches=None, plain_batch_ids={}, plain_queries={})
 exec(compile(function, str(sys.argv[1]), 'exec'), scope)
 for hay in ['ushers his μg | ' + 'a' * 100000, ''.join(rng.choices('abcd', k=10000)), 'nothing matches']:
     for needle in needles:
         assert scope['plain_line_present'](needle, hay) == (needle in hay), (needle, hay[:80])
 assert scope['plain_line_present']('not indexed', 'anything') is None
+# Distinct long patterns share few edges. The active index must stay bounded
+# even when uncited units supply most of the response's literal patterns.
+needles = {''.join(rng.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=64)) for _ in range(12000)}
+scope.update(plain_needles=needles, plain_automaton=None, plain_hits={}, plain_batches=None, plain_batch_ids={}, plain_queries={})
+ordered = sorted(needles)
+# Revisit the same evidence after switching batches, including absent patterns.
+hay = ordered[0] + ' ' + ordered[len(ordered) // 2] + ' ' + ordered[-1]
+# Sparse per-file queries should not scan the entire pattern set in Python.
+for needle in ordered[:1024]:
+    assert scope['plain_line_present'](needle, hay) == (needle in hay)
+assert scope['plain_automaton'] is None
+assert scope['plain_batches'] is None
+# Promote dense queries, then revisit evidence across pattern batches.
+assert scope['plain_line_present'](ordered[1024], hay) == (ordered[1024] in hay)
+for needle in [ordered[i] for i in (0, len(ordered) // 2, -1, 1, -2, 0)]:
+    assert scope['plain_line_present'](needle, hay) == (needle in hay)
+    automaton = scope['plain_automaton']
+    # The repair stores the active batch ID before the existing trie arrays.
+    edges = automaton[1] if isinstance(automaton[0], int) else automaton[0]
+    assert len(edges) <= 65537, len(edges)
+
 PY_BATCH_PRESENCE
 then test_pass; else test_fail "batch index changed literal substring matching"; fi
+
+# A verified literal must not scan unrelated batch needles in that evidence file.
+test_case "verified literal variants reuse their match before batch presence scans"
+if python3 - "$PROJECT_ROOT/scripts/lib/council.sh" <<'PY_LITERAL_CACHE'
+import re
+import sys
+from pathlib import Path
+source = Path(sys.argv[1]).read_text()
+function = 'def match_unit(' + source.split('\ndef match_unit(', 1)[1].split('\nall_cited =', 1)[0]
+known = 'const actual = loadActualPrice(input);'
+def batch_presence(needle, hay):
+    raise AssertionError('already matched literal triggered a full evidence scan')
+scope = dict(match_variant=lambda variant, entry: [1] if variant in entry[0] else [],
+             plain_line_present=batch_presence, partial_presence={},
+             norm=lambda text: ' '.join(text.split()), ELLIPSIS=re.compile(r'\.\.\.|…'))
+exec(compile(function, sys.argv[1], 'exec'), scope)
+misses = []
+assert scope['match_unit']([], [[known]], (known + ' ' + 'x' * 1400000, [0], [1]), misses) == [1]
+assert misses == [0], misses
+PY_LITERAL_CACHE
+then test_pass; else test_fail "verified literal performed report-only batch work"; fi
 
 # Count scans rather than relying on host timing for the non-fence hot path.
 test_case "partial matching reuses plain-variant scans without weakening elisions"

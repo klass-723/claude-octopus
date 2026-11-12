@@ -3506,6 +3506,7 @@ def link_text_opener(opening, closing):
     link = resp.find("](", opening.end())
     return 0 <= link < closing.start()
 backtick_index = 0
+prose_parts, prose_cursor = [], 0
 while backtick_index < len(backticks):
     opening = backticks[backtick_index]
     closing_index = next_backtick[backtick_index]
@@ -3528,7 +3529,13 @@ while backtick_index < len(backticks):
     if escaped_body is not None:
         body = escaped_body
     units.append((opening.start(), closing.end(), "inline", [body.strip()], [], ""))
+    # Reuse parsed Markdown spans for ownership prose. Preserve offsets and
+    # line boundaries while excluding code punctuation and proposal words.
+    prose_parts.extend((resp[prose_cursor:opening.start()],
+                        re.sub(r"[^\r\n]", " ", resp[opening.start():closing.end()])))
+    prose_cursor = closing.end()
     backtick_index = closing_index + 1
+prose_resp = "".join(prose_parts) + resp[prose_cursor:]
 # The "path:line" list shape: a line holding only a citation, followed by the
 # quoted source line with no markup. These can only add verified evidence; an
 # unmatched bare line may be prose, so it is never counted against the seat.
@@ -3860,14 +3867,41 @@ plain_needles = {norm(v) for unit in units for line in unit[3] + unit[4]
                  for v in unescaped([line.strip(), GUTTER.sub("", line).strip()], True)
                  if 0 < len(norm(v)) <= 64 and not ELLIPSIS.search(norm(v))}
 plain_automaton = None
+plain_batches = None
+plain_batch_ids = {}
 plain_hits = {}
+plain_queries = {}
 def plain_line_present(needle, hay):
-    global plain_automaton
+    global plain_automaton, plain_batches
     if len(plain_needles) < 64 or needle not in plain_needles:
         return None
-    if plain_automaton is None:
+    # Most files supply only a few lines from the response-wide pattern set.
+    # Use native substring searches for sparse queries; amortize a Python trie
+    # scan only after this evidence actually receives many distinct queries.
+    queried = plain_queries.setdefault(hay, set())
+    if len(queried) <= 1024:
+        queried.add(needle)
+        if len(queried) <= 1024:
+            return needle in hay
+    if plain_batches is None:
+        # A response can contain many unrelated 64-character lines. Limit the
+        # active trie to 65,537 nodes, and build only batches actually queried.
+        plain_batches = [[]]
+        budget = 0
+        for word in sorted(plain_needles):
+            if budget + len(word) > 65536:
+                plain_batches.append([])
+                budget = 0
+            plain_batch_ids[word] = len(plain_batches) - 1
+            plain_batches[-1].append(word)
+            budget += len(word)
+    batch = plain_batch_ids[needle]
+    cache_key = (hay, batch)
+    if cache_key in plain_hits:
+        return needle in plain_hits[cache_key]
+    if plain_automaton is None or plain_automaton[0] != batch:
         edges, failure, output, words = [{}], [0], [0], {}
-        for word in plain_needles:
+        for word in plain_batches[batch]:
             state = 0
             for char in word:
                 if char not in edges[state]:
@@ -3884,9 +3918,10 @@ def plain_line_present(needle, hay):
                     fallback = failure[fallback]
                 failure[child] = edges[fallback].get(char, 0)
                 queue.append(child)
-        plain_automaton = edges, failure, output, words
-    if hay not in plain_hits:
-        edges, failure, output, words = plain_automaton
+        # Retain only the active batch's arrays, rather than every trie.
+        plain_automaton = batch, edges, failure, output, words
+    if cache_key not in plain_hits:
+        _, edges, failure, output, words = plain_automaton
         parent = list(range(len(edges)))
         def unseen(state):
             while parent[state] != state:
@@ -3905,10 +3940,10 @@ def plain_line_present(needle, hay):
                 # Repeated source text cannot multiply output-processing work.
                 parent[terminal] = unseen(output[failure[terminal]])
                 terminal = parent[terminal]
-            if len(hits) == len(plain_needles):
+            if len(hits) == len(plain_batches[batch]):
                 break
-        plain_hits[hay] = hits
-    return needle in plain_hits[hay]
+        plain_hits[cache_key] = hits
+    return needle in plain_hits[cache_key]
 
 # Presence is independent of source line numbers. Reuse it across quote units
 # without changing which source supplies the near-line report.
@@ -3934,7 +3969,12 @@ def match_unit(wholes, line_variants, entry, misses=None, short=()):
                     # Partial accounting checks every retained fragment, even
                     # below the specificity floor used by the verdict.
                     pieces = [p for p in ELLIPSIS.split(norm(variant)) if p]
-                    present = plain_line_present(norm(variant), hay)
+                    # Reuse an exact literal match already computed for the
+                    # verdict before indexing every report-only short line.
+                    # Elisions still need their lower-specificity presence check.
+                    present = (bool(variant_matches[variant])
+                               if variant in variant_matches and not ELLIPSIS.search(norm(variant))
+                               else plain_line_present(norm(variant), hay))
                     if present is None:
                         if ELLIPSIS.search(norm(variant)):
                             if not reserve_optional_scan((len(hay) + len(variant)) * max(1, len(pieces))):
@@ -4144,8 +4184,16 @@ SOURCE_VERB = re.compile(r"\b(?:reads?|shows?|contains?|has|says?|is|defines?|de
 OWN_INPUT = re.compile(r"(?:constructed|built|crafted) as", re.I)
 CONTENT_VERB = SOURCE_VERB
 FIRST_PERSON_SUBJECT = re.compile(
-    r"\b(?:I|we)\s+(?:(?:have|had|just|recently|already|carefully|deliberately|"
+    r"\b(?:I|we)(?:['’](?:ve|d))?\s+(?:(?:have|had|just|recently|already|carefully|deliberately|"
     r"explicitly|locally|manually|originally|previously)\s+)*$", re.I)
+# An explicit source subject restarts attribution even in the same sentence,
+# after a reviewer describes a proposed input or replacement.
+SOURCE_SUBJECT = re.compile(
+    r"\b(?:(?:the|this|that|current|actual|cited)\s+)+"
+    r"(?:file|source|code)\s+(?:itself\s+)?"
+    r"(?:(?:now|currently|actually)\s+)?" + SOURCE_VERB.pattern, re.I)
+EXPLICIT_SOURCE_CLAIM = re.compile(
+    r"\b(?:but|however|whereas|and)\s+" + SOURCE_SUBJECT.pattern, re.I)
 DOTTED_ABBREVIATION = re.compile(r"\b(?:[A-Za-z]\.){2,}")
 CLAUSE_BOUNDARY = re.compile(r"[.!?;](?:\s|$)")
 def clause_start(text, end):
@@ -4237,14 +4285,14 @@ def attribution(token, gap):
         return None
     # A source verb in this bounded clause still attributes the quote when
     # ordinary modifiers follow it. A new sentence or a proposal ends that claim.
-    clause = clause_start(gap, len(gap))
-    source_clause = (SOURCE_VERB.search(gap, clause)
-                     and not re.search(r"(?:^|[,;:]|\b(?:and|but|so|while)\b)\s*(?:I|we)\s+(?:estimate|compute|calculate)\b", gap[clause:], re.I))
+    start = clause_start(gap, len(gap))
+    source_clause = ((SOURCE_SUBJECT.search(gap, start) if start else SOURCE_VERB.search(gap))
+                     and not re.search(r"(?:^|[,;:]|\b(?:and|but|so|while)\b)\s*(?:I|we)\s+(?:estimate|compute|calculate)\b", gap, re.I))
     if proposes(gap) or (not source_clause and any(
             word.lower() not in GAP_WORDS for word in re.findall(r"[A-Za-z]+", gap))):
         return None
     line_start = resp.rfind("\n", 0, token[0]) + 1
-    prefix = CITATION.sub("", LINK_TARGET.sub("", resp[line_start:token[0]]))
+    prefix = CITATION.sub("", LINK_TARGET.sub("", prose_resp[line_start:token[0]]))
     # Here terminal punctuation closes an earlier sentence; it is not the
     # standalone proposed fence lead-in that proposes() otherwise preserves.
     if proposes(prefix[clause_start(prefix, len(prefix)) :]):
@@ -4256,9 +4304,9 @@ def proposed(start):
     # suggestion, not a claim about what a file contains today. Blank lines do
     # not sever that lead-in; other nonempty lines still end its scope.
     line_start = resp.rfind("\n", 0, start) + 1
-    prose = resp[line_start:start]
+    prose = prose_resp[line_start:start]
     if prose.strip(" \t>`") == "":
-        preceding = resp[:line_start].rstrip()
+        preceding = prose_resp[:line_start].rstrip()
         prose = preceding[preceding.rfind("\n") + 1:]
     # A source filename such as example.ts is not proposal language.
     prose = CITATION.sub("", LINK_TARGET.sub("", prose))
@@ -4332,18 +4380,6 @@ def probe_input(start, end):
                 or (PROBE_AFTER.match(after) and PROBE_CONTEXT.search(before + after))
                 or NEGATED.search(before)
                 or input_cell(start))
-
-token_starts = [t[0] for t in tokens]
-CITED_AFTER = re.compile(r"(?:[(\[]|[:,\u2013\u2014-]|in|at|from)?[ \t]*`?", re.I)
-HORIZONTAL_SPACE = re.compile(r"[ \t]*")
-def cited_after(end):
-    """Recognize an adjacent citation without copying the remaining response."""
-    index = bisect_left(token_starts, end)
-    if index >= len(tokens):
-        return False
-    limit = tokens[index][0]
-    start = HORIZONTAL_SPACE.match(resp, end, limit).end()
-    return CITED_AFTER.fullmatch(resp, start, limit) is not None
 
 token_starts = [t[0] for t in tokens]
 CITED_AFTER = re.compile(r"(?:[(\[]|[:,\u2013\u2014-]|in|at|from)?[ \t]*`?", re.I)
@@ -4444,23 +4480,56 @@ for start, end, kind, block, removed_block, info in units:
     # readable neighbor cannot stand in for an oversized or unreadable bound file.
     readable = True
     verified = near = partial = False
+    near_budget = 65536
+    partial_budget = 65536
     for path in bound_paths + [p for p in all_cited if p not in bound_paths]:
+        # Once complete, only later bound files can improve near-line reporting.
+        if verified and not partial and path not in bound_paths:
+            break
         entry = load(path)
         if entry is None:
             if path in bound_paths:
                 readable = False
             continue
+        if verified and partial and path not in bound_paths:
+            # Unbound files only refine an already verified fence's report.
+            # Keep the partial result if a complete entry exceeds this budget;
+            # slicing it could mistake a truncated source for complete evidence.
+            entry_bytes = len(entry[0].encode("utf-8"))
+            if entry_bytes > partial_budget:
+                break
+            partial_budget -= entry_bytes
+        cited_lines = [line for p, line in bound if p == path]
+        if verified and not partial:
+            # Near-line counts are supplemental: cap refinement after complete
+            # verification so large later files cannot exhaust the verdict's
+            # deadline. Search actual source windows, never concatenate gaps.
+            if not near_budget:
+                break
+            hay, starts, numbers = entry
+            first = bisect_left(numbers, max(1, min(cited_lines) - NEAR_LINES))
+            last = bisect_right(numbers, max(cited_lines) + NEAR_LINES)
+            if first == last:
+                continue
+            offset = starts[first]
+            stop = min(starts[last] if last < len(starts) else len(hay), offset + near_budget)
+            near_budget -= stop - offset
+            window_end = min(last, bisect_left(starts, stop))
+            entry = (hay[offset:stop], [at - offset for at in starts[first:window_end]],
+                     numbers[first:window_end])
         misses = []
-        lines = match_unit(wholes, line_variants, entry, misses, short)
+        # Partial reporting applies only to fences. Non-fence threshold and
+        # elision matches need no short-line presence scans.
+        lines = match_unit(wholes, line_variants, entry,
+                           misses if kind == "fence" else None, short)
         if not lines:
             continue
-        cited_lines = [line for p, line in bound if p == path]
         near = near or any(abs(found - cited) <= NEAR_LINES for found in lines for cited in cited_lines)
         # A partial match may be complete in a later cited file; keep looking
         # for the report. The first match already decides the verdict.
-        partial = bool(misses and misses[0])
+        partial = bool(misses and misses[0]) and (partial or not verified)
         verified = True
-        if not partial:
+        if not partial and near:
             break
     if kind == "bare":
         # Positive evidence only: a matched bare line is a verified quote; an
@@ -4522,8 +4591,8 @@ for start, end, kind, block, removed_block, info in units:
                 diff_side_hit = "removed"
                 diff_partial = any(removed_misses) or kept_partial
         else:
-            # Check both sides: the removed side keeps precedence, but an exact
-            # match on either side means the fence is not partial.
+            # The removed side keeps precedence. Once a side matches completely,
+            # further searches cannot improve verification or partial reporting.
             removed_misses, added_misses = [], []
             hits = []
             for side_name, side, side_misses in (
