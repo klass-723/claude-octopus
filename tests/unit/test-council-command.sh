@@ -4095,6 +4095,66 @@ _council_run_advice_with_verdicts() {
     unset -f council_dispatch_member_detached council_prompt_for_member council_persona_should_fail council_run_chair_fallback
 }
 
+test_council_claude_votes_two_vendor_quorum() {
+    test_case "OCTOPUS_COUNCIL_CLAUDE_VOTES=1: a claude+codex council folds the claude chair into a voter so quorum can reach anthropic+openai (local opt-in)"
+    load_council_lib || return 1
+    local saved="${OCTOPUS_COUNCIL_CLAUDE_VOTES-__unset__}"
+    local two='[
+      {"persona":"strategy-analyst","seat":"chair","provider":"claude","model_family":"anthropic","score":"0.6"},
+      {"persona":"backend-architect","seat":"advisor","provider":"codex","model_family":"openai","score":"0.7"}
+    ]'
+    council_available_model_families_json() { printf '%s' "$_CV_FAMILIES"; }
+
+    # Policy off: chair stays the chair, the lone codex voter cannot meet quorum.
+    unset OCTOPUS_COUNCIL_CLAUDE_VOTES
+    _CV_FAMILIES='["openai","anthropic"]'
+    COUNCIL_ROSTER_JSON="$two"; COUNCIL_SEATING_CLAUDE_VOTER=""
+    council_fold_claude_chair_into_voter
+    local off="$COUNCIL_ROSTER_JSON"
+    _council_run_advice_with_verdicts "$off" '{}'
+    local off_met="$COUNCIL_QUORUM_MET"
+
+    # Policy on: chair folded into a voting seat; both families approve.
+    export OCTOPUS_COUNCIL_CLAUDE_VOTES=1
+    COUNCIL_ROSTER_JSON="$two"; COUNCIL_SEATING_CLAUDE_VOTER=""
+    council_fold_claude_chair_into_voter
+    local on="$COUNCIL_ROSTER_JSON" on_voter="$COUNCIL_SEATING_CLAUDE_VOTER" on_chair
+    on_chair="$(council_chair_member_json | jq -r '.persona')"
+    _council_run_advice_with_verdicts "$on" '{}'
+    local on_met="$COUNCIL_QUORUM_MET" on_fams="$COUNCIL_APPROVING_MODEL_FAMILIES" on_seats="$COUNCIL_SEAT_RECORDS_JSON"
+
+    # Three families available: not a two-vendor council, roster untouched.
+    _CV_FAMILIES='["openai","anthropic","google"]'
+    COUNCIL_ROSTER_JSON="$two"; COUNCIL_SEATING_CLAUDE_VOTER=""
+    council_fold_claude_chair_into_voter
+    local three="$COUNCIL_ROSTER_JSON" three_voter="$COUNCIL_SEATING_CLAUDE_VOTER"
+
+    unset -f council_available_model_families_json
+    [[ "$saved" == "__unset__" ]] && unset OCTOPUS_COUNCIL_CLAUDE_VOTES || export OCTOPUS_COUNCIL_CLAUDE_VOTES="$saved"
+
+    local ok=y why=""
+    [[ "$(jq -Sc . <<< "$off")" == "$(jq -Sc . <<< "$two")" && "$off_met" == "false" ]] \
+        || { ok=n; why+=" off=$off met=$off_met"; }
+    jq -e '.[0].seat == "advisor" and .[0].synthesizer == true and .[0].claude_vote == true
+           and ([.[] | select(.seat == "chair")] | length == 0)' <<< "$on" >/dev/null \
+        || { ok=n; why+=" on=$on"; }
+    [[ "$on_voter" == "strategy-analyst" && "$on_chair" == "strategy-analyst" ]] \
+        || { ok=n; why+=" voter=$on_voter chair=$on_chair"; }
+    [[ "$on_met" == "true" && "$on_fams" == *anthropic* && "$on_fams" == *openai* ]] \
+        || { ok=n; why+=" met=$on_met fams=[$on_fams]"; }
+    jq -e '.[0].claude_vote == true and .[0].counted_as_approver == true' <<< "$on_seats" >/dev/null \
+        || { ok=n; why+=" seats=$on_seats"; }
+    [[ "$(jq -Sc . <<< "$three")" == "$(jq -Sc . <<< "$two")" && -z "$three_voter" ]] \
+        || { ok=n; why+=" three=$three voter=$three_voter"; }
+
+    if [[ "$ok" == y ]]; then
+        test_pass
+    else
+        test_fail "claude-votes seating wrong:$why"
+        return 1
+    fi
+}
+
 test_council_one_vote_per_vendor_split_vendor_fails_safe() {
     test_case "OCTOPUS_COUNCIL_ONE_VOTE_PER_VENDOR=1: a vendor approves only if ALL its counted seats approve; a chair's explicit REVISE splits its vendor (sail-cruisey #2996)"
     load_council_lib || return 1
@@ -4175,6 +4235,7 @@ test_council_one_vote_per_vendor_split_vendor_fails_safe() {
 
 test_council_one_vote_per_vendor_seats_one_seat_per_vendor
 test_council_one_vote_per_vendor_split_vendor_fails_safe
+test_council_claude_votes_two_vendor_quorum
 test_council_host_native_detection
 test_council_live_response_host_native_skips_subprocess
 test_council_live_response_host_native_fails_for_synthesis

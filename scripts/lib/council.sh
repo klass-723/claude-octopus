@@ -71,6 +71,7 @@ COUNCIL_BLIND_SEATS=""
 COUNCIL_QUOTA_LIMITED_SEATS=""
 COUNCIL_VENDOR_VOTES_JSON=""
 COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+COUNCIL_SEATING_CLAUDE_VOTER=""
 COUNCIL_SEATING_DROPPED_SEATS=""
 COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE=""
 COUNCIL_BENCHMARK_FRESHNESS_WEIGHT=""
@@ -181,6 +182,7 @@ council_reset_defaults() {
     COUNCIL_QUOTA_LIMITED_SEATS=""
     COUNCIL_VENDOR_VOTES_JSON='[]'
     COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_CLAUDE_VOTER=""
     COUNCIL_SEATING_DROPPED_SEATS="0"
     COUNCIL_CHAIR_FALLBACK_USED="false"
     COUNCIL_CHAIR_FALLBACK_PERSONA=""
@@ -1302,6 +1304,7 @@ council_build_roster() {
     COUNCIL_DIVERSITY_REPLACED="false"
     COUNCIL_DIVERSITY_WARNING=""
     COUNCIL_SEATING_CHAIR_FOLDED_INTO=""
+    COUNCIL_SEATING_CLAUDE_VOTER=""
     COUNCIL_SEATING_DROPPED_SEATS="0"
 
     council_add_roster_persona "strategy-analyst"
@@ -1347,6 +1350,7 @@ council_build_roster() {
 
     council_enforce_provider_diversity
     council_dedup_vendor_seats
+    council_fold_claude_chair_into_voter
 }
 
 council_dedup_vendor_seats() {
@@ -1432,6 +1436,34 @@ council_fold_chair_into_vendor_voter() {
     COUNCIL_SEATING_CHAIR_FOLDED_INTO="$(jq -r --argjson i "$candidate" '.[$i].persona' <<< "$COUNCIL_ROSTER_JSON")"
     COUNCIL_ROSTER_JSON="$(jq -c --argjson i "$candidate" '
         (.[$i].synthesizer = true) | map(select(.seat != "chair"))' <<< "$COUNCIL_ROSTER_JSON")"
+}
+
+council_claude_votes_enabled() {
+    [[ "${OCTOPUS_COUNCIL_CLAUDE_VOTES:-}" == "1" ]]
+}
+
+council_fold_claude_chair_into_voter() {
+    # LOCAL OPT-IN (OCTOPUS_COUNCIL_CLAUDE_VOTES=1, default off): a two-vendor
+    # council (claude + one other family, e.g. --providers codex,claude) seats
+    # claude only as the chair, and the chair never counts — so the lone other
+    # voter can never reach required_non_chair=2 and quorum.met is unreachable.
+    # Fold the anthropic chair into a voting seat instead: it keeps the chair
+    # contract (synthesizer:true, picked by council_chair_member_json) and votes
+    # as a regular non-chair seat, so approving_model_families can reach
+    # anthropic + the other family. Off by default, so the chair-never-counts
+    # rule is unchanged unless explicitly enabled.
+    council_claude_votes_enabled || return 0
+    local families chair_idx
+    families="$(council_available_model_families_json)"
+    jq -e 'length == 2 and index("anthropic") != null' <<< "$families" >/dev/null 2>&1 || return 0
+    # Already has an anthropic voter: nothing to fold.
+    jq -e 'any(.[]; .seat != "chair" and .model_family == "anthropic")' <<< "$COUNCIL_ROSTER_JSON" >/dev/null 2>&1 && return 0
+    chair_idx="$(jq -r 'to_entries | map(select(.value.seat == "chair" and .value.model_family == "anthropic")) | .[0].key // empty' <<< "$COUNCIL_ROSTER_JSON")"
+    [[ -n "$chair_idx" ]] || return 0
+    council_synthesis_capable_persona "$(jq -r --argjson i "$chair_idx" '.[$i].persona' <<< "$COUNCIL_ROSTER_JSON")" || return 0
+    COUNCIL_SEATING_CLAUDE_VOTER="$(jq -r --argjson i "$chair_idx" '.[$i].persona' <<< "$COUNCIL_ROSTER_JSON")"
+    COUNCIL_ROSTER_JSON="$(jq -c --argjson i "$chair_idx" \
+        '.[$i] |= (.seat = "advisor" | .synthesizer = true | .claude_vote = true)' <<< "$COUNCIL_ROSTER_JSON")"
 }
 
 council_required_non_chair() {
@@ -5403,6 +5435,7 @@ council_run_advice_phase() {
               timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
               counted_as_approver:false}')"
         [[ "$seat_synthesizer" == "true" ]] && seat_rec="$(jq -c '.synthesizer = true' <<< "$seat_rec")"
+        jq -e '.claude_vote == true' <<< "$member" >/dev/null 2>&1 && seat_rec="$(jq -c '.claude_vote = true' <<< "$seat_rec")"
         [[ -n "$refusal" ]] && seat_rec="$(jq -c --arg r "$refusal" '.refusal = $r' <<< "$seat_rec")"
         [[ -n "$model_used" ]] && seat_rec="$(jq -c --arg b "$model_busy" \
             '.model_fallback = {from:$b, reason:"no-capacity-503"}' <<< "$seat_rec")"
@@ -6492,6 +6525,7 @@ council_write_summary_json() {
         --arg one_vote_per_vendor "$(council_one_vote_per_vendor_enabled && echo true || echo false)" \
         --arg seats_per_vendor "$(council_seats_per_vendor)" \
         --arg chair_folded_into "${COUNCIL_SEATING_CHAIR_FOLDED_INTO:-}" \
+        --arg claude_voter "${COUNCIL_SEATING_CLAUDE_VOTER:-}" \
         --arg dropped_seats "${COUNCIL_SEATING_DROPPED_SEATS:-0}" \
         --arg distinct_model_families "${COUNCIL_DISTINCT_MODEL_FAMILIES:-0}" \
         --arg responding_model_families "${COUNCIL_RESPONDING_MODEL_FAMILIES:+${COUNCIL_RESPONDING_MODEL_FAMILIES# }}" \
@@ -6570,6 +6604,7 @@ council_write_summary_json() {
             one_vote_per_vendor: ($one_vote_per_vendor == "true"),
             seats_per_vendor: (if $one_vote_per_vendor == "true" then ($seats_per_vendor | tonumber) else null end),
             chair_folded_into: (if $chair_folded_into == "" then null else $chair_folded_into end),
+            claude_voter: (if $claude_voter == "" then null else $claude_voter end),
             dropped_seats: ($dropped_seats | tonumber? // 0)
           },
           providers: $providers,
