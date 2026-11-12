@@ -2805,6 +2805,37 @@ r="$(_report "$(_resp 'src/pricing.ts:3 reads `RangeError: invalid cabin price`.
 VERDICT: APPROVE')")"
 if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
+test_case "a runtime-error quote with an adjacent trailing citation is checked"
+r="$(_report "$(_resp '`ValueError: something went terribly wrong` (src/pricing.ts:2).
+VERDICT: APPROVE')")"
+if jq -e '.quotes_verified == 0 and .quotes_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "genuine source does not excuse a runtime error with a trailing citation"
+r="$(_report "$(_resp 'src/pricing.ts:2 reads `cabin.basePrice ?? sailing.defaultPrice`.
+`ValueError: something went terribly wrong` (src/pricing.ts:2).
+VERDICT: APPROVE')")"
+if jq -e '.quotes_verified == 1 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "an unattributed plain-text runtime diagnostic is not a source quote"
+r="$(_report "$(_resp 'I exercised src/pricing.ts:2.
+
+The probe returned this diagnostic:
+
+```text
+ValueError: invalid response from fixture
+```
+
+VERDICT: REVISE')")"
+if jq -e '.quotes_unverified == 0 and .quotes_unverifiable_command == 1 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "a plain-text runtime diagnostic attributed to source is still checked"
+r="$(_report "$(_resp 'src/pricing.ts:2 reads:
+```text
+ValueError: invalid response from fixture
+```
+VERDICT: APPROVE')")"
+if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
 test_case "#3386: an example the seat makes up (\"a template like\") is not a fabricated quote"
 r="$(_report "$(_resp 'The new branch at src/pricing.ts:3 fires on any colon. So a template like `Request to https://api.example failed: %s` now ships whole as `[REDACTED]`.
 VERDICT: APPROVE')")"
@@ -2849,6 +2880,14 @@ if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >
 test_case "#3389: an elided quote with a changed token is still fabricated"
 r="$(_preport '`src/rbac.test.ts:2`: `!== "GET" || !endsWith(...)` reads awkwardly.')"
 if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+for changed_token in 'POSTER|endsWith' 'POST|neverendsWith' 'POST|endsWithExtra' 'POST|$endsWith' 'POST|endsWithé'; do
+    test_case "an abbreviated quote cannot match part of a longer token: $changed_token"
+    printf 'if (row.method !== "%s" || !row.path.%s("sync")) {\n' \
+        "${changed_token%%|*}" "${changed_token#*|}" > "$PROOT/src/token-boundaries.ts"
+    r="$(_preport 'src/token-boundaries.ts:1 reads `!== "POST" || !endsWith(...)`.')"
+    if jq -e '.quotes_verified == 0 and .quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+done
 
 # sail-cruisey #3390: two files share a basename. A seat that cites one by its
 # full path and then by basename means that one, not "unresolved".
@@ -4146,5 +4185,156 @@ if jq -e '.quotes_verified == 1 and .quotes_near_line == 1 and .quotes_partial =
 else
     test_fail "non-fence optimization lost later near-line accounting: $r"
 fi
+
+# Report-only partial accounting must not rescan unrelated short patterns for
+# non-fence units. Exercise the production wrapper and its normal deadline.
+test_case "threshold blockquotes across large files stay within the verifier budget"
+nonfence_root="$TEST_TMP_DIR/nonfence-budget"
+nonfence_response="$TEST_TMP_DIR/nonfence-budget.md"
+mkdir -p "$nonfence_root"
+python3 - "$nonfence_root" "$nonfence_response" <<'PY_NONFENCE_BUDGET'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+quotes = []
+for index in range(100):
+    first = f'const first_{index} = loadActualPrice(input);'
+    last = f'return applyActualTaxes_{index}(price, sailing);'
+    (root / f'file{index}.ts').write_text(first + '\n' + last + '\n' + 'x' * 1400000)
+    quotes.append(f'file{index}.ts:1 reads:\n> {first}\n> return missing_{index};\n> {last}\n')
+Path(sys.argv[2]).write_text('\n'.join(quotes) + '\nVERDICT: APPROVE\n')
+PY_NONFENCE_BUDGET
+r="$(council_response_quote_verification_json "$nonfence_response" "$nonfence_root")"
+if jq -e '.verification_failed == false and .quotes_verified == 100
+    and .quotes_partial == 0 and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "report-only non-fence accounting exhausted verification: $r"
+fi
+
+for fence_shape in missing present-reversed; do
+test_case "$fence_shape threshold fences across large files stay within the verifier budget"
+python3 - "$nonfence_root" "$nonfence_response" "$fence_shape" <<'PY_FENCE_BUDGET'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+quotes = []
+for index in range(100):
+    first = f'const first_{index} = loadActualPrice(input);'
+    last = f'return applyActualTaxes_{index}(price, sailing);'
+    short = [f'return missing_{index};']
+    if sys.argv[3] == 'present-reversed':
+        short = [f'return value_{index}_{line};' for line in range(65)]
+        (root / f'file{index}.ts').write_text(first + '\n' + '\n'.join(short) + '\n' + last + '\n' + 'x' * 1400000)
+        short.reverse()
+    quotes.append(f'file{index}.ts:1 reads:\n```ts\n{first}\n' + '\n'.join(short) + f'\n{last}\n```\n')
+Path(sys.argv[2]).write_text('\n'.join(quotes) + '\nVERDICT: APPROVE\n')
+PY_FENCE_BUDGET
+r="$(council_response_quote_verification_json "$nonfence_response" "$nonfence_root")"
+expected_partial=100
+[[ "$fence_shape" == present-reversed ]] && expected_partial=0
+if jq -e --argjson partial "$expected_partial" '.verification_failed == false and .quotes_verified == 100
+    and .quotes_partial == $partial and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "sparse per-file partial accounting exhausted verification: $r"
+fi
+done
+
+test_case "complete far quotes keep supplemental near-line work bounded"
+python3 - "$nonfence_root" "$nonfence_response" <<'PY_COMPLETE_BUDGET'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+quotes = [f'const verified_{index} = loadActualPrice(input);' for index in range(256)]
+(root / 'a.ts').write_text('// distant filler\n' * 100 + '\n'.join(quotes))
+citations = 'a.ts:1 ' + ' '.join(f'file{index}.ts:1' for index in range(100))
+Path(sys.argv[2]).write_text('\n\n'.join(citations + '\n\n`' + quote + '`' for quote in quotes)
+                            + '\nVERDICT: APPROVE\n')
+PY_COMPLETE_BUDGET
+r="$(council_response_quote_verification_json "$nonfence_response" "$nonfence_root")"
+if jq -e '.verification_failed == false and .quotes_verified == 256
+    and .fabricated == false' <<< "$r" >/dev/null; then
+    test_pass
+else
+    test_fail "supplemental near-line work rejected complete quotes: $r"
+fi
+
+# A complete far match must not hide a later bound near-line match either.
+test_case "a complete blockquote retains a later cited file's near-line match"
+r="$(council_response_quote_verification_json "$(_resp "a.ts:1 and b.ts:1
+
+> $REAL_NEAR
+> return applyTaxes(base, sailing.portFees);
+VERDICT: APPROVE")" "$near_root")"
+if jq -e '.quotes_verified == 1 and .quotes_near_line == 1 and .quotes_partial == 0
+    and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "complete match lost later near-line evidence: $r"; fi
+
+replacement_root="$TEST_TMP_DIR/replacement-claims"
+mkdir -p "$replacement_root/src"
+replacement_real='const actualPrice = loadActualPrice(input);'
+replacement_fake='const inventedPrice = fetchInventedPrice(input);'
+printf '%s\n' "$replacement_real" > "$replacement_root/src/pricing.ts"
+git -C "$replacement_root" init -q
+git -C "$replacement_root" add src/pricing.ts
+git -C "$replacement_root" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    -c core.hooksPath=/dev/null commit -qm baseline
+for lead in 'is wrong; our fixed version is' \
+    ': I recommend a replacement, and the code is' \
+    ': I suggest this patch, and this code is' \
+    ': I recommend a replacement, but the code is' \
+    ': I recommend a replacement, and the current code is' \
+    ': I recommend a replacement, and the file reads'; do
+    test_case "replacement ownership preserves explicit source claims: $lead"
+    response="$(_resp "src/pricing.ts:1 reads \`$replacement_real\`.
+
+src/pricing.ts:1 $lead \`$replacement_fake\`.
+VERDICT: APPROVE")"
+    expected_proposal=true
+    case "$lead" in *'but the code'*|*'the current code'*|*'the file reads'*) expected_proposal=false ;; esac
+    r="$(council_response_quote_verification_json "$response" "$replacement_root")"
+    if jq -e --argjson proposal "$expected_proposal" '.verification_failed == false
+        and .quotes_verified == 1 and .fabricated == ($proposal | not)
+        and .quotes_unverifiable_proposed == (if $proposal then 1 else 0 end)
+        and .quotes_attributed_unverified == (if $proposal then 0 else 1 end)' <<< "$r" >/dev/null; then
+        test_pass
+    else
+        test_fail "replacement ownership changed current-source checks: $r"
+    fi
+done
+
+test_case "a replacement fence after an owned colon lead-in remains proposed without another real quote"
+response="$(_resp 'src/pricing.ts:1 is wrong; our fixed version is:
+```ts
+const nextPrice = fetchUpdatedPrice(input);
+```
+VERDICT: APPROVE')"
+r="$(council_response_quote_verification_json "$response" "$replacement_root")"
+if jq -e '.verification_failed == false and .quotes_verified == 0
+    and .quotes_unverifiable_proposed == 1 and .quotes_unverified == 0
+    and .fabricated == false' <<< "$r" >/dev/null &&
+    ! council_response_is_blind "$response" "$replacement_root"; then
+    test_pass
+else
+    test_fail "colon replacement was rejected without a genuine comparison quote: $r"
+fi
+
+test_case "an unresolved extensionless citation cannot reuse earlier source attribution"
+r="$(_xreport 'scripts/entry.mjs:2 reads:
+missing/path:1 reads `return fetch_user(user_id) + 1`.
+VERDICT: REVISE')"
+if jq -e '.citations == 1 and .citations_unresolved == 1 and .quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "a bare hostname and port do not become an extensionless file citation"
+r="$(_xreport 'The endpoint host/path:80 is unavailable. VERDICT: REVISE')"
+if jq -e '.citations == 0 and .citations_unresolved == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "result wording alone does not turn current implementation into a probe input"
+r="$(_xreport 'The current implementation `return fetch_user(user_id) + 1` returns an invalid value (scripts/entry.mjs:2).')"
+if jq -e '.quotes_attributed_unverified == 1 and .fabricated == true' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
+
+test_case "an explicitly supplied input retains its result wording"
+r="$(_xreport 'I tested input `return fetch_user(user_id) + 1` returns an invalid value. References: scripts/entry.mjs:2.')"
+if jq -e '.quotes_attributed_unverified == 0 and .fabricated == false' <<< "$r" >/dev/null; then test_pass; else test_fail "report: $r"; fi
 
 test_summary

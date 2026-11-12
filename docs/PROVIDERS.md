@@ -1,5 +1,10 @@
 # Provider Wiring Map
 
+Named OpenAI-compatible presets use their own endpoint and credential name.
+The generic slot's `OPENAI_COMPAT_BASE_URL` and `OPENAI_COMPAT_API_KEY_ENV`
+do not override them, including when the helper is invoked directly. Explicit
+`--base-url` and `--api-key-env` arguments still override a preset.
+
 Provider Registry 2.0 owns shared identity and runtime policy. Adding or
 modifying a provider starts with two parity-enforced rows in
 `scripts/lib/provider-registry.sh`; provider-specific command, model, auth, and
@@ -183,6 +188,38 @@ Read-only roles disable local tools. The isolated child receives only
 excluded from Council, and gateway identity does not establish independent
 model-family diversity: a proxy model name can resolve to any upstream. Local
 readiness does not prove entitlement, quota, tool support or billed cost.
+
+## UberLLM setup
+
+`uberllm-agent` uses the same OpenAI-compatible tool-loop helper at
+`https://api.uberllm.dev/v1`. Get a key from
+[UberLLM](https://uberllm.dev/signup), set `UBERLLM_API_KEY`, and choose a
+`vendor/model` id from `GET https://api.uberllm.dev/v1/models` (for example
+`deepseek/deepseek-v4-flash`). No model is selected automatically. Per-model
+prices are listed at [uberllm.dev/models](https://uberllm.dev/models).
+
+Model selection uses `UBERLLM_MODEL`, then `OCTOPUS_UBERLLM_MODEL`, then
+`OPENAI_COMPAT_MODEL`, then the string `providers.uberllm.default` in
+`~/.claude-octopus/config/providers.json`. `OCTOPUS_PROVIDERS_CONFIG` can select
+another file. Detection, health, readiness and dispatch share this resolution.
+An exact seat such as `uberllm-agent:deepseek/deepseek-v4-flash` uses its model
+pin without requiring a default. `UBERLLM_ALLOWED_MODELS` restricts dispatch
+models; missing models, unsafe pins and invalid fallbacks fail closed.
+Bare selections may use the first allowed model when their configured model is
+excluded. Exact seat pins are never replaced. Fleet diversity uses the family
+of the model that will run, including any permitted fallback.
+Configured defaults and automatic fallbacks reject explicit-only models. Select
+those models with an environment override or a qualified seat pin.
+
+Read-only roles disable local tools. The isolated child receives only
+`UBERLLM_API_KEY` and the helper's approved runtime settings. This provider is
+excluded from Council, and gateway identity does not establish independent
+model-family diversity. Local readiness does not prove entitlement, quota,
+tool support or billed cost.
+
+Cost reports use shared model estimates. DeepSeek Flash uses its published
+[peak, uncached input and output rates](https://api-docs.deepseek.com/quick_start/pricing/)
+as a fallback; UberLLM's live price can differ.
 
 ## Perplexity Agent API
 
@@ -370,7 +407,7 @@ Use `VERTEXAI_API_KEY` or `GOOGLE_API_KEY` inside the selected provider's
 
 codex, commandcode, claude, claude-sdk (Agent SDK seat), anthropic-api (text-only Messages seat), agy (Antigravity,
 Google seat), perplexity, opencode, openrouter, orcarouter, atlascloud,
-cheaperinference, api-route, litellm, openai-compatible, openai-tools, openai-compatible-agent, cursor-agent, grok,
+cheaperinference, api-route, litellm, uberllm, openai-compatible, openai-tools, openai-compatible-agent, cursor-agent, grok,
 qwen, ollama, copilot, vibe, and kimi.
 
 An explicit `vibe` readiness or health check accepts `MISTRAL_API_KEY`,

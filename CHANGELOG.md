@@ -4,6 +4,14 @@
 
 ### Added
 
+- UberLLM as an OpenAI-compatible agent provider. `uberllm-agent` uses the
+  shared tool-loop helper with `UBERLLM_API_KEY` and an explicit
+  `UBERLLM_MODEL`, `OCTOPUS_UBERLLM_MODEL` or `providers.uberllm.default`
+  model. It is excluded from Council, like the other gateway agents.
+  Readiness and fleet selection use the dispatched model and its allowlist
+  fallback. Exact seats keep their model pins, and MCP preserves model policy.
+  DeepSeek Flash estimates use its published peak, uncached fallback rates.
+
 - `OCTOPUS_AGY_FALLBACK_MODELS` lists Gemini models for agy to retry, in
   order, when the backend answers 503 "No capacity available for model". The
   council seat records the model that answered, with `model_fallback.from`, so
@@ -19,6 +27,18 @@
   bare-PID stdout.
 
 ### Fixed
+
+- Named OpenAI-compatible presets keep their own endpoint and credential
+  selection when the generic provider slot is configured. Direct helper calls
+  no longer inherit that slot's URL or credential name. Explicit flags still
+  take priority.
+
+- Full unit coverage uses six weighted macOS lanes and four Linux lanes. This
+  leaves more room for longer hosted macOS suite durations while retaining
+  every suite and the existing 20-minute step limit.
+
+- Unit shards include newer hosted macOS suite timings in their duration
+  weights. The full suite and 20-minute per-shard timeout remain in place.
 
 - Council seats reviewing a plan are no longer marked blind for quoting the
   plan's proposed code under the source file it would change (sail-cruisey
@@ -65,6 +85,12 @@
   dropped as blind beside real citations. After a content verb, as in
   "x.ts:2 contains the code built as", the span is still the file's code and is
   checked, unless "I" or "we" built it. Quote reports also gain
+  `quotes_partial`, which counts fences that verify through a whole-fence
+  elision or the two-thirds specific-line threshold in a cited file or diff side,
+  but lack a complete match in any checked source, short lines included. Short
+  lines do not count toward that threshold; a whole-fence elision match does
+  not require it. Lines can match separately and out of
+
   `quotes_partial`, which counts fences that verify at the two-thirds
   threshold in a cited file or diff side, but lack a complete match in any
   checked source, short lines included. Lines can match separately and out of
@@ -75,6 +101,109 @@
   It does not change the verdict. Optional diff refinement no longer
   prevents a later quote from receiving the normal required lookup after a
   timeout. Partial accounting stops at its first missing line, batches short
+  literal matches into bounded index batches after sparse per-file substring
+  searches, and reuses retained-fragment checks across quotes. Non-fence quotes
+  skip report-only partial scans in source files and diff sides, while later
+  bound files can still supply near-line evidence after a complete match,
+  within a 64 KiB per-quote refinement budget. Exhausting that supplemental
+  budget can undercount near-line matches but does not reject a verified quote.
+  First-person builders also recognize modifiers such as "I just built as"
+  and contracted subjects such as "I've built as" and "we'd built as",
+  without excusing code attributed to someone else. An explicit later source
+  subject such as "but the file reads" or "but the file itself reads" restarts
+  the source claim even in the same sentence.
+  Mixed diff fences skip added-side refinement when their kept source code
+  already matches completely, preserving time for required evidence checks.
+  Later sentences require an explicit source subject before attributing a quote,
+  preserving reviewer-owned calculations and reproduction code.
+  Patch-only lead-ins such as "I recommend this patch. Apply it as follows:"
+  preserve the preceding proposal without excusing a later current-source claim.
+  Inline code punctuation and proposal words no longer alter the surrounding
+  prose's ownership or sentence boundaries.
+  Partial-fence refinement in unrelated cited files has its own 64 KiB
+  per-quote budget. If the next complete file exceeds that budget, reporting
+  retains the verified partial result without searching further unbound files.
+  Report-only elision and diff-side scans share a fixed work budget. Exhaustion
+  retains source verification and conservative partial status; required evidence
+  matching keeps its normal checks.
+- Parallel cleanup finishes a stopped worker's durable execution contract as
+  cancelled, so run status no longer reports that worker as still running.
+  Native Agent Teams seats remain running until their own completion is known.
+
+- Reclaiming an exited invocation's output claim cancels the running seats its
+  owner record names, including seats inherited through an interrupted reclaim.
+  A different task ID that maps to the same result file is no longer blocked by
+  the exited owner's seat. Probe status rows use the canonical spawn seat ID.
+  An abnormal controller exit stops its workers before releasing their claims,
+  and a results path through a symlink and `..` addresses the same claim
+  directory as the shell.
+- Parallel dispatch recovers interrupted contract writes before checking a new
+  seat, and interruption cleanup releases claims with relative result paths.
+  Unrecoverable ledgers and reused seats keep their saved outputs intact.
+- Parallel dispatch preserves saved results and completion markers when a
+  repeated task ID cannot be admitted by its durable run contract. Use a new
+  task ID for a new attempt in the same run.
+- Large parallel task batches retain their scoped results without exceeding
+  command-line argument limits, and invalid scopes report an aggregation error.
+  A spawn that fails after recording a running seat marks that seat cancelled
+  in the status ledger. Interrupted shell-only claims report their manual
+  recovery procedure.
+- The agent run summary no longer reports a provider's successful seat as
+  failed when another of its seats times out. The status ledger kept the
+  latest row per agent name, so a probe with two Claude seats printed "2 of 2
+  agents failed or timed out" after one seat's 603-second timeout replaced the
+  other seat's completed result. The same lookup left that result out of the
+  outputs offered to synthesis. Rows are now kept per seat, by seat ID or else
+  by result file, in the summary, the `agents.json` snapshot and the output
+  list. Probe and aggregate summaries count only their own seats, because the
+  ledger spans every command in a session.
+- Output claims publish their owner atomically, so an interrupted claim
+  preparation cannot permanently block retries. Live owners keep their outputs.
+  Workers that fail without recording a terminal status are marked cancelled.
+  When a durable execution contract exists, another attempt requires a new task
+  ID in the same run.
+- Quota cleanup delivers an identity-bound TERM to the timeout supervisor and
+  lets its handler finish. Reparented helpers are cleaned up even when the
+  provider leader has been reaped, and unrelated process exits cannot exhaust
+  global-snapshot retries. The handoff never forcibly kills a pending handler.
+  macOS zombie admission in optional owned-group cleanup uses native zombie lookup.
+- A peer seat's quota marker no longer relabels an externally terminated call
+  or adds a false circuit-breaker failure. Quota stop attribution stays local
+  to the current attempt even when its diagnostic cannot be written.
+- Quota fast-fails preserve a provider's own temporary-failure status and auth
+  retry behavior. Quota stops update the provider circuit breaker, and persisted
+  cooldown timestamps correctly block repeat dispatch until their deadline. Future timestamps
+  from clock rollback or corrupt state allow a probe instead of an unbounded wait.
+  Successful recovery clears that failure history so separate quota episodes
+  do not count as consecutive failures. Parallel quota failures update the
+  breaker together, and an unwritable diagnostic marker cannot prevent worker
+  completion after a quota stop.
+  Lock contention does not turn an expired cooldown into an open circuit, and
+  failure-log trimming uses private temporary files without following stale links.
+  Quota stops also clean up owned provider and timer processes, so a stopped
+  call does not wait for a leftover timeout before returning. Refused handoffs
+  allow at most five attempts, with a visible error if cleanup cannot finish.
+- Direct spawns respect terminal quota and auth markers even when no transient
+  cooldown is active. Provider reset hints remain inside untrusted result frames.
+- Quota and termination status summaries use launcher-authored reasons so provider diagnostics
+  cannot enter synthesis instructions through trusted failure metadata.
+- Run-local smoke failures keep their health-failure reason. External SIGTERM
+  preserves exit 143 through spawn results and lifecycle events instead of
+  claiming the provider exceeded its timeout.
+  Synchronous dispatch also records a failed termination in status and usage
+  rather than a timeout, with a launcher-authored reason.
+
+## [11.22.2] - 2026-11-11
+
+### Fixed
+
+- Managed Tangle output coverage checks declared artifacts rather than requiring model responses to repeat read-only context references. Missing outputs and unavailable coverage evidence remain blocking.
+
+- Large `probe-single --perspective-file` prompts pass startup validation
+  promptly without rewriting their content. Empty and whitespace-only files
+  are still rejected before provider dispatch. Fixes [#1295](https://github.com/nyldn/claude-octopus/issues/1295)
+  through [#1296](https://github.com/nyldn/claude-octopus/pull/1296).
+
   literal matches into one source scan and reuses retained-fragment checks
   across quotes, preserving near-line accounting.
   First-person builders also recognize modifiers such as "I just built as"
@@ -82,6 +211,14 @@
 - Explicit GPT-5.4 Mini API usage uses the documented $0.75 input and $4.50
   output rates per million tokens. Capability checks now recognize its image
   input and reasoning support. Model defaults and saved choices are preserved.
+  See [#1294](https://github.com/nyldn/claude-octopus/pull/1294).
+
+- Review verification sends complete findings in bounded batches with relevant
+  patch evidence. Final admission rejects oversized verifier requests instead of
+  clipping their tails. Incomplete verification returns failure with recovery
+  artifacts and never applies unverified findings. Verified findings from a
+  partial reviewer fleet can still receive corrections. Synthesis cannot drop,
+  invent or change verified findings. See [#1290](https://github.com/nyldn/claude-octopus/pull/1290).
 
 ## [11.22.1] - 2026-11-11
 
