@@ -7,6 +7,10 @@
 - Council seat prompts limit reading to the files and diffs the council
   supplies and cited files opened to check a finding, instead of exploring the
   repository. Set `OCTOPUS_COUNCIL_BOUNDED_READING=0` to drop the instruction.
+- Council `summary.json` reports real token usage and cost for Claude and
+  Codex seats: per seat, per phase and for the round. Each dispatch is also
+  appended to `usage.jsonl` in the run directory. Set
+  `OCTOPUS_COUNCIL_SEAT_USAGE=0` to keep plain text seat output.
 
 ### Fixed
 
