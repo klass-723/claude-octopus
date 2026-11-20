@@ -1,14 +1,18 @@
 ---
 name: skill-factory
-description: "Run a full build-and-ship pipeline from a spec — use for hands-off project generation"
 disable-model-invocation: true
+aliases:
+  - factory
+  - dark-factory
+  - build-from-spec
+  - autonomous-build
+description: "Run a full build-and-ship pipeline from a spec — use for hands-off project generation"
+execution_mode: enforced
+validation_gates:
+  - spec_file_validated
+  - orchestrate_sh_executed
+  - factory_report_exists
 ---
-
-> **Host: Codex CLI** — This skill was designed for Claude Code and adapted for Codex.
-> Cross-reference commands use installed skill names in Codex rather than `/octo:*` slash commands.
-> Use the active Codex shell and subagent tools. Do not claim a provider, model, or host subagent is available until the current session exposes it.
-> For host tool equivalents, see `skills/blocks/codex-host-adapter.md`.
-
 
 # STOP - SKILL ALREADY LOADED
 DO NOT call Skill() again. Execute directly.
@@ -111,11 +115,16 @@ fi
 
 **Skip with `--fast` or when user explicitly requests speed over thoroughness.**
 
+---
 
 ### STEP 5: Execute orchestrate.sh factory (MANDATORY — Bash Tool)
 ```bash
 "${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${HOME}/.claude-octopus/plugin}}/scripts/orchestrate.sh" factory --spec "<spec_path>"
 ```
+
+If the command exits nonzero, report the error, show logs from
+`~/.claude-octopus/logs/`, and stop. Do not run Steps 6 through 8 or use an earlier
+run's artifacts after a failed execution.
 
 With optional flags based on Step 1 answers:
 - `--holdout-ratio <value>` if custom ratio requested
@@ -141,6 +150,13 @@ fi
 cat "$REPORT_FILE"
 ```
 If validation fails: report error, show logs from `~/.claude-octopus/logs/`, DO NOT proceed, DO NOT substitute.
+
+Factory requires at least two structured generated scenarios so implementation
+has a visible case and evaluation has an independent holdout. Missing or empty
+holdout evidence stops the run without a score or completion report. Preserve
+evaluation failures, including on retries, instead of presenting a successful run.
+A provider response must contain a score from 0 to 1 or usable scenario verdicts;
+empty, diagnostic-only or malformed responses do not establish an evaluation.
 
 ### STEP 7: Read Scores and Present Results (MANDATORY)
 ```bash

@@ -11,6 +11,12 @@ import unittest
 
 ROOT = Path(os.environ.get('WORKFLOW_SKILL_ROOT', Path(__file__).resolve().parents[2]))
 
+# Direct fixture children and extracted recipes must select only test repositories.
+for git_name in tuple(os.environ):
+    if git_name.startswith('GIT_'):
+        os.environ.pop(git_name)
+os.environ.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+
 
 class WorkflowResultTest(unittest.TestCase):
     def setUp(self):
@@ -36,7 +42,11 @@ class WorkflowResultTest(unittest.TestCase):
         self.engine.write_text(f'#!{sys.executable} -I\n' + '''import os,json
 from pathlib import Path
 import sys
-phase = sys.argv[1]
+phase = next(arg for arg in sys.argv[1:] if not arg.startswith("--"))
+if phase == "ink" and os.environ.get("FIXTURE_AUDIT_CAPTURE"):
+    Path(os.environ["FIXTURE_AUDIT_CAPTURE"]).write_text(json.dumps({"prompt": sys.argv[2], "strategy": os.environ.get("OCTOPUS_OVERSIZE_STRATEGY")}))
+    if os.environ.get("FIXTURE_AUDIT_MUTATE"):
+        Path("audit-source.txt").write_text("changed during audit\\n")
 if phase == "define" and os.environ.get("FIXTURE_RESEARCH_CAPTURE"):
     research = sys.argv[3] if len(sys.argv) > 3 else ""
     source = os.environ.get("FIXTURE_RESEARCH_MUTATE")
@@ -46,11 +56,13 @@ if phase == "define" and os.environ.get("FIXTURE_RESEARCH_CAPTURE"):
         else:
             Path(source).write_text("unverified replacement")
     Path(os.environ["FIXTURE_RESEARCH_CAPTURE"]).write_text(json.dumps({"path": research, "content": Path(research).read_text() if research else ""}))
-prefix = {"define":"grasp-consensus", "develop":"tangle-validation", "deliver":"delivery", "ink":"delivery"}[phase]
+prefix = {"probe":"probe-synthesis", "define":"grasp-consensus", "develop":"tangle-validation", "deliver":"delivery", "ink":"delivery"}[phase]
 directory = Path(os.environ["FIXTURE_RESULTS"])
 mode = os.environ.get("FIXTURE_MODE", "complete")
 if mode != "missing":
-    if phase == "define":
+    if phase == "probe":
+        text = "# PROBE Phase Synthesis\\n## Original Task: fixture\\nCurrent findings\\n*Synthesized from " + ("0" if mode == "invalid" else "2") + " research threads (task group: fixture)* [inference]\\n"
+    elif phase == "define":
         text = "# Consensus\\n*Consensus built from multiple agent perspectives (task group: fixture; synthesizer: " + ("none" if mode == "invalid" else "codex") + ")*\\n"
     elif phase == "develop":
         text = "# TANGLE Phase Validation Report\\n<!-- octopus-task-bytes: 7 -->\\n## Task: fixture\\n## Generated: fixture\\n\\n### Quality Gate: " + ("UNKNOWN" if mode == "invalid" else "PASSED") + "\\n"
@@ -65,26 +77,251 @@ sys.exit(1 if mode == "failed" else 0)
 ''')
         self.engine.chmod(0o755)
         self.env = {k: v for k, v in os.environ.items()
-                    if not k.startswith(('CLAUDE_', 'CODEX_', 'DROID_'))}
+                    if not k.startswith(('CLAUDE_', 'CODEX_', 'DROID_', 'GIT_'))}
         self.env.pop('OCTOPUS_STATE_PROJECT_ROOT', None)
         self.env.pop('OCTOPUS_WORKFLOW_STATE_DIR', None)
         self.env.pop('OCTOPUS_PROJECT_PERSISTENCE', None)
-        self.env.update(HOME=str(self.home), CLAUDE_PLUGIN_DATA=str(self.workspace),
+        self.env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                        HOME=str(self.home), CLAUDE_PLUGIN_DATA=str(self.workspace),
                         CLAUDE_CODE_SESSION_ID='session-a', FIXTURE_RESULTS=str(self.results),
                         TMPDIR=str(self.home), OCTOPUS_WORKFLOW_INVOCATION_ID='marker')
 
     def skill_command(self, phase, generated=False):
-        name = 'skill-ship' if phase == 'ink' else 'flow-' + phase
+        if phase == 'ink':
+            self.prepare_audit_repository()
+        name = ('octopus-research' if generated else 'skill-deep-research') if phase == 'probe' else (
+            'skill-ship' if phase == 'ink' else 'flow-' + phase)
         path = ROOT / ('skills' if generated else '.claude/skills') / name / 'SKILL.md'
         blocks = re.findall(r'```bash\n(.*?)\n```', path.read_text(), re.S)
         return next(block for block in blocks
                     if re.search(r'orchestrate\.sh[" ]+ ' + phase + r' ', block)
-                    or 'orchestrate.sh ' + phase + ' ' in block)
+                    or 'orchestrate.sh ' + phase + ' ' in block
+                    or phase == 'probe' and 'orchestrate.sh' in block and '--intensity=' in block)
+
+    def audit_git(self, *args):
+        env = {key: value for key, value in self.env.items() if not key.startswith('GIT_')}
+        env.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                   GIT_AUTHOR_NAME='Fixture', GIT_AUTHOR_EMAIL='fixture@example.invalid',
+                   GIT_COMMITTER_NAME='Fixture', GIT_COMMITTER_EMAIL='fixture@example.invalid')
+        return subprocess.check_output(['git', *args], cwd=self.home, env=env,
+                                       stderr=subprocess.DEVNULL, text=True).strip()
+
+    def prepare_audit_repository(self):
+        if hasattr(self, 'audit_base'):
+            return
+        self.audit_git('init', '-q', '-b', 'main')
+        # Runtime artifacts belong to this fixture, not to its delivered code.
+        (self.home / '.git/info/exclude').write_text('*\n')
+        self.audit_git('commit', '--allow-empty', '-qm', 'audit base')
+        self.audit_base = self.audit_git('rev-parse', 'HEAD')
+        (self.home / 'audit-source.txt').write_text('SOURCE_REQUIRES_AUDIT\n' * 550 + 'TAIL_REQUIRES_AUDIT\n')
+        self.audit_git('add', '-f', 'audit-source.txt')
+        self.audit_git('commit', '-qm', 'delivered source')
+        self.env['SHIP_AUDIT_BASE'] = self.audit_base
+
+    def test_shipping_audit_receives_the_complete_committed_diff(self):
+        self.prepare_audit_repository()
+        capture = self.home / 'audit-capture.json'
+        self.env['FIXTURE_AUDIT_CAPTURE'] = str(capture)
+        for generated in (False, True):
+            result = self.run_skill('ink', generated=generated)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads(capture.read_text())
+            self.assertIn(self.audit_git('rev-parse', 'HEAD'), request['prompt'])
+            self.assertIn(self.audit_base, request['prompt'])
+            self.assertIn('+TAIL_REQUIRES_AUDIT', request['prompt'])
+            self.assertEqual(request['strategy'], 'fail')
+
+    def test_shipping_audit_stops_for_dirty_empty_oversized_or_changing_source(self):
+        for generated in (False, True):
+            for mode in ('dirty', 'empty', 'oversized', 'changed'):
+                with self.subTest(generated=generated, mode=mode):
+                    self.prepare_audit_repository()
+                    capture = self.home / 'audit-capture.json'
+                    capture.unlink(missing_ok=True)
+                    self.env['FIXTURE_AUDIT_CAPTURE'] = str(capture)
+                    if mode == 'dirty':
+                        (self.home / 'audit-source.txt').write_text('uncommitted source\n')
+                    elif mode == 'empty':
+                        self.env['SHIP_AUDIT_BASE'] = self.audit_git('rev-parse', 'HEAD')
+                    elif mode == 'oversized':
+                        (self.home / 'audit-source.txt').write_text('x' * 70000)
+                        self.audit_git('add', 'audit-source.txt')
+                        self.audit_git('commit', '-qm', 'large source')
+                    else:
+                        self.env['FIXTURE_AUDIT_MUTATE'] = '1'
+                    try:
+                        result = self.run_skill('ink', generated=generated)
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                        self.assertNotIn('AUDIT COMPLETE:', result.stdout)
+                        self.assertEqual(capture.exists(), mode == 'changed')
+                    finally:
+                        self.env.pop('FIXTURE_AUDIT_MUTATE', None)
+                        self.env['SHIP_AUDIT_BASE'] = self.audit_base
+                        self.audit_git('reset', '--hard', '-q', 'HEAD')
+                        # Restore a small committed diff for the next control.
+                        (self.home / 'audit-source.txt').write_text('SOURCE_REQUIRES_AUDIT\n')
+                        self.audit_git('add', 'audit-source.txt')
+                        self.audit_git('commit', '--allow-empty', '-qm', 'restore fixture')
+
+    def test_shipping_audit_includes_paths_outside_the_current_subdirectory(self):
+        self.prepare_audit_repository()
+        inside = self.home / 'inside'
+        inside.mkdir()
+        (inside / 'input.txt').write_text('INSIDE_SOURCE_REQUIRES_AUDIT\n')
+        self.audit_git('add', '-f', 'inside/input.txt')
+        self.audit_git('commit', '-qm', 'nested change')
+        self.audit_git('config', 'diff.relative', 'true')
+        capture = self.home / 'audit-capture.json'
+        self.env['FIXTURE_AUDIT_CAPTURE'] = str(capture)
+        for generated in (False, True):
+            with self.subTest(generated=generated):
+                result = subprocess.run(['bash', '-c', self.skill_command('ink', generated)],
+                                        cwd=inside, env=self.env, capture_output=True,
+                                        text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                prompt = json.loads(capture.read_text())['prompt']
+                self.assertIn('+TAIL_REQUIRES_AUDIT', prompt)
+                self.assertIn('+INSIDE_SOURCE_REQUIRES_AUDIT', prompt)
+
+    def test_shipping_audit_rejects_submodule_changes_even_when_configured_ignored(self):
+        self.prepare_audit_repository()
+        (self.home / 'dependency').mkdir()
+        self.audit_git('-C', 'dependency', 'init', '-q')
+        dependency_source = self.home / 'dependency/source.py'
+        dependency_source.write_text('original dependency source\n')
+        self.audit_git('-C', 'dependency', 'add', 'source.py')
+        self.audit_git('-C', 'dependency', 'commit', '-qm', 'old dependency')
+        old_dependency = self.audit_git('-C', 'dependency', 'rev-parse', 'HEAD')
+        self.audit_git('update-index', '--add', '--cacheinfo', '160000,' + old_dependency + ',dependency')
+        self.audit_git('commit', '-qm', 'dependency base')
+        dependency_base = self.audit_git('rev-parse', 'HEAD')
+        dependency_source.write_text('DEPENDENCY_SOURCE_REQUIRES_REVIEW\n')
+        self.audit_git('-C', 'dependency', 'add', 'source.py')
+        self.audit_git('-C', 'dependency', 'commit', '-qm', 'new dependency')
+        new_dependency = self.audit_git('-C', 'dependency', 'rev-parse', 'HEAD')
+        self.audit_git('update-index', '--cacheinfo', '160000,' + new_dependency + ',dependency')
+        (self.home / 'audit-source.txt').write_text('ordinary source update\n')
+        self.audit_git('add', 'audit-source.txt')
+        self.audit_git('commit', '-qm', 'source and dependency update')
+        self.audit_git('config', 'diff.ignoreSubmodules', 'all')
+        self.audit_git('config', 'diff.relative', 'true')
+        self.audit_git('config', 'color.ui', 'always')
+        capture = self.home / 'audit-capture.json'
+        self.env['FIXTURE_AUDIT_CAPTURE'] = str(capture)
+        for change, base in (('updated', dependency_base), ('added', self.audit_base),
+                             ('unchanged', self.audit_git('rev-parse', 'HEAD')),
+                             ('removed', self.audit_git('rev-parse', 'HEAD'))):
+            if change == 'unchanged':
+                (self.home / 'audit-source.txt').write_text('ordinary source without dependency change\n')
+                self.audit_git('add', 'audit-source.txt')
+                self.audit_git('commit', '-qm', 'ordinary source only')
+            if change == 'removed':
+                self.audit_git('rm', '--cached', 'dependency')
+                self.audit_git('commit', '-qm', 'remove dependency')
+            self.env['SHIP_AUDIT_BASE'] = base
+            for generated in (False, True):
+                with self.subTest(generated=generated, change=change):
+                    capture.unlink(missing_ok=True)
+                    result = self.run_skill('ink', generated=generated)
+                    if change == 'unchanged':
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn('AUDIT COMPLETE:', result.stdout)
+                        self.assertIn('+ordinary source without dependency change',
+                                      json.loads(capture.read_text())['prompt'])
+                        continue
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn('submodule source requires separate complete review', result.stderr)
+                    self.assertNotIn('AUDIT COMPLETE:', result.stdout)
+                    self.assertFalse(capture.exists(), 'incomplete submodule audit dispatched')
+
+    def test_shipping_audit_rejects_binary_changes_before_dispatch(self):
+        self.prepare_audit_repository()
+        capture = self.home / 'audit-capture.json'
+        self.env['FIXTURE_AUDIT_CAPTURE'] = str(capture)
+        # Include quoting-sensitive names and an explicitly binary text file.
+        # NULs beyond the first read chunk and outside update-patch context must
+        # still reject forced-text assets. Include both old and deleted blobs.
+        large_binary = b'unchanged context\n' * 5000 + b'old\x00bytes\n' + b'same context\n' * 5000
+        for filename, content, forced in (('asset file.bin', b'old\x00bytes', False),
+                                          ('asset\tfile\n.bin', b'old\x00bytes', False),
+                                          ('declared.bin', b'print("old")\n', False),
+                                          ('forced.bin', large_binary, True),
+                                          ('forced\tline\n.bin', large_binary, True)):
+            path = self.home / filename
+            (self.home / '.gitattributes').write_text('*.bin diff\n' if forced else 'declared.bin -diff\n')
+            self.audit_git('add', '-f', '.gitattributes')
+            base = self.audit_git('rev-parse', 'HEAD')
+            for change in ('added', 'updated', 'unchanged', 'removed'):
+                if change in ('added', 'updated'):
+                    path.write_bytes(content if change == 'added' else content + b'new')
+                    self.audit_git('add', '-f', '--', filename)
+                elif change == 'removed':
+                    self.audit_git('rm', '--', filename)
+                else:
+                    (self.home / 'audit-source.txt').write_text(f'ordinary source update {filename!r}\n')
+                    self.audit_git('add', 'audit-source.txt')
+                self.audit_git('commit', '-qm', change + ' asset')
+                self.env['SHIP_AUDIT_BASE'] = base
+                # Repository display settings must not hide missing coverage.
+                self.audit_git('config', 'diff.relative', 'true')
+                self.audit_git('config', 'color.ui', 'always')
+                for generated in (False, True):
+                    with self.subTest(filename=filename, change=change, generated=generated):
+                        capture.unlink(missing_ok=True)
+                        result = self.run_skill('ink', generated=generated)
+                        if change == 'unchanged':
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            self.assertIn('AUDIT COMPLETE:', result.stdout)
+                            self.assertIn('+ordinary source update', json.loads(capture.read_text())['prompt'])
+                        else:
+                            self.assertNotEqual(result.returncode, 0, result.stdout)
+                            self.assertIn('binary content requires separate complete review', result.stderr)
+                            self.assertNotIn('AUDIT COMPLETE:', result.stdout)
+                            self.assertFalse(capture.exists(), 'incomplete binary audit dispatched')
+                base = self.audit_git('rev-parse', 'HEAD')
+
+    def test_research_only_accepts_its_current_successful_invocation(self):
+        for generated in (False, True):
+            for mode in ('complete', 'failed', 'missing', 'foreign', 'invalid'):
+                with self.subTest(generated=generated, mode=mode):
+                    result = self.run_skill('probe', mode, generated)
+                    if mode == 'complete':
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn('probe-synthesis-current.md', result.stdout)
+                    else:
+                        self.assertNotEqual(result.returncode, 0, result.stdout)
+                        self.assertNotIn('VALIDATION PASSED', result.stdout)
+
+    def test_actual_probe_writer_binds_its_invocation(self):
+        result = self.validator(self.actual_probe_report, 'probe')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('probe-synthesis-fixture.md', result.stdout)
+
+    def actual_probe_report(self):
+        script = r'''
+source "$FIXTURE_ROOT/scripts/lib/heuristics.sh"
+log() { :; }
+probe_result_file_is_usable() { return 0; }
+probe_synthesis_byte_length() { printf '0'; }
+probe_synthesis_budget_bytes() { printf '4096'; }
+build_probe_synthesis_context() { printf 'current research'; }
+_aggregate_pick_synth_agent() { printf 'fixture'; }
+run_agent_sync() { printf 'current findings'; }
+get_cache_key() { printf 'fixture'; }
+report_probe_cache_result() { :; }
+guard_output() { :; }
+printf 'current provider findings' > "$RESULTS_DIR/fixture-probe-fixture-1.md"
+synthesize_probe_results fixture 'Current question' 1
+'''
+        subprocess.run(['bash', '-c', script], check=True, capture_output=True,
+                       env=dict(self.env, FIXTURE_ROOT=str(ROOT), RESULTS_DIR=str(self.results)))
 
     def run_skill(self, phase, mode='complete', generated=False):
         self.env['FIXTURE_MODE'] = mode
         return subprocess.run(['bash', '-c', self.skill_command(phase, generated)],
-                              env=self.env, cwd=self.home, text=True,
+                              env=dict(self.env, research_intensity='quick', research_question='fixture',
+                                       focus_choice='technical', format_choice='summary'), cwd=self.home, text=True,
                               capture_output=True, timeout=15)
 
     def assert_rejected(self, result, diagnostic):
@@ -633,8 +870,9 @@ sys.exit(m.main())
         for directory in (self.workspace / 'results', self.workspace / 'results/session-b'):
             directory.mkdir(exist_ok=True)
             self.env['FIXTURE_RESULTS'] = str(directory)
-            result = self.run_skill('deliver')
-            self.assert_rejected(result, 'does not belong to this invocation')
+            for phase, generated in (('deliver', False), ('probe', False), ('probe', True)):
+                result = self.run_skill(phase, generated=generated)
+                self.assert_rejected(result, 'does not belong to this invocation')
 
     def test_workspace_override_without_plugin_data(self):
         self.env.pop('CLAUDE_PLUGIN_DATA')

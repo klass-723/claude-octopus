@@ -207,39 +207,47 @@ Generate scenarios that are specific enough to evaluate against an implementatio
 
     # Multi-provider scenario generation for diversity
     local provider_scenarios
-    provider_scenarios=$(run_agent_sync "codex" "$scenario_prompt" 120 "qa-engineer" "factory" 2>/dev/null) || true
+    provider_scenarios=$(run_agent_sync "codex" "$scenario_prompt" 120 "qa-engineer" "factory" 2>/dev/null) || provider_scenarios=""
 
-    if [[ -n "$provider_scenarios" ]]; then
+    if [[ "$provider_scenarios" == *[![:space:]]* ]]; then
         scenarios="$provider_scenarios"
     fi
 
     # Fallback/supplement with second provider
     local supplemental
-    supplemental=$(run_agent_sync "agy" "$scenario_prompt" 120 "qa-engineer" "factory" 2>/dev/null) || true
+    supplemental=$(run_agent_sync "agy" "$scenario_prompt" 120 "qa-engineer" "factory" 2>/dev/null) || supplemental=""
 
-    if [[ -n "$supplemental" && -n "$scenarios" ]]; then
+    if [[ "$supplemental" == *[![:space:]]* && -n "$scenarios" ]]; then
         # Merge unique scenarios from supplemental
         scenarios="${scenarios}
 
 ## Additional Scenarios (Cross-Provider)
 
 ${supplemental}"
-    elif [[ -n "$supplemental" ]]; then
+    elif [[ "$supplemental" == *[![:space:]]* ]]; then
         scenarios="$supplemental"
     fi
 
     # Fallback to Claude if both external providers failed
     if [[ -z "$scenarios" ]]; then
         log WARN "External providers unavailable for scenario generation, using Claude"
-        scenarios=$(run_agent_sync "claude" "$scenario_prompt" "${TIMEOUT:-300}" "qa-engineer" "factory" 2>/dev/null) || true
+        scenarios=$(run_agent_sync "claude" "$scenario_prompt" "${TIMEOUT:-300}" "qa-engineer" "factory" 2>/dev/null) || scenarios=""
     fi
 
-    if [[ -z "$scenarios" ]]; then
+    if [[ "$scenarios" != *[![:space:]]* ]]; then
         log ERROR "Failed to generate scenarios from any provider"
         return 1
     fi
 
-    echo "$scenarios" > "$run_dir/scenarios-all.md"
+    # Providers number their lists independently. Assign one stable identity
+    # across the combined list before either partition is persisted.
+    scenarios=$(printf '%s\n' "$scenarios" | awk '
+        /^### Scenario[[:space:]]+[0-9]+([[:space:]:]|$)/ {
+            sub(/^### Scenario[[:space:]]+[0-9]+/, "### Scenario " ++scenario_id)
+        }
+        { print }') || return 1
+
+    echo "$scenarios" > "$run_dir/scenarios-all.md" || return 1
     log INFO "Scenarios generated and saved to $run_dir/scenarios-all.md"
 
     echo "$scenarios"
@@ -335,6 +343,36 @@ NQSEOF
     echo "${composite}|${verdict}"
 }
 
+_factory_satisfaction_dimensions() {
+    awk '
+        function unmark(value) {
+            if (value ~ /^[*][*][^*]*[*][*]$/) return substr(value, 3, length(value) - 4)
+            if (value ~ /^[*][^*]*[*]$/) return substr(value, 2, length(value) - 2)
+            return value
+        }
+        {
+            line = tolower($0)
+            sub(/^[[:space:]-]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            line = unmark(line)
+            sub(/^[*]+/, "", line)
+            if (match(line, /^(behavior_coverage|constraint_adherence|quality)[*]*(:[[:space:]]*|[[:space:]]+|$)/)) {
+                field = substr(line, 1, RLENGTH)
+                sub(/[:[:space:]*].*$/, "", field)
+                value = substr(line, RLENGTH + 1)
+                sub(/[[:space:]]+$/, "", value)
+                value = unmark(value)
+                if (++seen[field] != 1 || value !~ /^[+]?([0-9]+([.][0-9]*)?|[.][0-9]+)$/ || value + 0 > 1) bad = 1
+                scores[field] = value + 0
+            }
+        }
+        END {
+            if (bad || seen["behavior_coverage"] != 1 || seen["constraint_adherence"] != 1 || seen["quality"] != 1) exit 1
+            printf "%.15g %.15g %.15g\n", scores["behavior_coverage"], scores["constraint_adherence"], scores["quality"]
+        }
+    '
+}
+
 score_satisfaction() {
     local run_dir="$1"
     local satisfaction_target="$2"
@@ -344,8 +382,14 @@ score_satisfaction() {
     local spec_content=""
     [[ -f "$run_dir/spec.md" ]] && spec_content=$(<"$run_dir/spec.md")
 
-    local holdout_score="0.50"
-    [[ -f "$run_dir/holdout-results.md" ]] && holdout_score=$(grep -oi 'score[: ]*[0-9]*\.[0-9]*' "$run_dir/holdout-results.md" | tail -1 | grep -o '[0-9]*\.[0-9]*' || echo "0.50")
+    # Consume the score already validated by run_holdout_tests; raw provider
+    # formatting must not change the value used by the weighted consumer.
+    local holdout_score="${3:-}"
+    if [[ -z "$holdout_score" ]]; then
+        log ERROR "score_satisfaction requires a validated holdout score"
+        return 1
+    fi
+    holdout_score=$(awk -v score="$holdout_score" 'BEGIN { printf "%.15g", score }') || return 1
 
     # Multi-provider satisfaction scoring
     local scoring_prompt="You are evaluating whether an implementation satisfies its original specification.
@@ -367,18 +411,26 @@ constraint_adherence: X.XX
 quality: X.XX
 justification: <2-3 sentences>"
 
-    local scoring_result
-    scoring_result=$(run_agent_sync "claude-sonnet" "$scoring_prompt" 120 "evaluator" "factory" 2>/dev/null) || true
-
+    local scoring_result="" evaluator
+    for evaluator in claude-sonnet claude; do
+        if scoring_result=$(run_agent_sync "$evaluator" "$scoring_prompt" 120 "evaluator" "factory" 2>/dev/null) && [[ "$scoring_result" == *[![:space:]]* ]]; then
+            break
+        fi
+        scoring_result=""
+    done
     if [[ -z "$scoring_result" ]]; then
-        scoring_result=$(run_agent_sync "claude" "$scoring_prompt" 120 "evaluator" "factory" 2>/dev/null) || true
+        log ERROR "Satisfaction evaluation failed from all providers"
+        return 1
     fi
 
-    # Parse scores from response
-    local behavior_score constraint_score quality_score
-    behavior_score=$(echo "$scoring_result" | grep -oi 'behavior_coverage[: ]*[0-9]*\.[0-9]*' | head -1 | grep -o '[0-9]*\.[0-9]*' || echo "0.70")
-    constraint_score=$(echo "$scoring_result" | grep -oi 'constraint_adherence[: ]*[0-9]*\.[0-9]*' | head -1 | grep -o '[0-9]*\.[0-9]*' || echo "0.70")
-    quality_score=$(echo "$scoring_result" | grep -oi 'quality[: ]*[0-9]*\.[0-9]*' | head -1 | grep -o '[0-9]*\.[0-9]*' || echo "0.70")
+    # Require one complete, bounded value per dimension. Missing or malformed
+    # evidence cannot be replaced with invented defaults or a later valid score.
+    local behavior_score constraint_score quality_score parsed_scores
+    parsed_scores=$(printf '%s\n' "$scoring_result" | _factory_satisfaction_dimensions) || {
+        log ERROR "Satisfaction evaluation has missing, duplicate or invalid dimension scores"
+        return 1
+    }
+    read -r behavior_score constraint_score quality_score <<< "$parsed_scores"
 
     # Weighted composite: behavior(40%) + constraints(20%) + holdout(25%) + quality(15%)
     local composite
@@ -399,7 +451,7 @@ justification: <2-3 sentences>"
     log INFO "Satisfaction score: $composite (target: $satisfaction_target) -> $verdict"
 
     # Write scores JSON
-    cat > "$run_dir/satisfaction-scores.json" << SCOREEOF
+    cat > "$run_dir/satisfaction-scores.json" << SCOREEOF || return 1
 {
   "behavior_coverage": $behavior_score,
   "constraint_adherence": $constraint_score,

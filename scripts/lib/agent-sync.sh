@@ -152,11 +152,21 @@ _octopus_repository_env_names() {
         GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 }
 
+_octopus_unset_repository_env_name() {
+    # Unsetting a temporary function-call assignment can expose an inherited
+    # value of the same name. Remove every visible layer in the dispatch subshell.
+    # A readonly binding must fail closed even when it has no value.
+    while :; do
+        unset "$1" 2>/dev/null || return 1
+        [[ -n "${!1+x}" ]] || return 0
+    done
+}
+
 _octopus_clear_repository_env() {
     local git_env_name clear_failed=false
 
     while IFS= read -r git_env_name; do
-        unset "$git_env_name" 2>/dev/null || clear_failed=true
+        _octopus_unset_repository_env_name "$git_env_name" || clear_failed=true
     done < <(_octopus_repository_env_names)
 
     # Git's command-scope config protocol uses numbered variable names. Clear
@@ -166,7 +176,7 @@ _octopus_clear_repository_env() {
     while IFS= read -r git_env_name; do
         case "$git_env_name" in
             GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*|GIT_TRACE*|GIT_REDIRECT_STDIN|GIT_REDIRECT_STDOUT|GIT_REDIRECT_STDERR)
-                unset "$git_env_name" 2>/dev/null || clear_failed=true
+                _octopus_unset_repository_env_name "$git_env_name" || clear_failed=true
                 ;;
         esac
     done < <(compgen -v)
@@ -1310,15 +1320,23 @@ octo_safe_diagnostic_tail() {
 # Council seats run detached, so a failed provider's stderr reaches no one and
 # summary.json could only say "no-response". When the caller names a capture
 # file, append this failed attempt there: the exit code and reason, the
-# provider's stderr, or the tail of its stdout when stderr is empty (some CLIs
-# print their error there). Secrets are scrubbed and the file is private.
+# provider's stderr, or the tail of its stdout when stderr is empty. A validated
+# terminal stdout session status is retained even with stderr warnings.
+# Secrets are scrubbed and the file is private.
 octo_capture_seat_failure() {
     local file="${_OCTOPUS_SEAT_STDERR_FILE:-}" agent="$1" rc="$2" reason="$3" err="$4" out="$5" body="" record=""
+    local terminal_status=""
     local section="-- no stderr or stdout --"
     local scanner="${BASH_SOURCE[0]%/*}/../helpers/artifact-safety.py"
     [[ -n "$file" ]] || return 0
     declare -F sanitize_secrets >/dev/null 2>&1 || return 0
     command -v python3 >/dev/null 2>&1 && [[ -f "$scanner" ]] || return 0
+    # Only the complete stdout can establish a standalone terminal status.
+    # A bounded diagnostic tail may have discarded an earlier quotation lead-in.
+    if [[ "$rc" != 0 ]] && declare -F octo_quota_session_limit_line >/dev/null &&
+       octo_quota_session_limit_line "$out" >/dev/null; then
+        terminal_status="$(octo_safe_diagnostic_tail "$out" 4096)" || return 0
+    fi
     # Redact the stream first: a raw byte tail can remove a credential prefix.
     # Certify before truncation too: a tail can remove an opaque key's field name.
     # Keep pipefail local so a failed sanitizer or gate cannot publish partial output.
@@ -1331,6 +1349,9 @@ octo_capture_seat_failure() {
     fi
     record="$(
         printf '== %s %s exited %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$agent" "$rc" "$reason"
+        if [[ -n "$terminal_status" ]]; then
+            printf '%s\n%s\n' '-- terminal stdout status --' "$terminal_status"
+        fi
         printf '%s\n' "$section" "$body"
     )"
     # The reason can contain provider output too. Clean controls before
@@ -1446,7 +1467,7 @@ run_agent_sync() {
     enhanced_prompt=$(apply_persona "$role" "$prompt" "false" "")
 
     # v8.21.0: Check for persona pack override (run_agent_sync)
-    if type get_persona_override_content &>/dev/null 2>&1 && [[ "${OCTOPUS_PERSONA_PACKS:-auto}" != "off" ]]; then
+    if [[ "$role" != advisor ]] && type get_persona_override_content &>/dev/null 2>&1 && [[ "${OCTOPUS_PERSONA_PACKS:-auto}" != "off" ]]; then
         local pack_persona
         pack_persona=$(get_persona_override_content "$agent_type" 2>/dev/null)
         if [[ -n "$pack_persona" ]]; then
@@ -1598,7 +1619,7 @@ ${provider_ctx}"
     case "$agent_type" in
         copilot*|qwen*|cursor-agent*) _plan_append_empty_prompt=true ;;
     esac
-    if ! build_provider_env "$agent_type"; then
+    if ! build_provider_env "$agent_type" "$model"; then
         run_contract_transition "$_sync_seat_id" failed \
             "reason=Provider environment construction failed" >/dev/null 2>&1 || true
         return 74

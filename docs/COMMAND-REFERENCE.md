@@ -997,12 +997,23 @@ Dark Factory Mode — spec-in, software-out autonomous pipeline.
 **What it does:**
 1. Asks 3 clarifying questions: spec path, satisfaction target, cost confirmation
 2. Parses the NLSpec file
-3. Generates test scenarios (Codex)
+3. Generates test scenarios with available providers
 4. Runs the full embrace workflow
 5. Evaluates against holdout test suite with available-provider blind review
 6. Scores against satisfaction target
 7. Repeats if target not met (up to configured limit)
 8. Produces final delivery report
+
+Factory requires at least two structured scenarios with usable bodies before
+implementation, including an independent holdout. Failed providers cannot supply
+scenario evidence. Implementation, evaluation and evidence-write failures stop
+the run. Holdout results must contain a score from 0 to 1 or complete scenario
+verdicts; final scoring preserves that validated value, including zero.
+
+Satisfaction scoring requires one value from 0 to 1 for each dimension. Failed or
+empty evaluator calls try the existing fallback; missing, duplicate or malformed
+dimension scores stop completion without a score record. A remediation retry
+invalidates the previous attempt's score before changing or re-evaluating source.
 
 **Cost:** ~20–30 agent calls (~$0.50–2.00). Requires confirmation before starting.
 

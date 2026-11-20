@@ -21,7 +21,8 @@
 # finished. A keyed round that is finished at first sight is held for --settle
 # seconds (default 60) while a newer same-key round may appear; one seen running
 # returns as soon as it finishes. --since with the epoch taken before the
-# dispatch excludes older rounds exactly and skips the hold.
+# dispatch filters at one-second resolution and skips the hold. A round created
+# in the same second as --since is still eligible. Use --run-dir for an exact run.
 # The interval defaults to 2 seconds and is floored at 1. The timeout defaults
 # to 570 seconds, under the Bash tool's 600-second foreground cap; sleeping never
 # extends it. A Council round often runs longer, so a timeout means "still
@@ -187,6 +188,13 @@ _eligible() {
     fi
 }
 
+_is_running() {
+    local rd="$1" st="$1/run-status.json" identity_dir rid
+    identity_dir="$(cd -- "$rd" 2>/dev/null && pwd -P)" || return 1
+    rid="${identity_dir##*/}"
+    [[ -f "$st" ]] && jq -e -s --arg rid "$rid" 'length == 1 and (.[0] | type) == "object" and .[0].state == "running" and .[0].run_id == $rid' "$st" >/dev/null 2>&1
+}
+
 _is_finished() {
     local rd="$1" st="$1/run-status.json" identity_dir rid
     identity_dir="$(cd -- "$rd" 2>/dev/null && pwd -P)" || return 1
@@ -212,7 +220,12 @@ while :; do
         resolution_rc=0
         run_dir="$(_resolve_run_dir)" || resolution_rc=$?
     fi
-    if [[ -n "$run_dir" ]] && _is_finished "$run_dir"; then
+    # Record running before checking completion. A producer can finish between
+    # the two reads; checking finished first would lose that running observation
+    # and incorrectly hold the new round as though it were already old.
+    if [[ -n "$run_dir" ]] && _is_running "$run_dir"; then
+        seen_running="$run_dir"
+    elif [[ -n "$run_dir" ]] && _is_finished "$run_dir"; then
         (( SECONDS <= deadline )) || break
         latest_dir="$run_dir" latest_rc=0
         if [[ -n "$KEY" ]]; then latest_dir="$(_resolve_run_dir)" || latest_rc=$?; fi
@@ -225,8 +238,6 @@ while :; do
             printf '%s/summary.json\n' "$run_dir"
             exit 0
         fi
-    elif [[ -n "$run_dir" ]]; then
-        seen_running="$run_dir"
     fi
     remaining=$(( deadline - SECONDS ))
     (( remaining > 0 )) || break

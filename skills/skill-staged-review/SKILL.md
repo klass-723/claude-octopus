@@ -1,30 +1,26 @@
 ---
 name: skill-staged-review
-description: "Use when a PR or feature needs both specification and code-quality review"
 disable-model-invocation: true
+aliases:
+  - staged-review
+  - two-stage-review
+description: "Use when a PR or feature needs both specification and code-quality review"
+trigger: |
+  Use when completing a major feature, preparing a PR, or when user says
+  "staged review", "full review", "review against spec", or "two-stage review".
+  Do NOT use for quick code checks — use skill-code-review instead.
+execution_mode: enforced
+validation_gates:
+  - stage1_complete
+  - stage2_complete
 ---
-
-> **Host: Codex CLI** — This skill was designed for Claude Code and adapted for Codex.
-> Cross-reference commands use installed skill names in Codex rather than `/octo:*` slash commands.
-> Use the active Codex shell and subagent tools. Do not claim a provider, model, or host subagent is available until the current session exposes it.
-> For host tool equivalents, see `skills/blocks/codex-host-adapter.md`.
-
-
-## Execution Contract (MANDATORY - CANNOT SKIP)
-
-This generated Codex skill preserves an enforced workflow contract from the source skill.
-
-**PROHIBITED:**
-- Do not summarize, simulate, or skip the referenced workflow command when this skill requires execution.
-- Do not claim provider output or validation artifacts exist without checking the actual files or command output.
-- Do not continue silently when a required provider, command, or host capability is unavailable; report the unavailable dependency and use a supported fallback.
-
 
 # Two-Stage Review Pipeline
 
 Separates **spec compliance** (did you build the right thing?) from **code quality**
 (did you build it right?). Stage 1 must pass before Stage 2 runs.
 
+---
 
 ## Stage 1: Spec Compliance
 
@@ -101,6 +97,7 @@ For each boundary in the intent contract:
 **If user chooses to fix:** Stop review, list specific fixes needed.
 **If user chooses to proceed:** Note the overrides and continue to Stage 2.
 
+---
 
 ## Stage 2: Code Quality
 
@@ -174,9 +171,72 @@ echo "Stub detection complete: $STUB_ISSUES issues found"
 **Check provider availability and dispatch in parallel:**
 
 ```bash
-# Get the diff for review
-DIFF_CONTENT=$(git diff --cached 2>/dev/null || git diff HEAD~1..HEAD 2>/dev/null || git diff)
+# Admit the complete staged text before any review. Do not substitute another
+# range when staged input is empty or cannot be read.
+DIFF_CONTENT=$(python3 -I - <<'PY_STAGED_DIFF'
+import re
+import subprocess
+import sys
+
+# write-tree refuses unresolved index entries and freezes the admitted index.
+staged = subprocess.check_output(['git', 'write-tree']).decode().strip()
+head = subprocess.run(['git', 'rev-parse', '--verify', '--quiet', 'HEAD^{tree}'],
+                      capture_output=True, text=True)
+if head.returncode == 0:
+    base = head.stdout.strip()
+else:
+    # Only a confirmed unborn branch may use an empty baseline. Other HEAD
+    # discovery errors must stop rather than silently changing the review range.
+    branch = subprocess.check_output(['git', 'symbolic-ref', '--quiet', 'HEAD']).decode().strip()
+    if subprocess.run(['git', 'show-ref', '--verify', '--quiet', branch]).returncode != 1:
+        sys.exit('Review incomplete: cannot resolve the staged review baseline.')
+    base = subprocess.check_output(['git', 'hash-object', '-w', '-t', 'tree', '--stdin'],
+                                   input=b'').decode().strip()
+command = ['git', 'diff', '--no-ext-diff', '--no-textconv',
+           '--no-renames', '--no-relative', '--ignore-submodules=none', '--no-color']
+numstat = subprocess.check_output(command + ['--numstat', base, staged, '--'])
+if any(line.split(b'\t', 2)[:2] == [b'-', b'-'] for line in numstat.splitlines()):
+    sys.exit('Review incomplete: staged binary content needs separate complete review.')
+raw = subprocess.check_output(command + ['--raw', '--no-abbrev', '-z', base, staged, '--'])
+blobs = set()
+for header in raw.split(b'\0')[::2]:
+    if not header:
+        continue
+    old_mode, new_mode, old_oid, new_oid, status = header.split()
+    if old_mode == b':160000' or new_mode == b'160000':
+        sys.exit('Review incomplete: staged submodules need separate complete source review.')
+    blobs.update(oid for oid in (old_oid, new_oid) if oid.strip(b'0'))
+# Forced-text attributes can hide NUL bytes outside the patch context. Inspect
+# both affected revisions in bounded chunks, including deleted file content.
+for oid in sorted(blobs):
+    with subprocess.Popen(['git', 'cat-file', 'blob', oid.decode('ascii')],
+                          stdout=subprocess.PIPE) as blob:
+        while chunk := blob.stdout.read(65536):
+            if b'\0' in chunk:
+                blob.kill()
+                sys.exit('Review incomplete: a changed blob contains NUL bytes and needs separate complete review.')
+        if blob.wait() != 0:
+            sys.exit('Review incomplete: could not read a changed blob.')
+diff = subprocess.check_output(command + ['--binary', base, staged, '--'])
+if re.search(rb'(?m)^GIT binary patch$', diff) or b'\0' in diff:
+    sys.exit('Review incomplete: staged nontext content needs separate complete review.')
+if re.search(rb'\[\[OCTOPUS_TRUSTED_JSON_CONTRACT_(?:BEGIN|END):[0-9a-fA-F]{32}\]\]', diff):
+    sys.exit('Review incomplete: transport markers need separate lossless review.')
+if not diff:
+    sys.exit('Review incomplete: no staged changes. Select the intended review range explicitly.')
+if len(diff) > 60000:
+    sys.exit('Review incomplete: staged input exceeds the 60000-byte quick-review limit. Arrange complete file-based review.')
+print(f'Review snapshot: base tree {base}, staged tree {staged}', file=sys.stderr)
+sys.stdout.buffer.write(diff)
+PY_STAGED_DIFF
+) || exit 1
 ```
+
+If this admission step fails, stop before provider dispatch or a clean-review
+claim. Binary and submodule changes require a separate complete content review;
+their Git notices and object IDs do not establish source coverage. Keep the
+entire admitted text in the prompt, including its final lines. Review covers
+the printed immutable staged snapshot; later staging requires a fresh review.
 
 **If external providers are available — dispatch focused reviews through Octopus routing:**
 ```bash
@@ -239,6 +299,7 @@ done
 [Non-blocking suggestions for improvement]
 ```
 
+---
 
 ## Combined Report
 
@@ -264,6 +325,7 @@ After both stages complete, present the unified report:
 [If PASS: ready for merge/ship]
 ```
 
+---
 
 ## When to Use Each Review Type
 
@@ -273,6 +335,7 @@ After both stages complete, present the unified report:
 | **skill-staged-review** | Major feature completion | Spec compliance + code quality |
 | **skill-verification-gate** | Before any completion claim | Evidence of passing |
 
+---
 
 ## Error Handling
 
@@ -284,6 +347,7 @@ After both stages complete, present the unified report:
 | Stage 1 failures | Ask user: fix or override |
 | Stage 2 blocking issues | Must fix before merge |
 
+---
 
 ## The Bottom Line
 
@@ -294,6 +358,7 @@ Stage 1 gates Stage 2. Both must pass for overall PASS.
 
 **Build the right thing, then build it right.**
 
+---
 
 ## Post Results to PR (v8.44.0)
 
@@ -317,6 +382,7 @@ if [[ -n "$PR_NUM" ]]; then
 
 ${COMBINED_REPORT}
 
+---
 *Staged review by Claude Octopus (/octo:staged-review)*"
     if ! "${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${HOME}/.claude-octopus/plugin}}/scripts/safe-gh-comment.sh" \
             --repo "$REPO_SLUG" pr-comment "$PR_NUM" - <<< "$COMMENT_BODY"; then
@@ -332,3 +398,12 @@ fi
 **Behavior:**
 - Auto-posts when running inside `/octo:deliver` or `/octo:embrace` workflows
 - Asks user first when invoked standalone via `/octo:staged-review`
+
+## Execution Contract (MANDATORY - CANNOT SKIP)
+
+This generated Claude Code skill preserves an enforced workflow contract from the source skill.
+
+**PROHIBITED:**
+- Do not summarize, simulate, or skip the referenced workflow command when this skill requires execution.
+- Do not claim provider output or validation artifacts exist without checking the actual files or command output.
+- Do not continue silently when a required provider, command, or host capability is unavailable; report the unavailable dependency and use a supported fallback.

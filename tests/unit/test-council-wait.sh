@@ -72,6 +72,13 @@ _mkrun "$pool" 20260101-000000-00dddd finished no >/dev/null   # finished state 
 _runwait --pool "$pool" --interval 1 --timeout 2
 if [[ $rc -eq 2 ]]; then test_pass; else test_fail "reported complete on invalid summary (rc=$rc)"; fi
 
+test_case "repairing an old summary preserves the keyed settle hold"
+if TMPDIR="$TEST_TMP_DIR" python3 "$PROJECT_ROOT/tests/fixtures/council-wait-settle.py" "$WAIT"; then
+    test_pass
+else
+    test_fail "an invalid summary or unknown beacon impersonated a running round"
+fi
+
 test_case "returns promptly when the run flips to finished mid-wait"
 pool="$(mktemp -d "$TEST_TMP_DIR/p5.XXXXXX")"
 rd="$(_mkrun "$pool" 20260101-020000-00eeee running)"
@@ -194,7 +201,7 @@ pool="$(mktemp -d "$TEST_TMP_DIR/key-flip-earlier.XXXXXX")"
 _mkrun "$pool" 20260101-050000-00f501 running yes "$key" 2 >/dev/null
 rd="$(_mkrun "$pool" 20260101-040000-00f500 finished yes "$key" 1)"
 printf '%s\n' 20260101-050000-00f501 > "$pool/latest-$slug"
-# Observe the actual finished-state check on the initial running round.
+# Observe the actual running-state check on the initial running round.
 real_jq="$(command -v jq)"
 barrier_bin="$pool/bin"; mkdir -p "$barrier_bin"
 observed="$pool/initial-running-observed"; flipped="$pool/pointer-flipped"
@@ -202,12 +209,12 @@ cat > "$barrier_bin/jq" <<'SH'
 #!/bin/bash
 "$WAITER_REAL_JQ" "$@"
 result=$?
-last=""; finished_filter=no
+last=""; running_filter=no
 for arg in "$@"; do
-    [[ "$arg" != *'.state == "finished"'* ]] || finished_filter=yes
+    [[ "$arg" != *'.state == "running"'* ]] || running_filter=yes
     last="$arg"
 done
-if [[ "$result" == 1 && "$finished_filter" == yes && "$last" == "$WAITER_RUNNING_STATUS" ]]; then
+if [[ "$result" == 0 && "$running_filter" == yes && "$last" == "$WAITER_RUNNING_STATUS" ]]; then
     : > "$WAITER_INITIAL_OBSERVED"
 fi
 exit "$result"
@@ -443,17 +450,55 @@ prev="$(_mkrun "$pool" 20260101-172823-00aaaa finished yes "$key" 1)"
 printf '%s\n' 20260101-172823-00aaaa > "$pool/latest-$slug"
 _observe_waiter "$pool"
 observed="$pool/observed"
+running_observed="$pool/running-observed"
+next_run="$pool/20260101-173700-00bbbb"
+real_jq="$(command -v jq)"
+cat > "$pool/wait-bin/jq" <<'SH'
+#!/bin/bash
+rc=0
+"${COUNCIL_WAIT_REAL_JQ:?}" "$@" || rc=$?
+if [[ "${!#}" == "${COUNCIL_WAIT_NEXT_RUN:?}/run-status.json" && "$*" == *'.state == "'* ]] &&
+        "${COUNCIL_WAIT_REAL_JQ}" -e '.state == "running"' "${!#}" >/dev/null; then
+    # Finish between the state read and its caller consuming the result. The
+    # waiter must retain a running observation even across that transition.
+    : > "${COUNCIL_WAIT_RUNNING_OBSERVED:?}"
+    deadline=$((SECONDS + 10))
+    until [[ -e "${COUNCIL_WAIT_NEXT_RUN}/published" ]]; do
+        (( SECONDS < deadline )) || exit 94
+        /bin/sleep 0.01
+    done
+fi
+exit "$rc"
+SH
+cat > "$pool/wait-bin/sleep" <<'SH'
+#!/bin/bash
+: > "${COUNCIL_WAIT_OBSERVED:?}"
+if [[ -e "${COUNCIL_WAIT_NEXT_RUN:?}/published" ]]; then
+    count=0
+    [[ ! -f "${COUNCIL_WAIT_OBSERVED}.after-completion" ]] ||
+        read -r count < "${COUNCIL_WAIT_OBSERVED}.after-completion"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "${COUNCIL_WAIT_OBSERVED}.after-completion"
+    (( count <= 1 )) || exit 93
+fi
+exec /bin/sleep "$@"
+SH
+chmod +x "$pool/wait-bin/jq" "$pool/wait-bin/sleep"
 ( observation_rc=0; _await_observation "$observed" || observation_rc=$?
   next="$(_mkrun "$pool" 20260101-173700-00bbbb running yes "$key" 2)"
   printf '%s\n' 20260101-173700-00bbbb > "$pool/latest-$slug"
-  sleep 2
+  _await_observation "$running_observed" || observation_rc=$?
   printf '{"status":"completed"}\n' > "$next/summary.json"
   printf '{"state":"finished","run_id":"20260101-173700-00bbbb","supersede_key":"%s"}\n' "$key" > "$next/run-status.json"
+  : > "$next/published"
   exit "$observation_rc" ) &
 next_pid=$!
-PATH="$pool/wait-bin:$PATH" COUNCIL_WAIT_OBSERVED="$observed"     _runwait --pool "$pool" --supersede-key "$key" --interval 1 --timeout 30
+PATH="$pool/wait-bin:$PATH" COUNCIL_WAIT_OBSERVED="$observed" \
+    COUNCIL_WAIT_REAL_JQ="$real_jq" COUNCIL_WAIT_NEXT_RUN="$next_run" \
+    COUNCIL_WAIT_RUNNING_OBSERVED="$running_observed" \
+    _runwait --pool "$pool" --supersede-key "$key" --interval 1 --timeout 30
 publish_rc=0; wait "$next_pid" 2>/dev/null || publish_rc=$?
-if [[ "$publish_rc" -eq 0 && -f "$observed" && $rc -eq 0 && "$out" == "$pool/20260101-173700-00bbbb/summary.json" ]]; then test_pass; else test_fail "rc=$rc out=$out (previous round: $prev)"; fi
+if [[ "$publish_rc" -eq 0 && -f "$running_observed" && $rc -eq 0 && "$out" == "$pool/20260101-173700-00bbbb/summary.json" ]]; then test_pass; else test_fail "rc=$rc out=$out (previous round: $prev)"; fi
 
 test_case "a keyed round finished at first sight returns after the settle window"
 pool="$(mktemp -d "$TEST_TMP_DIR/settle-only.XXXXXX")"

@@ -83,8 +83,23 @@ Available checkpoints:
 ### Step 2: Show What Will Be Affected
 
 ```bash
-# Get list of files that will be changed
-git diff --name-status HEAD $CHECKPOINT_TAG
+# A tag records HEAD only; never overwrite work absent from that checkpoint.
+ROLLBACK_STATUS=$(git status --porcelain=v1 --untracked-files=all) || exit 1
+if [[ -n "$ROLLBACK_STATUS" ]]; then
+  echo "Rollback requires a clean working tree and index. Preserve your changes before retrying." >&2
+  exit 1
+fi
+
+# Bind confirmation to this repository, branch, revision and checkpoint commit.
+ROLLBACK_PREVIEW_ROOT=$(git rev-parse --show-toplevel) || exit 1
+ROLLBACK_PREVIEW_HEAD=$(git rev-parse --verify HEAD) || exit 1
+ROLLBACK_PREVIEW_REF=$(git symbolic-ref --quiet HEAD || true)
+ROLLBACK_TARGET_COMMIT=$(git rev-parse --verify "$CHECKPOINT_TAG^{commit}") || exit 1
+printf 'ROLLBACK_PREVIEW_ROOT=%s\nROLLBACK_PREVIEW_HEAD=%s\nROLLBACK_PREVIEW_REF=%s\nROLLBACK_TARGET_COMMIT=%s\n' \
+  "$ROLLBACK_PREVIEW_ROOT" "$ROLLBACK_PREVIEW_HEAD" "$ROLLBACK_PREVIEW_REF" "$ROLLBACK_TARGET_COMMIT"
+
+# Get list of files that will be changed across the complete repository.
+git -C "$ROLLBACK_PREVIEW_ROOT" diff --name-status "$ROLLBACK_PREVIEW_HEAD" "$ROLLBACK_TARGET_COMMIT"
 ```
 
 Present clearly:
@@ -123,64 +138,300 @@ Any other input will cancel.
 
 ### Step 4: Create Safety Checkpoint
 
+The preview requires a clean index and working tree, including untracked files
+reported by Git. Carry all four printed Step 2 values into later shells.
+A safety tag records committed files only. Preserve changes
+with a commit or another user-selected recovery method before retrying. Do not
+stash, commit or discard unrelated work automatically. Recheck after confirmation
+and immediately before restoration because the user may have edited files.
+
 Before any rollback, create a pre-rollback checkpoint:
 
 ```bash
+# A tag records HEAD only; never overwrite work absent from that checkpoint.
+ROLLBACK_STATUS=$(git status --porcelain=v1 --untracked-files=all) || exit 1
+if [[ -n "$ROLLBACK_STATUS" ]]; then
+  echo "Rollback requires a clean working tree and index. Preserve your changes before retrying." >&2
+  exit 1
+fi
+
+# Restore Step 2's exact printed values in a fresh shell. Never refresh them
+# after confirmation; a changed context requires another preview and approval.
+: "${ROLLBACK_PREVIEW_ROOT:?Restore the confirmed preview root}"
+: "${ROLLBACK_PREVIEW_HEAD:?Restore the confirmed preview HEAD}"
+: "${ROLLBACK_PREVIEW_REF?Restore the confirmed preview branch, empty for detached HEAD}"
+: "${ROLLBACK_TARGET_COMMIT:?Restore the confirmed preview target commit}"
+if [[ "$(git rev-parse --show-toplevel)" != "$ROLLBACK_PREVIEW_ROOT" ||
+      "$(git rev-parse --verify HEAD)" != "$ROLLBACK_PREVIEW_HEAD" ||
+      "$(git symbolic-ref --quiet HEAD || true)" != "$ROLLBACK_PREVIEW_REF" ||
+      "$(git rev-parse --verify "$CHECKPOINT_TAG^{commit}")" != "$ROLLBACK_TARGET_COMMIT" ]]; then
+  echo "Rollback context changed; show a new preview and obtain confirmation again." >&2
+  exit 1
+fi
+
 # Generate timestamp
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
-# Create safety checkpoint
-git tag -a "octo-checkpoint-pre-rollback-$TIMESTAMP" -m "Safety checkpoint before rollback to $CHECKPOINT_TAG"
+# Create safety checkpoint and retain the exact name for the history step.
+SAFETY_CHECKPOINT_TAG="octo-checkpoint-pre-rollback-$TIMESTAMP"
+git tag -a "$SAFETY_CHECKPOINT_TAG" "$ROLLBACK_PREVIEW_HEAD" -m "Safety checkpoint before rollback to $CHECKPOINT_TAG" || exit 1
+printf 'Safety checkpoint: %s\n' "$SAFETY_CHECKPOINT_TAG"
 ```
 
 Report:
 ```
-Created safety checkpoint: octo-checkpoint-pre-rollback-$TIMESTAMP
+Created safety checkpoint: $SAFETY_CHECKPOINT_TAG
 
-You can return to current state with:
-  /octo:rollback octo-checkpoint-pre-rollback-$TIMESTAMP
+After restoration, review and commit the restored changes before using this
+command to return to the safety checkpoint. It requires a clean index and
+working tree. Preserve any unrelated changes separately.
+  /octo:rollback $SAFETY_CHECKPOINT_TAG
 ```
 
 ### Step 5: Preserve LESSONS.md
 
+Run from the confirmed repository. Keep the exact printed backup directory and
+preservation flag in conversation context for Step 6, including an empty directory
+when no lessons exist. Use a temporary directory outside the repository. Never
+reuse a backup path from another rollback or place recovery state in the checkout.
+
 ```bash
-# Save current LESSONS.md if it exists
-if [ -f ".octo/LESSONS.md" ]; then
-  cp .octo/LESSONS.md /tmp/LESSONS_PRESERVED.md
+ROLLBACK_ROOT=$(git rev-parse --show-toplevel) || exit 1
+: "${ROLLBACK_PREVIEW_ROOT:?Restore the confirmed preview root}"
+if [[ "$ROLLBACK_ROOT" != "$ROLLBACK_PREVIEW_ROOT" ||
+      -L "$ROLLBACK_ROOT/.octo" || -L "$ROLLBACK_ROOT/.octo/LESSONS.md" ]]; then
+  echo "Cannot back up lessons from a changed repository or symlinked lessons path." >&2
+  exit 1
+fi
+LESSONS_PRESERVED=false
+LESSONS_BACKUP_DIR=''
+if [ -f "$ROLLBACK_ROOT/.octo/LESSONS.md" ]; then
+  LESSONS_BACKUP_BASE=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P) || exit 1
+  case "$LESSONS_BACKUP_BASE/" in
+    "${ROLLBACK_ROOT%/}/"*) LESSONS_BACKUP_BASE=$(CDPATH= cd -- /tmp && pwd -P) || exit 1 ;;
+  esac
+  case "$LESSONS_BACKUP_BASE/" in
+    "${ROLLBACK_ROOT%/}/"*) echo "No temporary location outside the repository is available." >&2; exit 1 ;;
+  esac
+  LESSONS_BACKUP_DIR=$(mktemp -d "$LESSONS_BACKUP_BASE/octo-rollback-lessons.XXXXXX") || exit 1
+  LESSONS_BACKUP_DIR=$(CDPATH= cd -- "$LESSONS_BACKUP_DIR" && pwd -P) || exit 1
+  if ! (umask 077; cp -- "$ROLLBACK_ROOT/.octo/LESSONS.md" "$LESSONS_BACKUP_DIR/LESSONS.md"); then
+    echo "Lessons backup failed; retain the private directory for recovery: $LESSONS_BACKUP_DIR" >&2
+    exit 1
+  fi
   LESSONS_PRESERVED=true
 fi
+printf 'LESSONS_PRESERVED=%s\n' "$LESSONS_PRESERVED"
+printf 'LESSONS_BACKUP_DIR=%q\n' "$LESSONS_BACKUP_DIR"
 ```
+
+Retain the private backup if restoration fails or is interrupted. After explicit
+cancellation, remove only this rollback's `LESSONS.md` backup and its empty private
+directory, using the same ownership and symlink checks as Step 6. Never remove a
+shared filename or recursively delete a recovery directory.
 
 ### Step 6: Execute Rollback
 
 ```bash
+# A tag records HEAD only; never overwrite work absent from that checkpoint.
+ROLLBACK_STATUS=$(git status --porcelain=v1 --untracked-files=all) || exit 1
+if [[ -n "$ROLLBACK_STATUS" ]]; then
+  echo "Rollback requires a clean working tree and index. Preserve your changes before retrying." >&2
+  exit 1
+fi
+
+# Restore Step 2's exact printed values in a fresh shell. Never refresh them
+# after confirmation; a changed context requires another preview and approval.
+: "${ROLLBACK_PREVIEW_ROOT:?Restore the confirmed preview root}"
+: "${ROLLBACK_PREVIEW_HEAD:?Restore the confirmed preview HEAD}"
+: "${ROLLBACK_PREVIEW_REF?Restore the confirmed preview branch, empty for detached HEAD}"
+: "${ROLLBACK_TARGET_COMMIT:?Restore the confirmed preview target commit}"
+if [[ "$(git rev-parse --show-toplevel)" != "$ROLLBACK_PREVIEW_ROOT" ||
+      "$(git rev-parse --verify HEAD)" != "$ROLLBACK_PREVIEW_HEAD" ||
+      "$(git symbolic-ref --quiet HEAD || true)" != "$ROLLBACK_PREVIEW_REF" ||
+      "$(git rev-parse --verify "$CHECKPOINT_TAG^{commit}")" != "$ROLLBACK_TARGET_COMMIT" ]]; then
+  echo "Rollback context changed; show a new preview and obtain confirmation again." >&2
+  exit 1
+fi
+
 # Restore files from checkpoint (does NOT move HEAD)
-git checkout $CHECKPOINT_TAG -- .
+# No-overlay also removes tracked files added after the checkpoint. Keep lessons
+# out of both index and worktree restoration so accumulated knowledge survives.
+# Run checkout from the repository root even when this shell is in a subdirectory.
+ROLLBACK_ROOT=$(git rev-parse --show-toplevel) || exit 1
+# Ordinary status omits ignored local files. Refuse collisions before any write,
+# including file/directory replacements; NUL-delimited paths retain newlines.
+python3 -I - "$ROLLBACK_ROOT" "$ROLLBACK_TARGET_COMMIT" <<'PY_IGNORED' || exit 1
+from bisect import bisect_left
+import os
+import subprocess
+import sys
+
+root, checkpoint = sys.argv[1:]
+# Path checkout honors sparse and skip-worktree exclusions. Assume-unchanged
+# entries can hide local edits from status and must also stop restoration.
+sparse = subprocess.run([
+    'git', '-C', root, 'config', '--bool', 'core.sparseCheckout',
+], capture_output=True, check=False)
+if sparse.returncode not in (0, 1):
+    sys.exit('Rollback cannot verify a complete working tree. Check the sparse-checkout configuration before retrying.')
+index_entries = subprocess.check_output([
+    'git', '-C', root, 'ls-files', '-v', '-z',
+]).split(b'\0')
+if sparse.stdout.strip() == b'true' or any(
+    (entry[:1].upper() == b'S' or entry[:1].islower())
+    and entry[2:] != b'.octo/LESSONS.md'
+    for entry in index_entries
+):
+    sys.exit('Rollback requires a complete working tree. Disable sparse checkout and clear skip-worktree or assume-unchanged flags after preserving local work; no project files were restored.')
+# Excluding the lessons file does not protect an ancestor symlink from checkout.
+lessons_directory = os.path.join(root, '.octo')
+if os.path.lexists(lessons_directory) and (
+    os.path.islink(lessons_directory) or not os.path.isdir(lessons_directory)
+):
+    sys.exit('Rollback would replace the protected lessons directory. Preserve lessons and use a real .octo directory before retrying.')
+if os.path.islink(os.path.join(lessons_directory, 'LESSONS.md')):
+    sys.exit('Rollback cannot preserve a symlinked protected lessons file. Preserve its backing content and use a regular LESSONS.md before retrying.')
+# A gitlink checkout does not restore the nested repository's working tree.
+# Refuse changed submodules before ordinary files or the index can be restored.
+submodule_trees = []
+for revision in (checkpoint, 'HEAD'):
+    submodules = {}
+    for entry in subprocess.check_output([
+        'git', '-C', root, 'ls-tree', '-r', '-z', revision, '--',
+    ]).split(b'\0'):
+        if entry:
+            metadata, path = entry.split(b'\t', 1)
+            if metadata.startswith(b'160000 ') and path != b'.octo/LESSONS.md':
+                submodules[path] = metadata
+    submodule_trees.append(submodules)
+if submodule_trees[0] != submodule_trees[1]:
+    sys.exit('Rollback requires manual submodule restoration. No project files were restored; preserve nested repository work before retrying.')
+lessons_tracked = bool(subprocess.check_output([
+    'git', '-C', root, 'ls-files', '-z', '--', '.octo/LESSONS.md',
+]))
+# Embedded repositories may be returned as a single directory entry ending in /.
+ignored = {path.rstrip(b'/') for path in subprocess.check_output([
+    'git', '-C', root, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z',
+]).split(b'\0') if path}
+ordered = sorted(ignored)
+targets = subprocess.check_output([
+    'git', '-C', root, 'ls-tree', '-r', '--name-only', '-z', checkpoint, '--',
+]).split(b'\0')
+for target in targets:
+    if target == b'.octo' and (lessons_tracked or os.path.lexists(os.path.join(root, '.octo', 'LESSONS.md'))):
+        sys.exit('Rollback would replace the protected lessons directory. Preserve lessons before retrying.')
+    if not target or target == b'.octo/LESSONS.md' or target.startswith(b'.octo/LESSONS.md/'):
+        continue
+    parts = target.split(b'/')
+    prefixes = (b'/'.join(parts[:length]) for length in range(1, len(parts) + 1))
+    descendant = bisect_left(ordered, target + b'/')
+    if any(path in ignored for path in prefixes) or (
+        descendant < len(ordered) and ordered[descendant].startswith(target + b'/')
+    ):
+        sys.exit('Rollback would overwrite ignored local files. Preserve them before retrying.')
+PY_IGNORED
+# Restore Step 5's exact printed values before changing project files.
+: "${LESSONS_PRESERVED:?Restore the lessons preservation flag from Step 5}"
+case "$LESSONS_PRESERVED" in
+  true)
+    : "${LESSONS_BACKUP_DIR:?Restore the private backup directory from Step 5}"
+    if [[ ! -d "$LESSONS_BACKUP_DIR" || -L "$LESSONS_BACKUP_DIR" || ! -O "$LESSONS_BACKUP_DIR" ||
+          ! -f "$LESSONS_BACKUP_DIR/LESSONS.md" || -L "$LESSONS_BACKUP_DIR/LESSONS.md" ||
+          ! -O "$LESSONS_BACKUP_DIR/LESSONS.md" ]]; then
+      echo "Private lessons backup is missing or unsafe; retain recovery state and stop." >&2
+      exit 1
+    fi
+    ;;
+  false) ;;
+  *) echo "Invalid lessons preservation flag; restore Step 5's exact value." >&2; exit 1 ;;
+esac
+git -C "$ROLLBACK_ROOT" checkout --no-overlay "$ROLLBACK_TARGET_COMMIT" -- . ':(exclude).octo/LESSONS.md' || exit 1
 
 # Restore preserved LESSONS.md
 if [ "$LESSONS_PRESERVED" = "true" ]; then
-  cp /tmp/LESSONS_PRESERVED.md .octo/LESSONS.md
+  cp -- "$LESSONS_BACKUP_DIR/LESSONS.md" "$ROLLBACK_ROOT/.octo/LESSONS.md" || exit 1
+  rm -- "$LESSONS_BACKUP_DIR/LESSONS.md" || exit 1
+  rmdir -- "$LESSONS_BACKUP_DIR" || exit 1
 fi
 ```
 
-**Important:** This uses `git checkout <tag> -- .` which:
-- Restores all files to checkpoint state
+**Important:** This runs `git checkout --no-overlay <tag> -- . ':(exclude).octo/LESSONS.md'` from the repository root, which:
+- Restores tracked files to checkpoint state, including additions and deletions
+- Preserves current `.octo/LESSONS.md` in both the index and working tree
+- Requires a complete working tree without sparse, skip-worktree or assume-unchanged exclusions outside the protected lessons file
+- Stops when `.octo` is a symlink or file, or `LESSONS.md` is a symlink, before restoring files
 - Does NOT move HEAD or change branch
 - Preserves current commit history
 - Allows immediate commit of the restored state
 
+If the checkpoint adds, removes, moves or changes a submodule, restoration stops
+before modifying project files or the index. A gitlink alone cannot restore a
+nested working tree. Report the manual submodule work required and retain the
+safety checkpoint; do not claim that rollback completed.
+
 ### Step 7: Update STATE.md (If Exists)
 
+Restore `CHECKPOINT_TAG` to the exact target used by the successful Step 6
+restoration and `SAFETY_CHECKPOINT_TAG` to the exact name printed by Step 4.
+Restore `ROLLBACK_PREVIEW_ROOT` from the confirmed preview too. History must run
+in that repository; matching checkpoint tags in another clone are insufficient.
+Carry these literal values into this shell call even when earlier shell
+variables no longer exist. Do not reconstruct the safety tag from a new clock
+value or select a different tag by age. If either value is unavailable, report
+that history was not updated rather than writing an incomplete recovery entry.
+Symlinked state paths, hard-linked state files and non-regular files are refused
+before any append.
+
 ```bash
-if [ -f ".octo/STATE.md" ]; then
-  # Append rollback entry to history
-  echo "" >> .octo/STATE.md
-  echo "## Rollback - $(date '+%Y-%m-%d %H:%M')" >> .octo/STATE.md
-  echo "" >> .octo/STATE.md
-  echo "- **Target:** $CHECKPOINT_TAG" >> .octo/STATE.md
-  echo "- **Safety checkpoint:** octo-checkpoint-pre-rollback-$TIMESTAMP" >> .octo/STATE.md
-  echo "- **Reason:** User requested rollback" >> .octo/STATE.md
+ROLLBACK_ROOT=$(git rev-parse --show-toplevel) || exit 1
+: "${ROLLBACK_PREVIEW_ROOT:?Restore the confirmed preview root from Step 2}"
+if [[ "$ROLLBACK_ROOT" != "$ROLLBACK_PREVIEW_ROOT" ]]; then
+  echo "Rollback history was not updated: repository differs from the confirmed preview." >&2
+  exit 1
 fi
+python3 -I - "$ROLLBACK_ROOT" "${CHECKPOINT_TAG:-}" "${SAFETY_CHECKPOINT_TAG:-}" <<'PY_HISTORY' || exit 1
+from contextlib import ExitStack
+from datetime import datetime
+import os
+import stat
+import subprocess
+import sys
+
+root, target, safety = sys.argv[1:]
+try:
+    with ExitStack() as opened:
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened.callback(os.close, descriptor)
+        # Pin each repository-owned component. Never follow a restored symlink,
+        # including one swapped in between directory lookup and the append.
+        for name, flags in (
+            (".octo", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW),
+            ("STATE.md", os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK),
+        ):
+            try:
+                descriptor = os.open(name, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                sys.exit(0)  # History remains optional when its state path is absent.
+            opened.callback(os.close, descriptor)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("rollback state must be a regular, unlinked file")
+        if not target or not safety:
+            raise ValueError("restore the exact target from Step 6 and safety tag from Step 4")
+        for tag in (target, safety):
+            ref = "refs/tags/" + tag
+            subprocess.run(["git", "-C", root, "check-ref-format", ref], check=True)
+            subprocess.run(["git", "-C", root, "rev-parse", "--verify", ref + "^{commit}"],
+                           check=True, stdout=subprocess.DEVNULL)
+        entry = (f"\n## Rollback - {datetime.now():%Y-%m-%d %H:%M}\n\n"
+                 f"- **Target:** {target}\n- **Safety checkpoint:** {safety}\n"
+                 "- **Reason:** User requested rollback\n")
+        with os.fdopen(os.dup(descriptor), "a", encoding="utf-8") as history:
+            history.write(entry)
+except (OSError, ValueError, subprocess.CalledProcessError) as error:
+    sys.exit("Rollback history was not updated: " + str(error))
+PY_HISTORY
 ```
 
 ### Step 8: Report Success
@@ -192,7 +443,7 @@ Rollback Complete
 **Files restored:** N files
 **LESSONS.md:** Preserved (not rolled back)
 
-**Safety checkpoint created:** `octo-checkpoint-pre-rollback-$TIMESTAMP`
+**Safety checkpoint created:** `$SAFETY_CHECKPOINT_TAG`
 
 ### Next Steps
 
@@ -201,9 +452,11 @@ Rollback Complete
    ```bash
    git add -A && git commit -m "chore: rollback to $CHECKPOINT_TAG"
    ```
-3. Or return to previous state:
+3. To return to the safety checkpoint, first review and commit the restored
+   changes. The recovery command requires a clean index and working tree.
+   Preserve unrelated changes separately; do not bypass the clean-tree gate.
    ```bash
-   /octo:rollback octo-checkpoint-pre-rollback-$TIMESTAMP
+   /octo:rollback $SAFETY_CHECKPOINT_TAG
    ```
 ```
 
@@ -213,6 +466,7 @@ Rollback Complete
 
 | Measure | Implementation |
 |---------|----------------|
+| **Reject uncommitted work** | Check Git status before preview, tagging and restoration |
 | **Always create safety checkpoint** | Pre-rollback tag created BEFORE any file changes |
 | **Preserve LESSONS.md** | Copy before rollback, restore after |
 | **Require explicit confirmation** | Must type "ROLLBACK" exactly |

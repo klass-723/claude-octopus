@@ -1,24 +1,30 @@
 ---
 name: skill-finish-branch
-description: "Wrap up a branch — run tests, create PR, merge or discard — use when implementation is done"
 disable-model-invocation: true
+description: "Wrap up a branch — run tests, create PR, merge or discard — use when implementation is done"
+trigger: |
+  EXPLICITLY USE when user requests task completion with git operations:
+  - "commit and push" or "git commit and push"
+  - "complete all tasks and commit and push"
+  - "proceed with all todos in sequence and push"
+  - "save and commit" or "wrap this up and push"
+  - "I'm done with this feature" or "ready to merge"
+  - "create PR for this work"
+
+  DO NOT activate for:
+  - Individual file commits (use built-in git tools)
+  - Work in progress without tests passing
+  - Exploratory commits
+  - Simple "git status" or "git diff" commands
+execution_mode: enforced
+pre_execution_contract:
+  - visual_indicators_displayed
+validation_gates:
+  - orchestrate_sh_executed
+  - output_artifact_exists
+paths:
+  - ".git/**"
 ---
-
-> **Host: Codex CLI** — This skill was designed for Claude Code and adapted for Codex.
-> Cross-reference commands use installed skill names in Codex rather than `/octo:*` slash commands.
-> Use the active Codex shell and subagent tools. Do not claim a provider, model, or host subagent is available until the current session exposes it.
-> For host tool equivalents, see `skills/blocks/codex-host-adapter.md`.
-
-
-## Execution Contract (MANDATORY - CANNOT SKIP)
-
-This generated Codex skill preserves an enforced workflow contract from the source skill.
-
-**PROHIBITED:**
-- Do not summarize, simulate, or skip the referenced workflow command when this skill requires execution.
-- Do not claim provider output or validation artifacts exist without checking the actual files or command output.
-- Do not continue silently when a required provider, command, or host capability is unavailable; report the unavailable dependency and use a supported fallback.
-
 
 # Finishing a Development Branch
 
@@ -30,6 +36,7 @@ Full ship pipeline: tests → multi-provider review → version bump → changel
 
 **Core principle:** Verify tests → Review diff → Bump version → Update changelog → Present options → Execute choice → Clean up.
 
+---
 
 ## The Process
 
@@ -51,6 +58,7 @@ fi
 
 **If tests pass:** Continue to Step 2.
 
+---
 
 ### Step 2: Multi-Provider Diff Review
 
@@ -65,15 +73,95 @@ DIFF_FILES=$(git diff --name-only $(git merge-base HEAD main)..HEAD)
 **Always run a quick review — this is automatic, not optional:**
 
 ```bash
-# Quick review via orchestrate.sh (uses available providers)
-"${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${HOME}/.claude-octopus/plugin}}/scripts/orchestrate.sh" spawn reviewer "Review this diff for bugs, security issues, and code quality problems. Be concise — only flag real issues, not style preferences.
+# Runs under bash even when the host shell is zsh.
+if [ -n "${BASH_VERSION:-}" ]; then eval "$(cat)"; else env "OCTO_ALLOWED_PROVIDERS=${OCTO_ALLOWED_PROVIDERS:-}" bash -c "$(cat)"; fi <<'OCTO_BASH'
+# Review the complete committed range. A text diff cannot review binary content
+# or nested submodule source, and a partial prompt cannot establish coverage.
+REVIEW_HEAD=$(git rev-parse --verify 'HEAD^{commit}') || exit 1
+REVIEW_BASE=$(git merge-base "$REVIEW_HEAD" main) || exit 1
+REVIEW_NUMSTAT=$(git diff --no-ext-diff --no-textconv --no-renames --no-relative \
+  --ignore-submodules=none --no-color --numstat "$REVIEW_BASE" "$REVIEW_HEAD" --) || exit 1
+if awk -F '\t' '$(1) == "-" || $(2) == "-" {found=1} END {exit !found}' <<< "$REVIEW_NUMSTAT"; then
+  echo "Review incomplete: changed binary content needs a separate complete review." >&2
+  exit 1
+fi
+REVIEW_RAW=$(git diff --no-ext-diff --no-textconv --no-renames --no-relative \
+  --ignore-submodules=none --no-color --raw "$REVIEW_BASE" "$REVIEW_HEAD" --) || exit 1
+if awk '$(1) == ":160000" || $(2) == "160000" {found=1} END {exit !found}' <<< "$REVIEW_RAW"; then
+  echo "Review incomplete: changed submodules need a separate complete source review." >&2
+  exit 1
+fi
+# Inspect bytes before Bash command substitution, which discards NUL bytes.
+REVIEW_DIFF=$(python3 -I - "$REVIEW_BASE" "$REVIEW_HEAD" <<'PY_REVIEW_DIFF'
+import subprocess
+import sys
+import re
 
-$(git diff $(git merge-base HEAD main)..HEAD | head -500)"
+diff = subprocess.check_output([
+    'git', 'diff', '--no-ext-diff', '--no-textconv', '--no-renames',
+    '--no-relative', '--ignore-submodules=none', '--no-color', '--binary',
+    sys.argv[1], sys.argv[2], '--',
+])
+if re.search(rb'(?m)^GIT binary patch$', diff):
+    sys.exit('Review incomplete: the final patch omits binary content and needs a separate complete review.')
+if b'\0' in diff:
+    sys.exit('Review incomplete: NUL-containing content needs a separate complete review.')
+if re.search(rb'\[\[OCTOPUS_TRUSTED_JSON_CONTRACT_(?:BEGIN|END):[0-9a-fA-F]{32}\]\]', diff):
+    sys.exit('Review incomplete: transport markers need a separate lossless review.')
+if len(diff) > 60000:
+    sys.exit('Review incomplete: the full diff exceeds the 60000-byte quick-review limit. Split it into fully reviewed ranges before continuing.')
+sys.stdout.buffer.write(diff)
+PY_REVIEW_DIFF
+) || exit 1
+# Collect the completed answer, rather than accepting a launch PID as a review.
+REVIEW_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${HOME}/.claude-octopus/plugin}}"
+source "$REVIEW_ROOT/scripts/lib/consultative-advisors.sh" || exit 1
+REVIEW_OUTPUT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/octopus-review-results.XXXXXX") || exit 1
+printf 'REVIEW_OUTPUT_DIR=%s\n' "$REVIEW_OUTPUT_DIR"
+REVIEW_EVENT_LOG="$REVIEW_OUTPUT_DIR/events"
+: > "$REVIEW_EVENT_LOG" || exit 1
+cat > "$REVIEW_OUTPUT_DIR/lifecycle.sh" <<'REVIEW_HOOK'
+#!/usr/bin/env bash
+printf '%s\t%s\t%s\t%s\n' "${1:-}" "${OCTOPUS_AGENT_PID:-}" \
+  "${OCTOPUS_AGENT_STATUS:-}" "${OCTOPUS_AGENT_RESULT_FILE:-}" >> "$OCTO_BRANCH_REVIEW_EVENTS" || exit 1
+if [[ -n "${OCTO_BRANCH_REVIEW_PREV_HOOK:-}" && -x "$OCTO_BRANCH_REVIEW_PREV_HOOK" ]]; then
+  exec "$OCTO_BRANCH_REVIEW_PREV_HOOK" "$@"
+fi
+REVIEW_HOOK
+chmod +x "$REVIEW_OUTPUT_DIR/lifecycle.sh" || exit 1
+REVIEW_PREV_HOOK="${OCTOPUS_AGENT_LIFECYCLE_HOOK:-}"
+OCTOPUS_AGENT_LIFECYCLE_HOOK="$REVIEW_OUTPUT_DIR/lifecycle.sh" \
+OCTO_BRANCH_REVIEW_EVENTS="$REVIEW_EVENT_LOG" \
+OCTO_BRANCH_REVIEW_PREV_HOOK="$REVIEW_PREV_HOOK" \
+OCTOPUS_OVERSIZE_STRATEGY=fail \
+"$REVIEW_ROOT/scripts/orchestrate.sh" spawn code-reviewer "Review this diff for bugs, security issues, and code quality problems. Be concise — only flag real issues, not style preferences.
+
+$REVIEW_DIFF" > "$REVIEW_OUTPUT_DIR/spawn.txt" || exit 1
+# Native Agent Teams emits a dispatch receipt without a collectable answer.
+if grep -q '^AGENT_TEAMS_DISPATCH:' "$REVIEW_OUTPUT_DIR/spawn.txt"; then
+  echo "Review incomplete: native dispatch produced no answer. Use a supervised subprocess review." >&2
+  exit 1
+fi
+if ! _octo_advisor_collect "$REVIEW_EVENT_LOG" "$REVIEW_OUTPUT_DIR/spawn.txt" \
+    "$REVIEW_OUTPUT_DIR/answer.md" "$(( $(date +%s) + 600 ))"; then
+  echo "Review incomplete; inspect $REVIEW_OUTPUT_DIR before retrying." >&2
+  exit 1
+fi
+cat "$REVIEW_OUTPUT_DIR/answer.md" || exit 1
+if [[ "$(git rev-parse --verify 'HEAD^{commit}')" != "$REVIEW_HEAD" ]]; then
+  echo "Review incomplete: HEAD changed during review. Review the current committed range again." >&2
+  exit 1
+fi
+OCTO_BASH
 ```
+
+Binary, submodule and oversized ranges leave the review incomplete. Obtain and
+record a complete review of those changes before proceeding to Step 3.
 
 **If critical issues found:** Present them and ask whether to fix or ship anyway.
 **If clean:** Continue to Step 3. Show a brief `✓ Review clean — no issues found`.
 
+---
 
 ### Step 3: Determine Base Branch & Version
 
@@ -89,6 +177,7 @@ for f in VERSION version.txt package.json; do
 done
 ```
 
+---
 
 ### Step 4: Version Bump & Changelog (Optional)
 
@@ -118,6 +207,7 @@ COMMITS=$(git log --oneline $(git merge-base HEAD $BASE_BRANCH)..HEAD)
 # Prepend to CHANGELOG.md if it exists
 ```
 
+---
 
 ### Step 5: Present Options
 
@@ -136,6 +226,7 @@ Which option? (1-4)
 
 **Keep options concise.** Don't add explanations unless asked.
 
+---
 
 ### Step 4: Execute Choice
 
@@ -171,18 +262,30 @@ git branch -d $FEATURE_BRANCH
 Ready to push when you want: git push origin $BASE_BRANCH
 ```
 
+---
 
 #### Option 2: Create PR
 
 ```bash
 # Get branch info
-FEATURE_BRANCH=$(git branch --show-current)
+FEATURE_BRANCH=$(git branch --show-current) || {
+  echo "PR creation stopped: cannot determine the current branch." >&2
+  return 1 2>/dev/null || exit 1
+}
+if [[ -z "$FEATURE_BRANCH" ]]; then
+  echo "PR creation stopped: check out the reviewed feature branch first." >&2
+  return 1 2>/dev/null || exit 1
+fi
 
-# Push branch
-git push -u origin $FEATURE_BRANCH
-
-# Create PR with a validated description file
-REPO_SLUG=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+# Validate repository and description before publishing the branch
+REPO_SLUG=$(gh repo view --json nameWithOwner --jq .nameWithOwner) || {
+  echo "PR creation stopped: cannot determine the GitHub repository." >&2
+  return 1 2>/dev/null || exit 1
+}
+if [[ -z "$REPO_SLUG" ]]; then
+  echo "PR creation stopped: the GitHub repository is empty." >&2
+  return 1 2>/dev/null || exit 1
+fi
 PR_TITLE=${PR_TITLE:?Complete PR_TITLE before creating the pull request}
 CHANGE_SUMMARY=${CHANGE_SUMMARY:?Complete CHANGE_SUMMARY before creating the pull request}
 CHANGE_REASON=${CHANGE_REASON:?Complete CHANGE_REASON before creating the pull request}
@@ -197,6 +300,11 @@ PR_BODY=$(cat <<EOF
 - [ ] Code review needed
 EOF
 )
+if ! git push -u origin "$FEATURE_BRANCH"; then
+  echo "PR creation stopped: branch push failed. Preserve the branch and repair publication before retrying." >&2
+  return 1 2>/dev/null || exit 1
+fi
+# Create PR with a validated description file
 if ! "${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${HOME}/.claude-octopus/plugin}}/scripts/safe-gh-comment.sh" \
     --repo "$REPO_SLUG" pr-create "$PR_TITLE" "$FEATURE_BRANCH" - <<< "$PR_BODY"; then
   echo "GitHub write state is unknown; check for an existing pull request before retrying:" >&2
@@ -205,7 +313,11 @@ if ! "${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-${HOME}/.claude-octopus/plugin}
 fi
 ```
 
-**Report:**
+Stop after any failed admission or push. Keep the feature branch and report the
+failure. A failed PR write requires checking its recorded recovery state before
+retrying.
+
+**Report only after both the branch push and PR creation succeed:**
 ```
 ✅ Branch pushed to origin/$FEATURE_BRANCH
 ✅ PR created: https://github.com/owner/repo/pull/123
@@ -213,6 +325,7 @@ fi
 Branch preserved for review process.
 ```
 
+---
 
 #### Option 3: Keep As-Is
 
@@ -232,6 +345,7 @@ When ready, you can:
 
 **Do NOT clean up anything.**
 
+---
 
 #### Option 4: Discard
 
@@ -270,6 +384,7 @@ git push origin --delete $FEATURE_BRANCH 2>/dev/null || true
 Work has been permanently discarded.
 ```
 
+---
 
 ### Step 5: Cleanup (If Using Worktrees)
 
@@ -293,6 +408,7 @@ fi
 
 **For Option 3:** Keep worktree intact.
 
+---
 
 ## Quick Reference
 
@@ -303,6 +419,7 @@ fi
 | 3. Keep as-is | - | - | Keep | - |
 | 4. Discard | - | - | Delete | ✓ |
 
+---
 
 ## Integration with Claude Octopus
 
@@ -328,6 +445,7 @@ After completing octopus workflows, use this skill:
 # If validation passes, proceed with finishing-branch
 ```
 
+---
 
 ## Red Flags - Never Do
 
@@ -339,6 +457,7 @@ After completing octopus workflows, use this skill:
 | Delete remote branch silently | Affects collaborators |
 | Proceed when tests fail | Corrupts main branch |
 
+---
 
 ## Common Mistakes
 
@@ -349,6 +468,7 @@ After completing octopus workflows, use this skill:
 | Deleting without confirmation | Require typed "discard" |
 | Cleaning up worktree on "keep" | Only cleanup for options 1, 2, 4 |
 
+---
 
 ## The Bottom Line
 
@@ -358,3 +478,12 @@ Otherwise → Not complete
 ```
 
 **Verify tests. Present options. Execute safely. Clean up appropriately.**
+
+## Execution Contract (MANDATORY - CANNOT SKIP)
+
+This generated Claude Code skill preserves an enforced workflow contract from the source skill.
+
+**PROHIBITED:**
+- Do not summarize, simulate, or skip the referenced workflow command when this skill requires execution.
+- Do not claim provider output or validation artifacts exist without checking the actual files or command output.
+- Do not continue silently when a required provider, command, or host capability is unavailable; report the unavailable dependency and use a supported fallback.

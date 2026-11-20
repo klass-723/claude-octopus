@@ -2,6 +2,7 @@
 _profile_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${_profile_lib_dir}/agent-spec.sh" 2>/dev/null || true
 source "${_profile_lib_dir}/provider-registry.sh" || { echo "dispatch: failed to load provider-registry.sh" >&2; return 1 2>/dev/null || exit 1; }
+source "${_profile_lib_dir}/atlascloud.sh" || return 1
 source "${_profile_lib_dir}/cheaperinference.sh" || return 1
 source "${_profile_lib_dir}/uberllm.sh" || return 1
 source "${_profile_lib_dir}/api-route.sh" || return 1
@@ -32,7 +33,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # shellcheck source=scripts/lib/json-contract.sh
-source "${BASH_SOURCE[0]%/*}/json-contract.sh" || return 1
+source "${_profile_lib_dir}/json-contract.sh" || return 1
 
 #                    gpt-5.2-codex, gpt-5.4-mini (budget), gpt-5 (standard), gpt-5.2, gpt-5.1
 # - OpenAI Reasoning: o3, o3-pro (API-key only), o3 (API-key only), o3-mini (API-key only)
@@ -257,11 +258,14 @@ _octopus_allowed_model_or_fallback() {
 }
 
 # Extract the concrete model serialized by a generated provider command. The
-# fallback preserves providers whose command shape does not carry --model.
+# OpenCode commands use -m; other command shapes retain their fallback model.
 octo_dispatch_command_model() {
-    local command="${1:-}" fallback="${2:-}" resolved
-    resolved="$(printf '%s\n' "$command" | awk '
-      { for (i = 1; i <= NF; i++) if ($i == "--model" && i < NF) { print $(i + 1); exit } }
+    local command="${1:-}" fallback="${2:-}" resolved short_model_flag=""
+    case "$command" in
+        opencode\ *|env\ OPENCODE_PURE=1\ opencode\ *) short_model_flag=-m ;;
+    esac
+    resolved="$(printf '%s\n' "$command" | awk -v short_flag="$short_model_flag" '
+      { for (i = 1; i <= NF; i++) if (($i == "--model" || (short_flag != "" && $i == short_flag)) && i < NF) { print $(i + 1); exit } }
     ')"
     printf '%s\n' "${resolved:-$fallback}"
 }
@@ -271,7 +275,7 @@ octo_dispatch_command_model() {
 get_tool_policy() {
     local role="${1:-}"
     case "$role" in
-        researcher|ai-engineer|business-analyst|research-synthesizer|ux-researcher)
+        researcher|ai-engineer|business-analyst|research-synthesizer|ux-researcher|advisor)
             echo "read_search" ;;
         implementer|tdd-orchestrator|debugger|python-pro|typescript-pro|frontend-developer)
             echo "full" ;;
@@ -583,16 +587,12 @@ get_agent_command() {
             if [[ "$agent_type" == *:* ]]; then
                 model="$(get_agent_model "$agent_type" "$phase" "$role")" || return 1
             else
-                model="${ATLASCLOUD_MODEL:-${OCTOPUS_ATLASCLOUD_MODEL:-${OPENAI_COMPAT_MODEL:-}}}"
-                if [[ -z "$model" && -f "${HOME}/.claude-octopus/config/providers.json" ]] && command -v jq &>/dev/null; then
-                    model="$(jq -r '.providers.atlascloud.default // empty' "${HOME}/.claude-octopus/config/providers.json" 2>/dev/null || true)"
-                fi
-                if [[ -z "$model" ]]; then
-                    log ERROR "ATLASCLOUD_MODEL, OCTOPUS_ATLASCLOUD_MODEL, OPENAI_COMPAT_MODEL, or providers.json atlascloud.default is required"
+                model="$(octo_atlascloud_model)" || {
+                    log ERROR "Set ATLASCLOUD_MODEL, OCTOPUS_ATLASCLOUD_MODEL, or providers.json atlascloud.default"
                     return 1
-                fi
+                }
             fi
-            if ! validate_model_name "$model"; then
+            if ! octo_atlascloud_model "$model" >/dev/null; then
                 log ERROR "Invalid Atlas Cloud model name: ${model}"
                 return 1
             fi
@@ -600,7 +600,8 @@ get_agent_command() {
             fallback=$(validate_model_allowed "atlascloud" "$model")
             if [[ $? -ne 0 ]]; then
                 if [[ -n "$fallback" ]]; then
-                    if ! validate_model_name "$fallback"; then
+                    if ! octo_atlascloud_model "$fallback" >/dev/null ||
+                       ! octo_model_automatic_target_allowed "$fallback" atlascloud; then
                         log ERROR "Invalid Atlas Cloud fallback model name"
                         return 1
                     fi
@@ -622,7 +623,7 @@ get_agent_command() {
                 model="$(get_agent_model "$agent_type" "$phase" "$role")" || return 1
             else
                 if ! model="$(octo_cheaperinference_model)"; then
-                    log ERROR "CHEAPER_INFERENCE_MODEL, OCTOPUS_CHEAPERINFERENCE_MODEL, OPENAI_COMPAT_MODEL, or providers.json cheaperinference.default is required"
+                    log ERROR "CHEAPER_INFERENCE_MODEL, OCTOPUS_CHEAPERINFERENCE_MODEL, or providers.json cheaperinference.default is required"
                     return 1
                 fi
             fi
@@ -663,7 +664,7 @@ get_agent_command() {
                 [[ "$model" == "$ull_exact_model" ]] || return 1
             else
                 if ! model="$(octo_uberllm_effective_model)"; then
-                    log ERROR "UBERLLM_MODEL, OCTOPUS_UBERLLM_MODEL, OPENAI_COMPAT_MODEL, or providers.json uberllm.default is required"
+                    log ERROR "UBERLLM_MODEL, OCTOPUS_UBERLLM_MODEL, or providers.json uberllm.default is required"
                     return 1
                 fi
             fi
@@ -680,7 +681,7 @@ get_agent_command() {
                 model="$(get_agent_model "$agent_type" "$phase" "$role")" || return 1
             else
                 if ! model="$(octo_api_route_model)"; then
-                    log ERROR "API_ROUTE_MODEL, OCTOPUS_API_ROUTE_MODEL, OPENAI_COMPAT_MODEL, or providers.json api-route.default is required"
+                    log ERROR "API_ROUTE_MODEL, OCTOPUS_API_ROUTE_MODEL, or providers.json api-route.default is required"
                     return 1
                 fi
             fi
@@ -929,13 +930,33 @@ get_agent_command() {
             if [[ -n "$model" && "$model" != "default" ]]; then
                 oc_model_flag="-m ${model}"
             fi
-            # --pure skips opencode's external-plugin auto-title path, which
-            # otherwise resolves an SDK handle for a hardcoded small model
-            # before the prompt is even sent — an unresolvable catalog/model
-            # there hangs `opencode run` indefinitely with no timeout or error
-            # (Issue #566). It's a global flag, so it must precede the `run`
-            # subcommand or risk being ignored/rejected.
-            echo "opencode --pure run ${oc_model_flag}"
+            # OpenCode 1.x implements --pure by setting this environment
+            # variable. Preserve its plugin-hang protection (#566) without
+            # passing the removed global flag to OpenCode 2.x (#1172).
+            local oc_major oc_standalone=""
+            if [[ "${DRY_RUN:-false}" != true ]]; then
+                declare -f _octo_opencode_cli_major >/dev/null 2>&1 || source "${_profile_lib_dir}/auth.sh" || return 1
+                oc_major="$(_octo_opencode_cli_major)" || {
+                    local oc_version_rc=$?
+                    [[ "$oc_version_rc" -ne 125 ]] || return 125
+                    log ERROR "OpenCode version unavailable; cannot select a safe server mode"
+                    return "$oc_version_rc"
+                }
+                if [[ "$oc_major" == 2 ]]; then
+                    # The private server shares SQLite credentials and session
+                    # state. The bounded filesystem has no safe writable
+                    # projection for that store yet; never select a shared
+                    # server or hide saved logins behind an empty database.
+                    if [[ "$phase" == tangle ]] &&
+                       [[ "${OCTOPUS_TANGLE_EXECUTION_BOUNDARY:-false}" == true ||
+                          "${OCTOPUS_TANGLE_WRITE_SCOPE_MODE:-strict}" == adaptive ]]; then
+                        log ERROR "OpenCode 2.x bounded Tangle requires saved-login-preserving session storage; this dispatch is unavailable"
+                        return 125
+                    fi
+                    oc_standalone="--standalone "
+                fi
+            fi
+            echo "env OPENCODE_PURE=1 opencode run ${oc_standalone}${oc_model_flag}"
             ;;
         *) return 1 ;;
     esac
@@ -1729,6 +1750,11 @@ get_agent_model() {
                 log ERROR "Invalid fallback model name for $provider"
                 return 1
             fi
+            if [[ "$provider" == atlascloud ]] &&
+               ! octo_atlascloud_model "$fallback" >/dev/null; then
+                log ERROR "Invalid Atlas Cloud fallback model name"
+                return 1
+            fi
             if [[ "$provider" == cheaperinference ]] &&
                ! octo_cheaperinference_model "$fallback" >/dev/null; then
                 log ERROR "Invalid Cheaper Inference fallback model name"
@@ -1894,7 +1920,7 @@ apply_persona() {
     persona=$(get_persona_instruction "$persona_role")
 
     if [[ -z "$persona" ]]; then
-        printf '%s\n' "$prompt"
+        apply_tool_policy "$persona_role" "$prompt" "$agent_name"
         return
     fi
 

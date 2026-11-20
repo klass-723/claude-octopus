@@ -1,14 +1,16 @@
 ---
 name: octopus-quick
-description: "Quick execution for ad-hoc tasks without full workflow overhead — use for small, self-contained requests"
 disable-model-invocation: true
+effort: low
+description: Quick execution for ad-hoc tasks without full workflow overhead — use for small, self-contained requests
+aliases:
+  - quick
+  - quick-mode
+  - adhoc
+trigger: |
+  Use this skill when user says "quick fix", "ad-hoc task", or explicitly
+  requests fast execution without full workflow overhead.
 ---
-
-> **Host: Codex CLI** — This skill was designed for Claude Code and adapted for Codex.
-> Cross-reference commands use installed skill names in Codex rather than `/octo:*` slash commands.
-> Use the active Codex shell and subagent tools. Do not claim a provider, model, or host subagent is available until the current session exposes it.
-> For host tool equivalents, see `skills/blocks/codex-host-adapter.md`.
-
 
 # Quick Mode - Lightweight Task Execution ⚡
 
@@ -60,6 +62,7 @@ Fast-track execution for small tasks that don't need full Double Diamond workflo
 
 **Use full workflows for complex work to ensure quality.**
 
+---
 
 ## Execution Flow
 
@@ -81,6 +84,7 @@ User Request → Direct Implementation → Atomic Commit → Summary
 - ✅ Summary generation (stored in .claude-octopus/quick/)
 - ✅ Change documentation
 
+---
 
 ## Usage
 
@@ -106,6 +110,7 @@ Task: "fix typo in README.md line 42"
 /octo:quick "remove console.log statements"
 ```
 
+---
 
 ## Implementation
 
@@ -115,6 +120,11 @@ Quickly assess:
 - What file(s) need to change?
 - What's the specific change?
 - Any dependencies or side effects?
+
+Inspect the existing index and working-tree diff before editing. Select only
+task-owned paths. If a selected file already contains unrelated changes, use a
+deliberate partial-commit workflow instead of quick mode. Leave unrelated files
+and their staged changes intact.
 
 ### Step 2: Make the Change
 
@@ -128,16 +138,21 @@ Implement directly using appropriate tools:
 **Always create a descriptive commit:**
 
 ```bash
-# Stage changes
-git add [changed-files]
+# Replace this array with the exact task-owned paths, including deletions.
+QUICK_FILES=("path/to/task-file")
+git --literal-pathspecs add -- "${QUICK_FILES[@]}" || exit 1
 
-# Create commit with clear message
-git commit -m "quick: [brief description]
+# Commit only those paths; preserve unrelated staged files in the index.
+git --literal-pathspecs commit --only -m "quick: [brief description]
 
 [Detailed explanation if needed]
 
-Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>" -- "${QUICK_FILES[@]}" || exit 1
 ```
+
+If staging or committing fails, stop the workflow. Do not record successful
+execution, generate a completion summary, or report an earlier commit as this
+task's result. Preserve the edits for recovery.
 
 **Commit message format:**
 - Prefix with `quick:` to indicate quick mode
@@ -186,12 +201,14 @@ $(git rev-parse HEAD)
 ## Timestamp
 $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+---
 *Executed in Quick Mode - minimal overhead execution*
 EOF
 
 echo "📝 Summary saved to: $summary_file"
 ```
 
+---
 
 ## Complete Example
 
@@ -214,10 +231,10 @@ echo "📝 Summary saved to: $summary_file"
 
 3. **Commit atomically**
    ```bash
-   git add README.md
-   git commit -m "quick: fix typo in README (recieve → receive)
+   git --literal-pathspecs add -- README.md || exit 1
+   git --literal-pathspecs commit --only -m "quick: fix typo in README (recieve → receive)
 
-   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+   Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>" -- README.md || exit 1
    ```
 
 4. **Record in state**
@@ -239,6 +256,7 @@ echo "📝 Summary saved to: $summary_file"
    📋 Summary: .claude-octopus/quick/20260129-143045-summary.md
    ```
 
+---
 
 ## Benefits of Quick Mode
 
@@ -263,6 +281,7 @@ echo "📝 Summary saved to: $summary_file"
 - Doesn't over-engineer simple changes
 - Reserves full workflows for complex work
 
+---
 
 ## When Quick Mode Isn't Enough
 
@@ -290,6 +309,7 @@ Would you like me to switch to a full workflow?
 - Performance implications
 - Breaking changes
 
+---
 
 ## Directory Structure
 
@@ -310,6 +330,7 @@ Each summary includes:
 - Commit hash
 - Timestamp
 
+---
 
 ## Comparison: Quick Mode vs Full Workflow
 
@@ -324,6 +345,7 @@ Each summary includes:
 | **Best For** | Simple fixes | Complex features |
 | **When to Use** | Known solution | Unknown solution |
 
+---
 
 ## Best Practices
 
@@ -341,6 +363,7 @@ Each summary includes:
 - ❌ Use quick mode for security-sensitive changes
 - ❌ Force quick mode when full workflow is appropriate
 
+---
 
 ## Troubleshooting
 
@@ -356,6 +379,7 @@ Each summary includes:
 ### "Multiple files need changes"
 → Consider /octo:develop for coordinated multi-file changes.
 
+---
 
 ## Summary
 

@@ -2,15 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rollback preserves lessons in a private temporary backup, carries its exact
+  path across shell calls, and retains recovery data when restoration fails.
+
+## [11.26.0] - 2026-11-18
+
 ### Added
 
-- UberLLM as an OpenAI-compatible agent provider. `uberllm-agent` uses the
-  shared tool-loop helper with `UBERLLM_API_KEY` and an explicit
-  `UBERLLM_MODEL`, `OCTOPUS_UBERLLM_MODEL` or `providers.uberllm.default`
-  model. It is excluded from Council, like the other gateway agents.
-  Readiness and fleet selection use the dispatched model and its allowlist
-  fallback. Exact seats keep their model pins, and MCP preserves model policy.
-  DeepSeek Flash estimates use its published peak, uncached fallback rates.
+- The OpenAI-compatible tool-loop helper can explicitly load a custom preset
+  from `providers.json` with its own endpoint, credential and model allowlist.
+  Custom presets do not yet register orchestration seats or cost-report rows.
 
 - `OCTOPUS_AGY_FALLBACK_MODELS` lists Gemini models for agy to retry, in
   order, when the backend answers 503 "No capacity available for model". The
@@ -28,176 +31,542 @@
 
 ### Fixed
 
-- Named OpenAI-compatible presets keep their own endpoint and credential
-  selection when the generic provider slot is configured. Direct helper calls
-  no longer inherit that slot's URL or credential name. Explicit flags still
-  take priority.
+- Debate counts the native Sonnet advisor only on an allowed Claude Code route
+  with a completed round artifact. Codex requires two external advisor results
+  instead of counting an unverified host subagent as Sonnet.
+- Claude Code discovers native workflow skills while Codex loads its separate
+  adapted skill tree. All existing skill names, explicit invocation controls,
+  aliases and starter-pack entries remain available.
 
-- Full unit coverage uses six weighted macOS lanes and four Linux lanes. This
-  leaves more room for longer hosted macOS suite durations while retaining
-  every suite and the existing 20-minute step limit.
+- Define stops after failed decision, context or completion writes, preserving
+  earlier state and requiring repair before presenting the result as saved.
 
-- Unit shards include newer hosted macOS suite timings in their duration
-  weights. The full suite and 20-minute per-shard timeout remain in place.
+- Research prompts request full IDs (`PLAT-1931`, `probe-4`) to avoid false numeric-claim failures.
 
-- Council seats reviewing a plan are no longer marked blind for quoting the
-  plan's proposed code under the source file it would change (sail-cruisey
-  #3118). A quote that is in no cited file and no diff now verifies when it is
-  in the text of a prose `--context-file`, and `grounding` counts it under
-  `quotes_verified_in_context` with `diff_sources` naming
-  `context-file-text`. A quote of `||` written as `\|\|` inside a Markdown
-  table cell now matches the source line (sail-cruisey #3125).
+Merged changes: [#1356](https://github.com/nyldn/claude-octopus/pull/1356),
+[#1369](https://github.com/nyldn/claude-octopus/pull/1369),
+[#1371](https://github.com/nyldn/claude-octopus/pull/1371),
+[#1370](https://github.com/nyldn/claude-octopus/pull/1370), and
+[#1375](https://github.com/nyldn/claude-octopus/pull/1375).
+The debate repair fixes [#1373](https://github.com/nyldn/claude-octopus/issues/1373).
+Custom orchestration seats remain tracked in
+[#1299](https://github.com/nyldn/claude-octopus/issues/1299), and broader runtime
+and installed-host acceptance work remains in
+[#1304](https://github.com/nyldn/claude-octopus/issues/1304).
 
-- Council quote verification now checks each quote against the file the seat
-  attributes it to. A quote placed directly under a citation, or introduced as
-  "`x.ts:12` reads `...`", must appear in that file, the other cited files, or
-  the reviewed diff. If it does not, the seat is marked blind even when its
-  other quotes verify. In sail-cruisey #3005 an agy seat listed
-  `c.royalup_price = ub.bid_amount * 2,` under a real `path:112` citation, but
-  the file says `SET royalup_price = (mut.bid_amount * 2)::numeric(14,2)`. The
-  seat still passed because five of its other quotes were real. A multi-line
-  block now verifies only as a whole or when at least two thirds of its
-  specific lines are in the file, so one real signature line no longer carries
-  an invented body. Proposed code ("should become:", "such as") is not checked
-  against the current file.
+## [11.25.2] - 2026-11-17
 
-- Grounded council seats are no longer marked blind in these cases from
-  sail-cruisey #3032:
-  - They cite an attached `--context-file` by its basename
-    (`phase-3-plan.md:8`), or cite a file under a hidden directory such as
-    `.todo/`.
-  - They quote source as `>` blockquotes, including HTML-escaped `&gt;` ones.
-  - They quote a command they ran (`npm ci --dry-run ...`).
-  - They quote a file outside the evidence root, such as an upstream SDK or a
-    symlinked `node_modules`.
+### Fixed
 
-  Citations now resolve against the root first, then the context files, then a
-  unique path suffix under the root that may include hidden directories. A
-  quote tied to a citation that resolves nowhere, and a command, are counted
-  as unverifiable, not fabricated. A bare source line directly under a line
-  that holds only a citation counts as verified evidence when it matches. New
-  `grounding` counters in `summary.json` show which rule applied to each quote.
+- Discover rejects missing or empty synthesis and stops after failed context or
+  metrics writes, preserving earlier state instead of presenting completion.
 
-- A council seat is no longer marked fabricated for a test input it built
-  itself (sail-cruisey #3247). A span introduced as "constructed as", "built
-  as" or "crafted as" is the seat's own proposal, like one introduced by
-  "such as", so a seat whose only checked quote was such an input is no longer
-  dropped as blind beside real citations. After a content verb, as in
-  "x.ts:2 contains the code built as", the span is still the file's code and is
-  checked, unless "I" or "we" built it. Quote reports also gain
-  `quotes_partial`, which counts fences that verify through a whole-fence
-  elision or the two-thirds specific-line threshold in a cited file or diff side,
-  but lack a complete match in any checked source, short lines included. Short
-  lines do not count toward that threshold; a whole-fence elision match does
-  not require it. Lines can match separately and out of
+- Deliver stops after failed context, metrics or ready-to-ship state writes and
+  failed summary reads, preserving earlier state without reporting completion.
 
-  `quotes_partial`, which counts fences that verify at the two-thirds
-  threshold in a cited file or diff side, but lack a complete match in any
-  checked source, short lines included. Lines can match separately and out of
-  order. Mixed diff fences check the removed portion against the removed side
-  and the kept portion against a cited file or the added side. A complete
-  match clears partial status for that portion. An optional diff lookup may
-  time out, so partial status does not prove a line is absent from all evidence.
-  It does not change the verdict. Optional diff refinement no longer
-  prevents a later quote from receiving the normal required lookup after a
-  timeout. Partial accounting stops at its first missing line, batches short
-  literal matches into bounded index batches after sparse per-file substring
-  searches, and reuses retained-fragment checks across quotes. Non-fence quotes
-  skip report-only partial scans in source files and diff sides, while later
-  bound files can still supply near-line evidence after a complete match,
-  within a 64 KiB per-quote refinement budget. Exhausting that supplemental
-  budget can undercount near-line matches but does not reject a verified quote.
-  First-person builders also recognize modifiers such as "I just built as"
-  and contracted subjects such as "I've built as" and "we'd built as",
-  without excusing code attributed to someone else. An explicit later source
-  subject such as "but the file reads" or "but the file itself reads" restarts
-  the source claim even in the same sentence.
-  Mixed diff fences skip added-side refinement when their kept source code
-  already matches completely, preserving time for required evidence checks.
-  Later sentences require an explicit source subject before attributing a quote,
-  preserving reviewer-owned calculations and reproduction code.
-  Patch-only lead-ins such as "I recommend this patch. Apply it as follows:"
-  preserve the preceding proposal without excusing a later current-source claim.
-  Inline code punctuation and proposal words no longer alter the surrounding
-  prose's ownership or sentence boundaries.
-  Partial-fence refinement in unrelated cited files has its own 64 KiB
-  per-quote budget. If the next complete file exceeds that budget, reporting
-  retains the verified partial result without searching further unbound files.
-  Report-only elision and diff-side scans share a fixed work budget. Exhaustion
-  retains source verification and conservative partial status; required evidence
-  matching keeps its normal checks.
-- Parallel cleanup finishes a stopped worker's durable execution contract as
-  cancelled, so run status no longer reports that worker as still running.
-  Native Agent Teams seats remain running until their own completion is known.
+Merged changes: [#1366](https://github.com/nyldn/claude-octopus/pull/1366) and
+[#1363](https://github.com/nyldn/claude-octopus/pull/1363).
+These address focused parts of [#1304](https://github.com/nyldn/claude-octopus/issues/1304);
+its broader runtime, provenance and installed-host acceptance work remains open.
 
-- Reclaiming an exited invocation's output claim cancels the running seats its
-  owner record names, including seats inherited through an interrupted reclaim.
-  A different task ID that maps to the same result file is no longer blocked by
-  the exited owner's seat. Probe status rows use the canonical spawn seat ID.
-  An abnormal controller exit stops its workers before releasing their claims,
-  and a results path through a symlink and `..` addresses the same claim
-  directory as the shell.
-- Parallel dispatch recovers interrupted contract writes before checking a new
-  seat, and interruption cleanup releases claims with relative result paths.
-  Unrecoverable ledgers and reused seats keep their saved outputs intact.
-- Parallel dispatch preserves saved results and completion markers when a
-  repeated task ID cannot be admitted by its durable run contract. Use a new
-  task ID for a new attempt in the same run.
-- Large parallel task batches retain their scoped results without exceeding
-  command-line argument limits, and invalid scopes report an aggregation error.
-  A spawn that fails after recording a running seat marks that seat cancelled
-  in the status ledger. Interrupted shell-only claims report their manual
-  recovery procedure.
-- The agent run summary no longer reports a provider's successful seat as
-  failed when another of its seats times out. The status ledger kept the
-  latest row per agent name, so a probe with two Claude seats printed "2 of 2
-  agents failed or timed out" after one seat's 603-second timeout replaced the
-  other seat's completed result. The same lookup left that result out of the
-  outputs offered to synthesis. Rows are now kept per seat, by seat ID or else
-  by result file, in the summary, the `agents.json` snapshot and the output
-  list. Probe and aggregate summaries count only their own seats, because the
-  ledger spans every command in a session.
-- Output claims publish their owner atomically, so an interrupted claim
-  preparation cannot permanently block retries. Live owners keep their outputs.
-  Workers that fail without recording a terminal status are marked cancelled.
-  When a durable execution contract exists, another attempt requires a new task
-  ID in the same run.
-- Quota cleanup delivers an identity-bound TERM to the timeout supervisor and
-  lets its handler finish. Reparented helpers are cleaned up even when the
-  provider leader has been reaped, and unrelated process exits cannot exhaust
-  global-snapshot retries. The handoff never forcibly kills a pending handler.
-  macOS zombie admission in optional owned-group cleanup uses native zombie lookup.
-- A peer seat's quota marker no longer relabels an externally terminated call
-  or adds a false circuit-breaker failure. Quota stop attribution stays local
-  to the current attempt even when its diagnostic cannot be written.
-- Quota fast-fails preserve a provider's own temporary-failure status and auth
-  retry behavior. Quota stops update the provider circuit breaker, and persisted
-  cooldown timestamps correctly block repeat dispatch until their deadline. Future timestamps
-  from clock rollback or corrupt state allow a probe instead of an unbounded wait.
-  Successful recovery clears that failure history so separate quota episodes
-  do not count as consecutive failures. Parallel quota failures update the
-  breaker together, and an unwritable diagnostic marker cannot prevent worker
-  completion after a quota stop.
-  Lock contention does not turn an expired cooldown into an open circuit, and
-  failure-log trimming uses private temporary files without following stale links.
-  Quota stops also clean up owned provider and timer processes, so a stopped
-  call does not wait for a leftover timeout before returning. Refused handoffs
-  allow at most five attempts, with a visible error if cleanup cannot finish.
-- Direct spawns respect terminal quota and auth markers even when no transient
-  cooldown is active. Provider reset hints remain inside untrusted result frames.
-- Quota and termination status summaries use launcher-authored reasons so provider diagnostics
-  cannot enter synthesis instructions through trusted failure metadata.
-- Run-local smoke failures keep their health-failure reason. External SIGTERM
-  preserves exit 143 through spawn results and lifecycle events instead of
-  claiming the provider exceeded its timeout.
-  Synchronous dispatch also records a failed termination in status and usage
-  rather than a timeout, with a launcher-authored reason.
+## [11.25.1] - 2026-11-17
+
+### Fixed
+
+- Brainstorm Team mode, debate, branch-completion review, the deck red-team seat
+  recipe and define run their shell blocks under bash when the host shell is zsh,
+  as Claude Code's Bash tool is on macOS. The bash-only libraries they load now
+  stop with that fix instead of reporting the advisor allowlist as unavailable.
+  Those blocks export literal inputs before the heredoc and print what later
+  steps need, including whether host Claude may join. Request text cannot expand
+  as shell code or terminate the fixed heredoc. Bash children receive the provider
+  allowlist, and later debate steps restore their run directory.
+- Develop stops after a failed implementation decision, context or metrics write,
+  preserving earlier state for inspection instead of presenting completion.
+
+- Stop development completion after failed checkpoint creation or state updates.
+
+- Branch completion validates its branch, repository and required PR description
+  before pushing, and stops PR creation after a failed push instead of reporting
+  successful publication.
+
+Merged changes: [#1359](https://github.com/nyldn/claude-octopus/pull/1359),
+[#1360](https://github.com/nyldn/claude-octopus/pull/1360),
+[#1361](https://github.com/nyldn/claude-octopus/pull/1361), and
+[#1350](https://github.com/nyldn/claude-octopus/pull/1350).
+These address focused parts of [#1304](https://github.com/nyldn/claude-octopus/issues/1304);
+its broader runtime, provenance and installed-host acceptance work remains open.
+
+## [11.25.0] - 2026-11-16
+
+### Added
+
+- Direct spawn callers can select `OCTOPUS_SPAWN_ROLE=advisor` to keep the
+  advisor brief and read/search tool policy without implementer or architecture
+  persona injection. Other nonempty values are rejected. ([#1353](https://github.com/nyldn/claude-octopus/pull/1353))
+
+### Fixed
+
+- Repeated citations reuse ordered path and line bindings so large grounded
+  council answers can finish within the existing quote-verification deadline.
+- Parallel work packages recheck their repository, branch and frozen-base ancestry
+  after the worker exits. Unexpected changes stop completion and retain the
+  worktree for inspection instead of counting or removing unrelated work.
+- Shipping state updates reject linked or nonregular files and stop delivery when
+  required context is missing or a write fails. Readiness uses the shared state
+  reader so canonical status takes precedence over legacy and historical fields.
+  Atomic replacements preserve access ACLs and extended attributes, and stop
+  before publication if that metadata cannot be retained.
+- Rollback history verifies the confirmed repository before appending, so a
+  later shell in another clone cannot record recovery in the wrong project.
+- Rollback history refuses hard-linked state files before appending, protecting
+  files outside the project that share the same inode.
+- Shipping checkpoints stop when the source has changed since its audit and
+  tag the exact audited commit. A failed tag stops finalization.
+- Brainstorm, debate and deck advisors spawn in a dedicated `advisor` role.
+  Their prompt is no longer wrapped in the implementer persona and the
+  architecture-review skill contract, which made Codex answer a brainstorm as
+  an architecture decision. Persona packs and routing rules no longer reassign
+  advisor briefs. Cursor and Command Code advisors default to read-only modes;
+  `OCTOPUS_CURSOR_AGENT_MODE` and `OCTOPUS_COMMANDCODE_PERMISSION_MODE` can
+  override those defaults. Codex retains its configured sandbox mode.
+
+Merged changes: [#1349](https://github.com/nyldn/claude-octopus/pull/1349),
+[#1353](https://github.com/nyldn/claude-octopus/pull/1353),
+[#1354](https://github.com/nyldn/claude-octopus/pull/1354),
+[#1355](https://github.com/nyldn/claude-octopus/pull/1355),
+[#1352](https://github.com/nyldn/claude-octopus/pull/1352), and
+[#1357](https://github.com/nyldn/claude-octopus/pull/1357).
+These address parts of [#1304](https://github.com/nyldn/claude-octopus/issues/1304);
+its broader runtime and installed-host acceptance work remains open.
+
+## [11.24.2] - 2026-11-16
+
+### Fixed
+
+- Shipping audits reject binary bytes hidden by forced-text Git attributes,
+  including content outside the displayed patch context and deleted blobs.
+- PostCompact restores workflow context when completed phases are stored as a count, and accepts scalar blockers.
+- Shipping archives reject linked state paths and special files, keep copies
+  private, and stop delivery when any required copy fails.
+- Staged reviews stop for binary, submodule, empty or oversized input instead of reporting incomplete source coverage as a review.
+- Shipping lessons reject linked state paths, hard-linked lesson files and nonregular files before writing.
+
+- Branch completion dispatches the configured code-reviewer persona so its required review can start.
+- Branch completion reviews the full bounded text diff and stops for binary,
+  submodule or oversized changes that need separate complete review.
+
+Merged changes: [#1340](https://github.com/nyldn/claude-octopus/pull/1340),
+[#1342](https://github.com/nyldn/claude-octopus/pull/1342),
+[#1343](https://github.com/nyldn/claude-octopus/pull/1343),
+[#1344](https://github.com/nyldn/claude-octopus/pull/1344),
+[#1345](https://github.com/nyldn/claude-octopus/pull/1345), and
+[#1346](https://github.com/nyldn/claude-octopus/pull/1346).
+The review fixes address parts of [#1304](https://github.com/nyldn/claude-octopus/issues/1304);
+its broader runtime and installed-host acceptance work remains open.
+
+## [11.24.1] - 2026-11-15
+
+### Fixed
+
+- Parallel workers share one frozen base commit across launches and waves;
+  retries preserve descendant commits.
+- Dependent waves stop after failed prerequisites, invalid exit status or timeouts.
+  Timeouts retain worker evidence for inspection and recovery.
+- Result summaries require completion markers before counting successful workers.
+- Cleanup retains worktrees whose index flags can hide local edits or deletions.
+- API estimates apply whole-request long-context tariffs to supported GPT-5.4,
+  GPT-5.5 and GPT-5.6 model IDs above 272,000 input tokens.
+- Usage reports recognize qualified model IDs, and provider billing overrides
+  retain precedence across reservations, ledgers and standalone metrics.
+
+Merged changes: [#1335](https://github.com/nyldn/claude-octopus/pull/1335),
+[#1338](https://github.com/nyldn/claude-octopus/pull/1338),
+[#1337](https://github.com/nyldn/claude-octopus/pull/1337),
+[#1339](https://github.com/nyldn/claude-octopus/pull/1339), and
+[#1336](https://github.com/nyldn/claude-octopus/pull/1336).
+The parallel fixes address parts of [#1304](https://github.com/nyldn/claude-octopus/issues/1304);
+its broader runtime and installed-host acceptance work remains open.
+
+## [11.24.0] - 2026-11-15
+
+### Changed
+
+This batch protects local work during quick tasks and rollback, binds shipping
+audits to the delivered commits, verifies current research and Council evidence,
+and supports OpenCode 2.x dispatch. Factory requires independent holdout evidence
+and stops after failed stages. Configured Antigravity capacity fallbacks are
+opt-in; existing model choices remain intact.
+
+Merged changes: [#1334](https://github.com/nyldn/claude-octopus/pull/1334), [#1327](https://github.com/nyldn/claude-octopus/pull/1327), [#1326](https://github.com/nyldn/claude-octopus/pull/1326), [#1325](https://github.com/nyldn/claude-octopus/pull/1325), [#1324](https://github.com/nyldn/claude-octopus/pull/1324), [#1321](https://github.com/nyldn/claude-octopus/pull/1321), [#1322](https://github.com/nyldn/claude-octopus/pull/1322), [#1323](https://github.com/nyldn/claude-octopus/pull/1323), [#1320](https://github.com/nyldn/claude-octopus/pull/1320), [#1319](https://github.com/nyldn/claude-octopus/pull/1319), [#1318](https://github.com/nyldn/claude-octopus/pull/1318), [#1317](https://github.com/nyldn/claude-octopus/pull/1317), [#1316](https://github.com/nyldn/claude-octopus/pull/1316), [#1315](https://github.com/nyldn/claude-octopus/pull/1315), [#1314](https://github.com/nyldn/claude-octopus/pull/1314), [#1313](https://github.com/nyldn/claude-octopus/pull/1313), [#1312](https://github.com/nyldn/claude-octopus/pull/1312), [#1311](https://github.com/nyldn/claude-octopus/pull/1311), [#1310](https://github.com/nyldn/claude-octopus/pull/1310), [#1309](https://github.com/nyldn/claude-octopus/pull/1309), [#1308](https://github.com/nyldn/claude-octopus/pull/1308), [#1307](https://github.com/nyldn/claude-octopus/pull/1307), [#1306](https://github.com/nyldn/claude-octopus/pull/1306), [#1257](https://github.com/nyldn/claude-octopus/pull/1257), [#1301](https://github.com/nyldn/claude-octopus/pull/1301).
+These address parts of [#1304](https://github.com/nyldn/claude-octopus/issues/1304),
+which remains open for outstanding runtime and acceptance work.
+
+The rollback boundary also includes [#1328](https://github.com/nyldn/claude-octopus/pull/1328),
+[#1329](https://github.com/nyldn/claude-octopus/pull/1329), and
+[#1332](https://github.com/nyldn/claude-octopus/pull/1332), which preserves hidden
+local edits and deletions marked assume-unchanged.
+
+Shipping's source-review boundaries are covered by
+[#1330](https://github.com/nyldn/claude-octopus/pull/1330) for submodules and
+[#1331](https://github.com/nyldn/claude-octopus/pull/1331) for Git-classified binary files.
+
+### Added
+
+- `OCTOPUS_AGY_FALLBACK_MODELS` lists Gemini models for agy to retry, in
+  order, when the backend answers 503 "No capacity available for model". The
+  council seat records the model that answered, with `model_fallback.from`, so
+  a busy model no longer stops the council. Non-Gemini entries are skipped.
+
+### Fixed
+
+- Factory satisfaction scoring rejects failed, missing, duplicate or out-of-range
+  evaluator scores instead of inventing defaults or accepting false completion.
+
+- Rollback refuses assume-unchanged index entries before restoring files, so
+  hidden local edits and deletions remain intact. Protected lessons stay excluded.
+
+- Shipping stops the quick audit when binary files change, requiring a separate complete review of their content.
+- Shipping stops the quick audit for added, removed or updated submodules, whose source needs a separate complete review.
+- Rollback refuses sparse or skip-worktree exclusions and linked lessons directories
+  before restoring files, so partial recovery cannot be reported as complete.
+- Rollback rejects linked lessons files whose tracked backing content could otherwise be restored.
+
+- Factory stops before evaluation or completion when initial or retry implementation fails.
+- Factory discards failed scenario-provider output and tries healthy fallbacks.
+- Factory stops when scenario evidence cannot be saved.
+- Factory rejects negated or ambiguous verdicts and duplicate summary scores in holdout evaluations.
+- Factory assigns unique IDs across provider scenario lists and supplies the complete holdout set to the evaluator.
+
+- Factory rejects malformed holdout evaluations and scores outside the 0 to 1 range.
+- Satisfaction scoring uses the validated holdout value, including zero, and stops when it cannot save the score record.
+- Factory retries failed holdout providers and stops without scoring when none can evaluate the scenarios.
+
+- Factory stops before implementation when generated scenarios leave no independent holdout.
+- Factory stops when it cannot save scenario or holdout evaluation evidence.
+- Missing or empty holdout evidence cannot earn a perfect score; evaluation failures stop Factory, including retries.
+- Shipping audits review the confirmed committed source range and report its base and delivered revisions.
+- Shipping stops audits on dirty, empty, oversized or changed source instead of accepting incomplete evidence.
+- Delivery stops on context-budget rejection or failed or empty required review under the audit's fail strategy.
+- Delivery initializes feature context without changing source metadata.
+- Optional Tangle delivery propagates failures instead of reporting success after rejection.
+
+- Freeze enforcement recovers the Codex session identity in later hook processes
+  without a host export or matching hook session ID, so out-of-scope edits stay
+  blocked after activation. Explicit hosts and Claude session IDs keep precedence.
+
+- Advisory workers clear inherited and temporary Git environment values before
+  dispatch, so a temporary repository selection cannot expose another checkout
+  to accidental Git writes from the disposable advisory copy.
+
+- Interrupted council launches retain a cancellation record for a seat stopped
+  during scheduler ownership transfer, so collection cannot mistake it for work
+  that was never launched.
+
+- Resuming tasks refreshes the queue and starts only an unblocked pending task.
+  Fully blocked and empty queues report their state without starting work.
+
+- Rollback stops before partially restoring checkpoints with changed submodules.
+  It reports the required manual restoration instead of treating a gitlink update
+  as a complete recovery of the nested working tree.
+
+- Rollback confirmation stays bound to the previewed repository, branch, revision
+  and checkpoint. Changed context requires a new preview before any restoration.
+
+- Linux review previews and advisory copies can traverse execute-only ancestor
+  directories while retaining symlink rejection and descriptor identity checks.
+
+- Council waits retain a running-round observation when the producer finishes
+  during a poll, so the new result is returned without an unnecessary settle delay.
+
+- Parallel workflow summaries restore the work-package count in each shell,
+  so every worker's result is included after resuming aggregation.
+
+- Debate state preserves quotes, newlines, backslashes and Unicode in questions
+  and clarifying answers, so saved debates remain readable by JSON consumers.
+
+- Quick tasks commit only their selected files, preserve unrelated staged work,
+  and stop before recording completion when staging or committing fails.
+
+- Quota and authentication failures update the original provider seat in agent
+  summaries instead of leaving duplicate entries that still show it running.
+
+- Council grounding checks a later source claim even when an earlier clause
+  describes the reviewer's own estimate or calculation.
+- Rollback history requires the exact target and safety checkpoint tags in each
+  shell call and updates the repository state file when run from a subdirectory.
+  It refuses symlinked state paths so restored checkpoints cannot redirect the
+  history append into another file.
+
+- Deep research validates the current invocation's completed synthesis in the
+  active host session instead of accepting an unrelated recent report.
+- Checkpoint rollback removes tracked files added after the checkpoint and
+  restores deleted files from any subdirectory. It refuses collisions with
+  ignored local files or replacements of the protected lessons directory while
+  retaining current lessons and commit history.
+- Checkpoint rollback refuses uncommitted or untracked work before preview,
+  safety tagging and restoration, so a tag cannot be mistaken for a backup of
+  changes that exist only in the working tree or index.
+
+- OpenCode debates admit the Claude moderator before proposals; successful
+  quorum debates need no moderator. Squeeze verifies its required providers
+  and stops on empty phases or failed fallbacks. Completed research resumes
+  return saved results without requiring live provider admission.
+- Command Code availability probes exclude the unrelated Mistral credential,
+  matching the existing health probe.
+
+- Fresh Embrace runs confirm an unpinned OpenCode login before rejecting
+  readiness. Resumed workflows keep the existing admission
+  path; skipped probes and provider exclusions remain enforced.
+- Authentication-library initialization uses the system `dirname`, so a
+  project-selected utility cannot run before OpenCode admission guards.
+
+
+- OpenCode readiness pins its bootstrap tools and clears `BASH_ENV` before
+  starting probe shells. Dependency loading stays outside the project directory,
+  while the guarded login check retains project-relative CLI selection.
+
+- OpenCode debate and fan-out seats appear in the production agent inventory.
+  Interpreter supervision uses system cleanup timers when a project changes
+  `PATH`, and cancellation tests retain real waits for supervisor children.
+
+- The six-worker feature-task fixture resets its eight-second join deadline
+  after each worker starts. Staggered launches retain the concurrency
+  check, while serial waves and stalled workers still fail.
+
+- OpenCode admission applies bounded Tangle isolation before executing probes.
+  Version checks omit forwarded credentials; login checks disable project
+  configuration and reject project-owned executables or configuration paths.
+  Saved logins, external custom configuration and environment-only login remain
+  available. Command refusals preserve exit 125 and their launcher diagnostic.
+- Non-council research ignores unrelated council roster admission while honoring
+  explicit preflight panels. Opus selection displays the command's model, and
+  OpenCode dry runs identify unchecked server mode and bounded availability.
+
+- Automatic research confirms SQLite-only and environment-only OpenCode logins
+  before choosing its fleet, including without a pinned council roster. Static
+  preflight inspection, probe skips and existing provider exclusions are preserved.
+
+- SQLite-only and environment-only OpenCode logins retain existing quota and
+  run-local health exclusions. Excluded seats are not probed or readmitted.
+  Copilot capability and GitHub authentication probes omit the unrelated
+  Mistral credential forwarded for OpenCode while preserving parent settings.
+
+- OpenCode discovery and readiness check each supported environment token
+  independently, so a blank token cannot hide another configured login.
+  Preflight uses the current directory when the configured project root is
+  absent, matching direct-probe directory selection.
+
+- Selected OpenCode seats receive login confirmation even when a fixed provider
+  panel omits them. Static discovery recognizes the same supported environment
+  credentials as readiness checks without launching the CLI.
+
+- MCP preserves OpenCode's custom XDG configuration, cache and state roots.
+  GitHub authentication checks and OpenCode workers explicitly using known
+  non-Mistral provider namespaces exclude the unrelated Mistral key. Mistral,
+  custom providers and configured default models retain their credential.
+
+
+- Cursor version and session-status probes exclude the Mistral credential
+  forwarded for OpenCode, while preserving Cursor session authentication and
+  the parent environment.
+
+- Claude startup version, status and capability checks exclude the Mistral
+  credential forwarded for OpenCode, while preserving parent authentication.
+  MCP also preserves the explicit `OPENCODE_CONFIG` file selector so custom
+  OpenCode provider settings reach login checks and dispatch. OpenCode version
+  probes omit Mistral and search credentials, while login checks retain the
+  required Mistral credential and omit the unrelated search key.
+
+- CommandCode health checks exclude the Mistral credential forwarded for
+  OpenCode. Failed selected OpenCode admission preserves the broad discovery
+  cache, including login and provider smoke failures.
+
+- Fixed-panel OpenCode dispatch confirms SQLite-only and environment logins
+  before admitting work. Panel inspection stays static, and unrelated panel
+  providers retain their existing readiness checks.
+
+- Automatic OpenCode routing displays its model without launching a version
+  probe. Compatibility helpers still load when their libraries were sourced by
+  bare filename before the working directory changed.
+
+- Broad preflight scans and roster inspection no longer launch OpenCode version
+  or login probes. Selected OpenCode dispatch and workflows with a pinned
+  OpenCode roster still confirm login and cannot
+  reuse or populate the broad discovery cache. Single-agent probes confirm a
+  pinned OpenCode roster even when another provider handles the selected seat.
+
+- OpenCode checks and private servers launched through MCP retain an explicit
+  `OPENCODE_CONFIG_DIR`, preserving custom configuration alongside SQLite login
+  storage. Other providers retain their existing environment isolation.
+
+- MCP OpenCode calls preserve custom SQLite login paths selected with
+  `OPENCODE_DB` and `XDG_DATA_HOME`, so saved logins remain discoverable.
+
+- OpenCode 2.x dispatch no longer passes the removed `--pure` flag. OpenCode
+  1.x keeps its external-plugin hang protection through `OPENCODE_PURE=1`.
+  Discovery recognizes SQLite login storage without launching OpenCode. An
+  explicit live readiness check confirms saved or environment credentials,
+  with bounded version and login commands. Version-aware 2.x dispatch uses a
+  private server so tools stay inside the selected process boundary; unknown
+  CLI versions refuse real dispatch. Empty or failed listings remain unavailable.
+  Large legacy login listings survive strict pipeline checks, the live deadline
+  covers both probes and startup, and failed direct probes record a terminal seat
+  event in durable research history.
+  Workflow admission confirms SQLite-only logins, including pinned rosters,
+  before rejecting readiness. Direct OpenCode probes check login for the
+  standard, fast and research seats.
+  Environment-only logins also receive runtime confirmation before admission.
+  Background login and version checks use the worker's project directory, so
+  directory-sensitive executables select the correct private-server flags.
+  Direct `probe-single --dry-run` previews stop before health checks or provider
+  execution.
+  Both `OCTOPUS_SKIP_PROVIDER_PROBES=true` and `=1` suppress OpenCode version
+  and login probes and refuse real dispatch without selecting a server mode.
+  OpenCode 2.x login validation also works without `jq`, using Python 3's
+  standard-library JSON parser while retaining connection validation.
+  Admission confirms logins even when static token evidence is present and
+  checks project-relative executables from the worker directory. Failed command
+  construction closes its durable research-seat event.
+  MCP research also forwards the optional Mistral environment credential to
+  OpenCode, while isolated model children keep their own credential boundary.
+  Unrelated CLI and shell-function provider children omit that unselected Mistral
+  credential while preserving their own authentication and the parent environment.
+  OpenCode 2.x bounded Tangle refuses model tasks regardless of storage writability.
+  Saved logins and filesystem boundaries remain
+  intact; support for that execution path still requires a safe state projection.
+  Failed live checks retain `opencode auth login` guidance. Health diagnostics
+  use the application logger or stderr, including on macOS, and a failed health
+  handler lookup closes the direct probe's durable research-seat event.
+  Rejected timeout settings, context budgets, command validation, environment
+  setup and result preparation also close the seat, including under shell
+  error-exit mode, so rejected work does not remain marked as running.
+  Rejected explicit models also close the research seat and preserve the
+  resolver's failure status, whether or not shell error-exit mode is enabled.
+  Addresses [#1172](https://github.com/nyldn/claude-octopus/issues/1172).
+
+- Council quota classification requires a terminal marker validated against
+  complete stdout. A truncated diagnostic tail cannot establish a session
+  limit. Quote checks retain patch-introduction ownership and reuse elision
+  fragments across source lines.
+
+- Council waits retain the settle hold when a finished round's torn summary is
+  repaired. Early completion requires an observed, matching running beacon.
+
+- Council quote checks preserve template delimiters and escaped pipes inside
+  regexes and strings. Model fallback requires a complete capacity diagnostic
+  from one stream, so quoted output cannot supply a missing error cause.
+
+- Council fallback records keep the model that answered and the last model
+  proven capacity-limited. Session limits remain visible beside stderr warnings,
+  and explicit source claims stay checked when they introduce an example.
+
+- Council quote layout matching preserves spaces inside quoted literals and
+  requires an explicit ellipsis wherever source text is omitted. An unpunctuated
+  list item ends the previous item's citation scope; a colon still introduces
+  attributed bullets. Empty Antigravity fallbacks return the original capacity
+  failure and retain diagnostics from stdout and stderr. Command arguments and
+  operator spacing remain significant when verifying quoted source.
+
+- Antigravity changes models only for retryable capacity errors and applies
+  TTY recovery to fallback attempts. Crash-retry diagnostics remain separate
+  from terminal quota classification. Standalone failed session-limit statuses
+  remain detectable while quoted or streaming reply text leaves seats available.
+- Missing extensionless file claims retain their citation position. Result
+  wording alone no longer exempts a current-source claim from verification.
+
+- Council seats with real citations are no longer marked fabricated for
+  quotes the verifier misread (sail-cruisey #3316, #3338, #3339, #3340). A
+  multi-line condition written on one line verifies when only layout around
+  punctuation outside literals differs. A code span stays inside one paragraph, a backtick
+  opened in link text is literal, and paired `` \` `` inside a span are
+  literal backticks. Citations of files with no extension, such as
+  `.githooks/pre-commit:48`, bind their quotes. The inputs a seat says it fed
+  to the code under review, and code it says the file avoids, are its own
+  words, not quotes of a file. After a content verb, "built as" marks the
+  seat's own input only when "I" or "we" built it. A fence partial in a cited
+  file but complete in the reviewed diff is not counted as partial.
+
+- Council seats with real citations are no longer marked fabricated for
+  quoting the error a probe threw (`RangeError: Maximum call stack size
+  exceeded`), for an example they made up ("a template like `...`"), or for
+  a quote that drops the file's inner backticks, which a single-backtick span
+  cannot hold (sail-cruisey #3386). A runtime error attributed to a cited
+  file is still checked.
+
+- A quote with `$n` for a numbered placeholder, or abbreviated with `...`
+  (`!== "POST" || ! ... endsWith(...)`), verifies when its retained fragments match one line of the
+  cited file (sail-cruisey #3389). A basename that two files share, such as
+  `sentry.ts:169`, now resolves to the one the seat also cited by full path,
+  so its quotes are checked instead of left unresolved (sail-cruisey #3390).
+  A span on a new list item is no longer attributed to the previous item's
+  citation.
+
+- `council-wait.sh --pool --supersede-key` no longer returns the previous
+  round when the wait starts before the new round's run dir exists
+  (sail-cruisey #3364). A keyed round already finished at first sight is held
+  for `--settle` seconds (default 60) while a newer same-key round may appear;
+  `--since` skips the hold. `--background` drops the 570-second bound for a
+  wait run as a background task, and a timeout now says the round may still
+  be running and how to re-arm.
+
+- Abbreviated council quotes must match whole identifiers, so a longer name or
+  string token cannot make invented source evidence pass verification.
+- Runtime diagnostics in plain-text fences do not count as invented source.
+  Runtime-error quotes beside an adjacent source citation still need verification.
+
+## [11.23.0] - 2026-11-12
+
+### Added
+
+- UberLLM is available as its own OpenAI-compatible provider seat. Select a
+  model explicitly through its environment variables or `providers.json`.
+  Readiness, fleet selection and MCP honor that model and its allowlist.
+  Gateway seats remain outside Council voting. See [#1288](https://github.com/nyldn/claude-octopus/pull/1288).
+
+### Fixed
+
+- Named OpenAI-compatible presets retain their own endpoint, credential and
+  model settings when the generic slot is configured. Direct helper calls no
+  longer send a preset's credential to the generic slot's host or inherit its
+  model. Atlas Cloud admission and dispatch share configured defaults and exact
+  model pins. Explicit flags keep precedence. Set the preset-specific model
+  variable or provider default if you previously used `OPENAI_COMPAT_MODEL`.
+  See [#1300](https://github.com/nyldn/claude-octopus/pull/1300) and
+  [#1302](https://github.com/nyldn/claude-octopus/pull/1302), addressing the
+  isolation reports in [#1299](https://github.com/nyldn/claude-octopus/issues/1299).
+  Custom-provider registration remains a separate open enhancement.
+- Managed Tangle validates declared output artifacts separately from read-only
+  context references. Missing outputs and unavailable coverage evidence remain
+  blocking. See [#1289](https://github.com/nyldn/claude-octopus/pull/1289).
+- Council reviews no longer reject reviewer-created test inputs as fabricated
+  source quotations. Explicit source claims remain checked. Optional partial
+  quote refinement has bounded work budgets and cannot prevent required
+  evidence checks. See [#1260](https://github.com/nyldn/claude-octopus/pull/1260).
+- Research summaries track each seat separately, so one seat's timeout cannot
+  hide another seat's successful output. Interrupted workers and reclaimed
+  output claims keep accurate status and preserve saved results. See
+  [#1243](https://github.com/nyldn/claude-octopus/pull/1243).
+- Quota and authentication failures retain their cause and retry behavior.
+  Cleanup stops owned processes, preserves external termination status and
+  leaves other seats' status intact. Circuit breakers recover without turning
+  an expired cooldown into an indefinite block. See [#1266](https://github.com/nyldn/claude-octopus/pull/1266).
+- The token-extraction CLI starts through its TypeScript runner, uses checked
+  options and handles CSS names and TypeScript output generation correctly.
+  Its Node.js requirement matches its dependencies. See [#1298](https://github.com/nyldn/claude-octopus/pull/1298).
+
+### Documentation and maintenance
+
+- Dispatch documentation explains fallback selection and fail-loud behavior
+  consistently. See [#1227](https://github.com/nyldn/claude-octopus/pull/1227).
+- Full unit coverage retains every suite and its timeout while using measured
+  timings across six macOS shards and four Linux shards.
+- The Tangle fix is listed here because it landed after the published
+  `11.22.2` tag, despite its earlier changelog placement.
 
 ## [11.22.2] - 2026-11-11
 
 ### Fixed
-
-- Managed Tangle output coverage checks declared artifacts rather than requiring model responses to repeat read-only context references. Missing outputs and unavailable coverage evidence remain blocking.
 
 - Large `probe-single --perspective-file` prompts pass startup validation
   promptly without rewriting their content. Empty and whitespace-only files

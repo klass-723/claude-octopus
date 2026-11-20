@@ -198,6 +198,7 @@ case "$max_payload_bytes" in
     ''|*[!0-9]*) max_payload_bytes=1048576 ;;
     *)
         _mpb="${max_payload_bytes#"${max_payload_bytes%%[!0]*}"}"; [[ -n "$_mpb" ]] || _mpb=0
+        # shellcheck disable=SC2071 # Equal-width digit strings avoid arithmetic overflow.
         if (( ${#_mpb} > 19 )) || { (( ${#_mpb} == 19 )) && [[ "$_mpb" > "9223372036854775807" ]]; }; then
             max_payload_bytes=1048576
         else
@@ -263,7 +264,8 @@ import json
 import re
 import sys
 try:
-    text = "\n".join(open(path).read() for path in sys.argv[1:])
+    streams = [open(path).read() for path in sys.argv[1:]]
+    text = "\n".join(streams)
     records = [json.loads(line.strip().split("AGY_ERROR:", 1)[1])
                for line in text.splitlines() if line.lstrip().startswith("AGY_ERROR:")]
     if records:
@@ -273,8 +275,13 @@ try:
                            and "no capacity available for model" in str(item.get("short_error", "")).lower()
                            for item in records))
     else:
-        allowed = (bool(re.search(r"\b(?:code|HTTP)\s+503\b", text, re.I))
-                   and "no capacity available for model" in text.lower()
+        # A complete provider diagnostic must carry its own status and cause.
+        # Do not combine quoted stdout with an unrelated stderr status.
+        capacity_line = re.compile(
+            r"^(?:error:\s*)?(?:(?:Our servers are experiencing high traffic right now, "
+            r"please try again in a minute\.\s*)?\(?UNAVAILABLE\s*\((?:code|HTTP)\s+503\)\s*:\s*"
+            r"|(?:code|HTTP)\s+503\s*:\s*)No capacity available for model\s+[^`\r\n]+$", re.I)
+        allowed = (any(capacity_line.match(line.strip()) for stream in streams for line in stream.splitlines())
                    and not re.search(r'"retryable"\s*:\s*false', text, re.I))
     sys.exit(0 if allowed else 1)
 except (OSError, ValueError, RecursionError):
@@ -388,6 +395,8 @@ fi
 # list of `agy models` IDs or labels). Only Gemini models are accepted: the agy
 # seat must stay a Google vendor, distinct from the Claude lead and Codex.
 if (( rc != 0 )) && [[ -n "${OCTOPUS_AGY_FALLBACK_MODELS:-}" ]] && _agy_no_capacity; then
+    _agy_capacity_rc="$rc"
+    _agy_capacity_diagnostic="$(printf '%s\n%s' "$(<"$stderr_file")" "$(<"$stdout_file")")"
     _agy_busy="$(_agy_busy_model)"; [[ -n "$_agy_busy" ]] || _agy_busy="$model"
     IFS=',' read -r -a _agy_fallbacks <<< "$OCTOPUS_AGY_FALLBACK_MODELS"
     for _agy_next in "${_agy_fallbacks[@]}"; do
@@ -416,6 +425,13 @@ if (( rc != 0 )) && [[ -n "${OCTOPUS_AGY_FALLBACK_MODELS:-}" ]] && _agy_no_capac
                 && command -v script >/dev/null 2>&1 && _agy_tty_error; then
             run_agy_pty
             rc=$?
+        fi
+        if (( rc == 0 )) && [[ ! "$(<"$stdout_file")" =~ [^[:space:]] ]]; then
+            printf '%s\n' "$_agy_capacity_diagnostic" >> "$stderr_file"
+            printf '%s\n' "agy-exec.sh: fallback '$_agy_next' returned no answer" >> "$stderr_file"
+            rc="$_agy_capacity_rc"
+            # An empty answer did not establish that this model was busy.
+            continue
         fi
         (( rc != 0 )) && _agy_no_capacity && { _agy_busy="$_agy_next"; continue; }
         # Name the answering model only when it answered; a failed attempt must

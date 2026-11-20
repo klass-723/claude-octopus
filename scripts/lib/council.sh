@@ -3716,17 +3716,28 @@ def in_table(start, end):
     i = bisect_right(table_starts, start) - 1
     return i >= 0 and end <= table_ranges[i][1]
 
+def operator_unescaped(text):
+    # Only unambiguous, spaced operators outside literals may lose Markdown escapes.
+    literals = list(QUOTED_LITERAL.finditer(text))
+    chunks, cursor = [], 0
+    for literal in literals:
+        gap = text[cursor:literal.start()]
+        if any(char in gap for char in "'\"`/#"):
+            return text
+        chunks.append(re.sub(r"(?<=\s)\\\|\\\|(?=\s)", "||", gap))
+        chunks.append(literal.group())
+        cursor = literal.end()
+    tail = text[cursor:]
+    if any(char in tail for char in "'\"`/#"):
+        return text
+    chunks.append(re.sub(r"(?<=\s)\\\|\\\|(?=\s)", "||", tail))
+    return "".join(chunks)
+
 def unescaped(variants, table):
-    # "\|" is how a seat writes "|" inside a Markdown table cell (sail-cruisey
-    # #3125: `a \|\| b` for `a || b`). Only in a table cell: elsewhere "\|" is
-    # literal and can change a regular expression. Quote side only, after the
-    # literal variant: source text keeps its backslashes, so a quote that drops
-    # a source line's own "\|" still does not match it.
+    # Table-cell pipes are Markdown escapes. Elsewhere regexes, strings and
+    # ambiguous syntax keep their backslashes; only clear || operators vary.
     if not table:
-        # sail-cruisey #3425: a doubled "\|\|" outside a table is the || operator
-        # escaped out of habit; a regular expression rarely holds it. A single
-        # "\|" stays literal.
-        return variants + [v.replace("\\|\\|", "||") for v in variants if "\\|\\|" in v]
+        return variants + [operator_unescaped(v) for v in variants if "\\|\\|" in v]
     return variants + [v.replace("\\|", "|") for v in variants if "\\|" in v]
 
 # A seat that writes a quoted source line as a string literal ("…", with \"
@@ -3804,12 +3815,24 @@ def load(path):
     return entry
 
 ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…)\s*")
-def find_lines(hay, starts, line_numbers, needle, limit=50, following=()):
+def fragment_boundary(hay, at, piece):
+    def identifier(ch):
+        return ch.isalnum() or ch in "_$"
+    end = at + len(piece)
+    return not ((identifier(piece[0]) and at > 0 and identifier(hay[at - 1]))
+                or (identifier(piece[-1]) and end < len(hay) and identifier(hay[end])))
+
+def find_lines(hay, starts, line_numbers, needle, limit=50, following=(), word_bounds=False):
     found, at = [], hay.find(needle)
     while at >= 0 and len(found) < limit:
+        if word_bounds and not fragment_boundary(hay, at, needle):
+            at = hay.find(needle, at + 1)
+            continue
         end = at + len(needle)
         for piece in following:
             pos = hay.find(piece, end)
+            while pos >= 0 and word_bounds and not fragment_boundary(hay, pos, piece):
+                pos = hay.find(piece, pos + 1)
             if pos < 0:
                 return found  # Later starts cannot complete this sequence either.
             end = pos + len(piece)
@@ -3818,24 +3841,68 @@ def find_lines(hay, starts, line_numbers, needle, limit=50, following=()):
     return found
 
 # sail-cruisey #3316: a seat joins "if (" / "a &&" / "b" / ") {" onto one line
-# as "if (a && b)". A space next to punctuation is layout, not content, so a
-# quote that misses only on that verifies. A space between two words still
-# counts: "await limit" is never "awaitlimit".
-LAYOUT_SPACE = re.compile(r" (?=[^\w ])|(?<=[^\w ]) ")
-# sail-cruisey #3386: a single-backtick span cannot hold a backtick, so a seat
-# quoting `describe("... `map`")` drops the file's inner backticks.
-BACKTICK = re.compile(r"`")
+# as "if (a && b)". Ignore only parenthesis padding outside literals.
+# Ambiguous slash/hash syntax and unmatched quotes retain their whitespace.
+LAYOUT_SPACE = re.compile(r"(?<=\() | (?=\))")
+QUOTED_LITERAL = re.compile(r"""'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`""")
+def layout_removed(text):
+    literals = list(QUOTED_LITERAL.finditer(text))
+    cursor = 0
+    for literal in literals:
+        if any(c in text[cursor:literal.start()] for c in "'\"`/#"):
+            return []
+        cursor = literal.end()
+    if any(c in text[cursor:] for c in "'\"`/#"):
+        return []
+    removed, index = [], 0
+    for match in LAYOUT_SPACE.finditer(text):
+        while index < len(literals) and literals[index].end() <= match.start():
+            index += 1
+        if index == len(literals) or match.start() < literals[index].start():
+            removed.append(match.start())
+    return removed
+
+def without_positions(text, removed):
+    chunks, cursor = [], 0
+    for at in removed:
+        chunks.append(text[cursor:at])
+        cursor = at + 1
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+def tight_text(text):
+    return without_positions(text, layout_removed(text))
+# A seat may omit paired presentation backticks inside an ordinary string.
+# Backticks delimiting a template literal remain part of the source expression.
 stripped_cache = {}
-def stripped_entry(entry, pattern):
+def presentation_entry(entry):
     hay, starts, line_numbers = entry
-    got = stripped_cache.get((hay, pattern))
+    key = (hay, "string-presentation-backticks")
+    got = stripped_cache.get(key)
     if got is None:
-        removed = [m.start() for m in pattern.finditer(hay)]
-        got = (pattern.sub("", hay), [s - bisect_left(removed, s) for s in starts], line_numbers)
-        stripped_cache[(hay, pattern)] = got
+        removed = []
+        for literal in QUOTED_LITERAL.finditer(hay):
+            body = literal.group()
+            if body[0] in "'\"" and body.count("`") >= 2 and body.count("`") % 2 == 0:
+                removed.extend(literal.start() + m.start() for m in re.finditer("`", body))
+        got = (without_positions(hay, removed),
+               [s - bisect_left(removed, s) for s in starts], line_numbers)
+        stripped_cache[key] = got
     return got
 def tight_entry(entry):
-    return stripped_entry(entry, LAYOUT_SPACE)
+    hay, starts, line_numbers = entry
+    key = (hay, "literal-safe-layout")
+    if key not in stripped_cache:
+        removed = []
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else len(hay)
+            # Include a next-line closing parenthesis so its preceding newline
+            # space is padding, while literal and ambiguous-syntax guards apply.
+            scan_end = end + int(end < len(hay) and hay[end] == ")")
+            removed.extend(start + at for at in layout_removed(hay[start:scan_end]))
+        stripped_cache[key] = (without_positions(hay, removed),
+                               [s - bisect_left(removed, s) for s in starts], line_numbers)
+    return stripped_cache[key]
 
 def match_variant(text, entry):
     hay, starts, line_numbers = entry
@@ -3844,14 +3911,14 @@ def match_variant(text, entry):
     if lines:
         return lines
     # Elided fragments must occur in source order without reusing characters.
-    pieces = [p for p in ELLIPSIS.split(needle) if specific(p)]
+    pieces = [p for p in ELLIPSIS.split(needle) if p]
     if len(pieces) > 1 or (pieces and pieces[0] != needle):
-        lines = find_lines(hay, starts, line_numbers, pieces[0], following=pieces[1:])
+        lines = find_lines(hay, starts, line_numbers, pieces[0], following=pieces[1:], word_bounds=True)
         return lines or elided_lines(entry, needle)
     if specific(needle):
-        lines = find_lines(*tight_entry(entry), LAYOUT_SPACE.sub("", needle))
+        lines = find_lines(*tight_entry(entry), tight_text(needle))
         if not lines and "`" not in needle and "`" in hay:
-            lines = find_lines(*stripped_entry(entry, BACKTICK), needle)
+            lines = find_lines(*presentation_entry(entry), needle)
         if not lines and PLACEHOLDER.search(needle):
             lines = pattern_lines(entry, r"\$\d+".join(re.escape(part) for part in PLACEHOLDER.split(needle)))
         if not lines and ELLIPSIS.search(needle):
@@ -3867,28 +3934,23 @@ def pattern_lines(entry, pattern):
     return [line_numbers[bisect_right(starts, m.start()) - 1] if starts else 1
             for m in re.finditer(pattern, hay)]
 
-# sail-cruisey #3389: "`!== "POST" || !endsWith(...)`" marks itself abbreviated.
-# It verifies when its tokens appear in order on one source line, with at
-# least two names and every token the file's.
+# Explicit ellipses may skip source, but each retained fragment stays contiguous.
+# Formatting changes cannot hide an unmarked operator or identifier qualifier.
 TOKEN = re.compile(r"\w+|[^\w\s]")
 def elided_lines(entry, needle):
     tokens_in = TOKEN.findall(ELLIPSIS.sub(" ", needle))
     if len(tokens_in) < 4 or sum(1 for t in tokens_in if len(t) >= 3 and t[0].isalpha()) < 2:
         return []
-    # The file text is one space-joined string, so test each source line alone,
-    # and bound the span so a joined diff side cannot carry it either.
-    # A whole name must survive abbreviation: endsWith is not neverendsWith
-    # or endsWithExtra. Include $ alongside Unicode word characters for JS names.
-    pattern = re.compile(r".*?".join(
-        r"(?<![\w$])" + re.escape(t) + r"(?![\w$])" if re.fullmatch(r"\w+", t)
-        else re.escape(t) for t in tokens_in))
-    hay, starts, line_numbers = entry
-    limit = 2 * len(needle) + 40
+    pieces = [tight_text(p) for p in ELLIPSIS.split(needle) if p]
+    if not pieces:
+        return []
+    hay, starts, line_numbers = tight_entry(entry)
     found = []
+    following = pieces[1:]
     for i, line_start in enumerate(starts):
         line_end = starts[i + 1] if i + 1 < len(starts) else len(hay)
-        match = pattern.search(hay, line_start, line_end)
-        if match and match.end() - match.start() <= limit:
+        if find_lines(hay[line_start:line_end], [], [], pieces[0],
+                      following=following, word_bounds=True):
             found.append(line_numbers[i])
     return found
 
@@ -4053,10 +4115,7 @@ def reserve_optional_scan(work):
     optional_scan_work -= work
     return True
 
-all_cited = []
-for _, _, path, _ in citations:
-    if path not in all_cited:
-        all_cited.append(path)
+all_cited = list(dict.fromkeys(path for _, _, path, _ in citations))
 
 # Removed/added sides of the reviewed diff. Reviewers routinely quote deleted
 # code ("this guard was removed"); that code is in no working-tree file, so it
@@ -4255,6 +4314,9 @@ def proposes(text):
         previous_start = clause_start(text, previous_end)
         if PROPOSAL.search(text, previous_start, previous_end):
             start = previous_start
+    # Classify patch lead-ins before masking presentational source verbs.
+    # Preserve offsets for the remaining source and first-person checks.
+    text = re.sub(r"\b(?:here|there)\s+is\b", lambda m: " " * len(m.group()), text, flags=re.I)
     for claim in EXPLICIT_SOURCE_CLAIM.finditer(text, start):
         # A nearby proposed replacement can own this ambiguous continuation.
         if (re.fullmatch(r"and\s+(?:the|this)\s+code\s+is", claim.group(), re.I)
@@ -4268,14 +4330,16 @@ def proposes(text):
     verb_end = None
     previous_end = start
     for match in PROPOSAL.finditer(text, start):
-        if OWN_INPUT.fullmatch(match.group(0)):
+        own_input = OWN_INPUT.fullmatch(match.group(0))
+        example_like = match.group(0).lower().endswith(" like")
+        if own_input or example_like:
             # Advance through verbs once. A direct I/we subject cannot contain
             # an earlier proposal, so its search need not rescan that prefix.
             while verb is not None and verb.end() <= match.start():
                 verb_end = verb.end()
                 verb = next(verbs, None)
-            if verb_end is not None and not FIRST_PERSON_SUBJECT.search(
-                    text, max(verb_end, previous_end), match.start()):
+            if verb_end is not None and (example_like or not FIRST_PERSON_SUBJECT.search(
+                    text, max(verb_end, previous_end), match.start())):
                 previous_end = match.end()
                 continue
         return True
@@ -4311,15 +4375,16 @@ def association(start):
 
 # sail-cruisey #3390: "... (`x.ts:375`).\n- `GET https://h/p?q=a b=c` ships"
 # starts a new claim. A citation's sentence ends at a new list item.
-NEXT_ITEM = re.compile(r"[.!?][)\]`*_]*[ \t]*\n[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]")
+NEXT_ITEM = re.compile(r"(?:[.!?][)\]`*_]*|[^:\s])[ \t]*\n[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]")
 def attribution(token, gap):
     if token is None or len(gap) > 200 or gap.count("\n") > 2 or NEXT_ITEM.search(gap):
         return None
     # A source verb in this bounded clause still attributes the quote when
     # ordinary modifiers follow it. A new sentence or a proposal ends that claim.
     start = clause_start(gap, len(gap))
+    # Keep ^ anchored to the original gap when skipping earlier clauses.
     source_clause = ((SOURCE_SUBJECT.search(gap, start) if start else SOURCE_VERB.search(gap))
-                     and not re.search(r"(?:^|[,;:]|\b(?:and|but|so|while)\b)\s*(?:I|we)\s+(?:estimate|compute|calculate)\b", gap, re.I))
+                     and not re.compile(r"(?:^|[,;:]|\b(?:and|but|so|while)\b)\s*(?:I|we)\s+(?:estimate|compute|calculate)\b", re.I).search(gap, start))
     if proposes(gap) or (not source_clause and any(
             word.lower() not in GAP_WORDS for word in re.findall(r"[A-Za-z]+", gap))):
         return None
@@ -4504,26 +4569,26 @@ for start, end, kind, block, removed_block, info in units:
         result["quotes_checked"] += 1
         result["quotes_unverifiable"] += 1
         continue
-    bound_paths = []
-    for path, _ in bound:
-        if path not in bound_paths:
-            bound_paths.append(path)
+    # Keep citation order and line bindings without repeated linear path scans.
+    bound_lines = {}
+    for path, line in bound:
+        bound_lines.setdefault(path, []).append(line)
     # A miss is only checkable when every file the quote is bound to loaded; a
     # readable neighbor cannot stand in for an oversized or unreadable bound file.
     readable = True
     verified = near = partial = False
     near_budget = 65536
     partial_budget = 65536
-    for path in bound_paths + [p for p in all_cited if p not in bound_paths]:
+    for path in list(bound_lines) + [p for p in all_cited if p not in bound_lines]:
         # Once complete, only later bound files can improve near-line reporting.
-        if verified and not partial and path not in bound_paths:
+        if verified and not partial and path not in bound_lines:
             break
         entry = load(path)
         if entry is None:
-            if path in bound_paths:
+            if path in bound_lines:
                 readable = False
             continue
-        if verified and partial and path not in bound_paths:
+        if verified and partial and path not in bound_lines:
             # Unbound files only refine an already verified fence's report.
             # Keep the partial result if a complete entry exceeds this budget;
             # slicing it could mistake a truncated source for complete evidence.
@@ -4531,7 +4596,7 @@ for start, end, kind, block, removed_block, info in units:
             if entry_bytes > partial_budget:
                 break
             partial_budget -= entry_bytes
-        cited_lines = [line for p, line in bound if p == path]
+        cited_lines = bound_lines.get(path, [])
         if verified and not partial:
             # Near-line counts are supplemental: cap refinement after complete
             # verification so large later files cannot exhaust the verdict's
@@ -5171,7 +5236,7 @@ council_seat_quota_limited() {
     [[ -s "$file" ]] || return 1
     if ! declare -F quota_watcher_has_match >/dev/null 2>&1; then
         # shellcheck source=/dev/null
-        source "${BASH_SOURCE[0]%/*}/quota-watcher.sh" 2>/dev/null || return 1
+        source "${_council_registry_dir}/quota-watcher.sh" 2>/dev/null || return 1
     fi
     quota_watcher_has_match "$file" /dev/null stream ||
         octo_quota_session_limit_line "$file" capture >/dev/null
@@ -5626,8 +5691,10 @@ council_run_chair_fallback() {
             return 0
         fi
         local fallback_stderr="${COUNCIL_RUN_DIR}/stderr/$(basename "$output_path" .md).log"
-        rm -f "$fallback_stderr" 2>/dev/null
-        _OCTOPUS_SEAT_STDERR_FILE="$fallback_stderr" \
+        local fallback_model_file="${COUNCIL_RUN_DIR}/models/$(basename "$output_path" .md).txt"
+        local fallback_model_used="" fallback_model_busy=""
+        rm -f "$fallback_stderr" "$fallback_model_file" 2>/dev/null
+        _OCTOPUS_SEAT_STDERR_FILE="$fallback_stderr" _OCTOPUS_AGY_MODEL_USED_FILE="$fallback_model_file" \
             council_dispatch_member_detached "$member_json" "independent-advice" "$output_path" || dispatch_rc=$?
         dispatch_timeout_provenance="$COUNCIL_LAST_DISPATCH_TIMEOUT_PROVENANCE"
         contribution_json="$(council_contribution_record_json "$output_path" "$evidence_root" "$artifact_digest")" \
@@ -5644,6 +5711,13 @@ council_run_chair_fallback() {
             seat_org="$(jq -r '.provider_org // ""' <<< "$member_json")"
             seat_model="$(jq -r '.model // ""' <<< "$member_json")"
             seat_model_family="$(jq -r '.model_family // ""' <<< "$member_json")"
+            if [[ -s "$fallback_model_file" ]]; then
+                { IFS= read -r fallback_model_used; IFS= read -r fallback_model_busy; } < "$fallback_model_file" || true
+                if [[ -n "$fallback_model_used" ]]; then
+                    seat_model="$fallback_model_used"
+                    seat_model_family="$(council_model_family "$provider" "$seat_model")"
+                fi
+            fi
             [[ -n "$seat_model_family" ]] || seat_model_family="$(council_model_family "$seat_agent_spec" "$seat_model")"
             resp_bytes="$(wc -c < "$output_path" 2>/dev/null | tr -d '[:space:]')"
             [[ -z "$resp_bytes" ]] && resp_bytes=0
@@ -5676,6 +5750,8 @@ council_run_chair_fallback() {
                   grounding:($contribution.grounding // null),
                   timeout_provenance:(if $timeout_provenance=="" then null else $timeout_provenance end),
                   counted_as_approver:false}')"
+            [[ -z "$fallback_model_used" ]] || seat_rec="$(jq -c --arg b "$fallback_model_busy" \
+                '.model_fallback = {from:$b, reason:"no-capacity-503"}' <<< "$seat_rec")"
             COUNCIL_SEAT_RECORDS_JSON="$(jq -c ". + [$seat_rec]" <<< "${COUNCIL_SEAT_RECORDS_JSON:-[]}")"
             [[ "$seat_status" != "responded" ]] || return 0
             # Keep completed output and its rejected record for diagnosis while
