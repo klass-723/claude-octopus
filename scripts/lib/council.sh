@@ -1941,6 +1941,7 @@ EOF
         _OCTOPUS_COUNCIL_CONTEXT_ALLOWANCE="$_allowance" \
         _OCTOPUS_SEAT_USAGE_FILE="${COUNCIL_RUN_DIR:+${COUNCIL_RUN_DIR}/usage.jsonl}" \
         _OCTOPUS_SEAT_USAGE_LABEL="${dispatch_phase}|${persona}" \
+        _OCTOPUS_COUNCIL_SEAT=1 \
             run_agent_sync_consultative "$agent_type" "$prompt" "$_seat_timeout" "$persona" "council"
         return $?
     fi
